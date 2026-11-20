@@ -30,7 +30,8 @@ export type SignInStage = 'credential' | 'second-factor';
  * Why an attempt failed. Closed: a new reason is a new member, never a string
  * the app has to guess at.
  *
- * - `credential` — the password was wrong, or no account holds the identifier
+ * - `credential` — the password was wrong, or no account holds the identifier;
+ *   or a passkey assertion failed for a known credential
  * - `secondFactor` — a wrong second-factor proof at `mfa/verify`
  * - `refused` — `admit` refused it
  * - `accountDisabled` / `pendingDeletion` — the package refused the account
@@ -54,7 +55,11 @@ export interface SignInIdentifier
 /** One sign-in attempt, as `admit` and `settled` see it. */
 export interface SignInAttempt
 {
-    /** The account, or null when the identifier names none. */
+    /**
+     * The account, or null when the identifier names none — and in a refusal
+     * told after the rollback, null for an account the refused attempt would
+     * have created.
+     */
     user: User | null;
     channel: SignInChannel;
     stage: SignInStage;

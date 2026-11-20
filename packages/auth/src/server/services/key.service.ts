@@ -44,7 +44,7 @@ import type { DeviceRegistrationChannel } from '../events';
 import type { NewUserPublicKey, UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
 import { signInGuard, type SignInAttempt, type SignInIdentifier } from '../lib/sign-in-guard';
-import { assertSignInAdmits, reportSignIn } from './sign-in-guard.service';
+import { assertSignInAdmits, reportAccountRefusal, reportSignIn } from './sign-in-guard.service';
 
 /**
  * Every door a key row is written through: the eleven sign-in channels, and
@@ -610,18 +610,22 @@ async function lockAdmittedAccount(params: RegisterPublicKeyParams): Promise<Use
         throw inactiveAccountError({ reason: 'accountMissing' }, params);
     }
 
+    // Reported to the app's `settled` once this transaction has rolled back
+    // (`reportRefusal`), on a sign-in channel: the package's refusal of the
+    // account, and the app's.
+    const attempt = signInGuard() && signInAttemptOf(params, account);
     const refusal = await accountRefusal(account);
     if (refusal)
     {
+        await reportAccountRefusal(attempt, refusal, params.keyId);
         throw inactiveAccountError(refusal, params);
     }
 
     // The app's say, after the package's and under the same lock: the one
     // `admit` that decides a sign-in, whatever the channel asked before.
-    const attempt = signInGuard() && signInAttemptOf(params, account);
     if (attempt)
     {
-        await assertSignInAdmits(attempt);
+        await assertSignInAdmits(attempt, params.keyId);
     }
 
     return account;

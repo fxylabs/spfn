@@ -32,8 +32,8 @@ import { registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
-import { accountRefusal, admissionRefusalError, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
-import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer, recordSignInFailure } from './sign-in-guard.service';
+import { accountRefusal, admissionRefusalError, type PrincipalCredential } from './admission.service';
+import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer, reportAccountRefusal } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import type { User } from '../entities/users';
 import { authLoginEvent, authRegisterEvent } from '../events';
@@ -346,13 +346,16 @@ async function accountExists(email?: string, phone?: string): Promise<boolean>
  *    and answered `SignInRefusedError` whatever the password was, so the
  *    refusal is neither a password oracle nor, by timing, an account oracle;
  * 2. a failure is told to `settled` in a transaction of its own, under the
- *    account lock, committed before the answer, and `admit` asked again there
+ *    account lock, committed before the answer — a wrong password with
+ *    `admit` asked again there, a refusal from step 1 without
  *    (`failedCredentialAnswer`);
  * 3. a right password meets the deciding `admit` under the lock in the
- *    session's transaction (`registerPublicKeyService`).
+ *    session's transaction (`registerPublicKeyService`), whose refusal is told
+ *    once that transaction has rolled back.
  *
  * The account refusals the package makes (`AccountDisabledError`,
- * `AccountPendingDeletionError`) keep their order: after the password.
+ * `AccountPendingDeletionError`) keep their order: after the password. They
+ * are told to `settled` too (`reportAccountRefusal`).
  *
  * @throws Error when the guard is configured and the caller holds a transaction
  */
@@ -417,15 +420,6 @@ function passwordAttempt(user: User | null, params: LoginParams): SignInAttempt
         userAgent: params.userAgent,
         webProxy: params.webProxy === true,
     };
-}
-
-/** A right password on an account the package refuses, told to `settled`. Nothing without a guard. */
-async function reportAccountRefusal(attempt: SignInAttempt | null, refusal: AdmissionRefusal, keyId: string): Promise<void>
-{
-    if (attempt && (refusal.reason === 'accountDisabled' || refusal.reason === 'pendingDeletion'))
-    {
-        await recordSignInFailure(attempt, refusal.reason, keyId);
-    }
 }
 
 /**

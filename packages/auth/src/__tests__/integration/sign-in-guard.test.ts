@@ -16,6 +16,9 @@
  *    address standing in for `mfa/verify`'s
  * 9. `deletion/cancel` as a password oracle for a refused account
  * 10. an app that did not turn the guard on paying for it
+ * 11. a history that omits exactly the attempts that were refused: the
+ *     deciding `admit`, the package's refusal of an account on every channel,
+ *     a passkey assertion that fails for a known credential
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -456,6 +459,30 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         return { challenge: (await response.json()).challenge.secret as string, keyId: key.keyId };
     }
 
+    /** A passkey registered on `email`'s account, and the history emptied of the sign-in that did it. */
+    async function registerPasskey(email: string): Promise<FixtureAuthenticator>
+    {
+        const { authorization } = await signIn(email);
+        const authenticator = await FixtureAuthenticator.create();
+        const registration = (await (await post('/_auth/passkeys/register/options', {}, { authorization })).json()).challenge;
+        expect((await post('/_auth/passkeys/register/verify', {
+            response: authenticator.attest({ challenge: registration, origin: ORIGIN, rpId: RP_ID }),
+        }, { authorization })).status).toBe(200);
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+
+        return authenticator;
+    }
+
+    async function passkeyLogin(authenticator: FixtureAuthenticator, origin = ORIGIN, key = deviceKeyBody())
+    {
+        const challenge = (await (await post('/_auth/passkeys/login/options', {})).json()).challenge;
+
+        return await post('/_auth/passkeys/login/verify', {
+            response: authenticator.assert({ challenge, origin, rpId: RP_ID, counter: 1 }),
+            ...key,
+        });
+    }
+
     async function challengeRow(keyId: string)
     {
         const [row] = await getTestDb().select().from(mfaChallenges).where(eq(mfaChallenges.keyId, keyId));
@@ -679,6 +706,16 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(drive, `no driver for sign-in channel ${door}; add one to CHANNEL_DRIVERS`).toBeDefined();
 
         await drive!();
+
+        // Told once, committed: on a channel that creates the account the
+        // refused account was never created, and the record names none.
+        const creates = ['register', 'signup-link', 'invitation'].includes(door);
+        expect((await committedHistory()).filter(row => row.result === 'failed')).toMatchObject([{
+            channel: door === 'mfa-verify' ? 'password' : door,
+            stage: door === 'mfa-verify' ? 'second-factor' : 'credential',
+            reason: 'refused',
+            ...(creates ? { user_id: null } : {}),
+        }]);
     });
 
     it.each([
@@ -1020,6 +1057,133 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(wrong).toEqual(right);
         expect((await userByEmail('cancel@test.com'))!.deletion).toBe('pending');
         expect((await getTestDb().select().from(accountDeletionRequests))[0]!.status).toBe('pending');
+    });
+
+    // ========================================================================
+    // Row 11 — every decided refusal is told, committed
+    // ========================================================================
+
+    it('row 11a — the deciding admit refuses a right password: one committed refused row, though the row admit wrote rolled back', async () =>
+    {
+        const owner = await seedUser('decide@test.com');
+        const key = deviceKeyBody();
+        policy.admit = async (attempt) =>
+        {
+            if (!getTransactionContext())
+            {
+                return undefined;
+            }
+
+            // Written inside the session's transaction: it goes with the session.
+            await history.record({ ...attempt, result: 'failed', reason: 'refused' });
+
+            return LOCKED;
+        };
+
+        await expectRefused(await login('decide@test.com', PASSWORD, {}, key));
+
+        expect(await committedHistory()).toMatchObject([
+            { user_id: owner.id, channel: 'password', stage: 'credential', result: 'failed', reason: 'refused', key_id: key.keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(1);
+    });
+
+    it('row 11b — a refused passkey sign-in, under the route\'s transaction: one committed refused row', async () =>
+    {
+        const owner = await seedUser('pk-locked@test.com');
+        const authenticator = await registerPasskey('pk-locked@test.com');
+        const key = deviceKeyBody();
+
+        refuseEveryone();
+        await expectRefused(await passkeyLogin(authenticator, ORIGIN, key));
+
+        expect(await committedHistory()).toEqual([expect.objectContaining({
+            user_id: owner.id, channel: 'passkey', result: 'failed', reason: 'refused', key_id: key.keyId,
+        })]);
+    });
+
+    it('row 11c — a suspended account signs in by passkey and by web OAuth: one accountDisabled row each', async () =>
+    {
+        const owner = await seedUser('pk-suspended@test.com');
+        const authenticator = await registerPasskey('pk-suspended@test.com');
+        registerOAuthProvider({
+            id: 'superself',
+            isEnabled: () => true,
+            pkce: 'S256',
+            getAuthUrl: (state: string) => `https://mock.example.com/auth?state=${state}`,
+            exchangeCodeForTokens: async () => ({ accessToken: 'a', refreshToken: 'r', expiresIn: 3600 }),
+            getUserInfo: async () => ({ providerUserId: 'oauth-suspended-1', email: 'oauth-suspended@test.com', emailVerified: true }),
+        });
+        const key = generateKeyPair('ES256');
+        const callback = async () =>
+        {
+            const nonce = generateOAuthNonce();
+            const state = await createOAuthState({
+                provider: 'superself', returnUrl: '/', publicKey: key.publicKey, keyId: key.keyId,
+                fingerprint: key.fingerprint, algorithm: 'ES256', nonce,
+            });
+
+            return await oauthCallbackService({ provider: 'superself', code: 'c', state, expectedNonce: [nonce], ip: clientIp });
+        };
+        await callback();
+        const oauthOwner = (await userByEmail('oauth-suspended@test.com'))!;
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        await getTestDb().update(users).set({ status: 'suspended' });
+
+        expect((await passkeyLogin(authenticator)).status).toBe(403);
+        await expect(callback()).rejects.toThrow();
+
+        expect(await committedHistory()).toMatchObject([
+            { user_id: owner.id, channel: 'passkey', result: 'failed', reason: 'accountDisabled' },
+            { user_id: oauthOwner.id, channel: 'oauth', result: 'failed', reason: 'accountDisabled', key_id: key.keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(2);
+    });
+
+    it('row 11d — a passkey assertion that fails: one credential row for a known credential, none for an unknown one', async () =>
+    {
+        const owner = await seedUser('pk-wrong@test.com');
+        const authenticator = await registerPasskey('pk-wrong@test.com');
+        const key = deviceKeyBody();
+
+        expect((await passkeyLogin(authenticator, 'https://elsewhere.example.com', key)).status).toBe(401);
+        expect((await passkeyLogin(await FixtureAuthenticator.create())).status).toBe(401);
+
+        expect(await committedHistory()).toEqual([expect.objectContaining({
+            user_id: owner.id, channel: 'passkey', stage: 'credential', result: 'failed', reason: 'credential', key_id: key.keyId,
+        })]);
+    });
+
+    it('row 11e — suspended between the steps: mfa/verify, a device-code poll and a reset completion each leave one accountDisabled row', async () =>
+    {
+        const second = await seedUser('second@test.com');
+        const { secret } = await enrolTotp('second@test.com');
+        const { challenge } = await openChallenge('second@test.com');
+
+        const approver = await seedUser('device@test.com');
+        const { authorization } = await signIn('device@test.com');
+        const device = deviceKeyBody();
+        const { deviceCode, userCode } = await (await post('/_auth/device/start', device)).json();
+        expect((await post('/_auth/device/approve', { userCode }, { authorization })).status).toBe(200);
+
+        const resetter = await seedUser('reset@test.com');
+        expect((await post('/_auth/password/reset', { email: 'reset@test.com' })).status).toBe(200);
+        const { setupSecret } = await (await post('/_auth/password/reset/confirm', { token: emailedToken('password-reset') })).json();
+        const resetKey = deviceKeyBody();
+
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        await getTestDb().update(users).set({ status: 'suspended' });
+
+        expect((await post('/_auth/mfa/verify', { challenge, code: codeFor(secret) })).status).toBe(401);
+        expect((await post('/_auth/device/poll', { deviceCode })).status).toBe(403);
+        expect((await post('/_auth/password/reset/complete', { setupSecret, password: NEW_PASSWORD, ...resetKey })).status).not.toBe(200);
+
+        expect(await committedHistory()).toMatchObject([
+            { user_id: second.id, channel: 'password', stage: 'second-factor', result: 'failed', reason: 'accountDisabled' },
+            { user_id: approver.id, channel: 'device-code', result: 'failed', reason: 'accountDisabled', key_id: device.keyId },
+            { user_id: resetter.id, channel: 'password-reset', result: 'failed', reason: 'accountDisabled', key_id: resetKey.keyId },
+        ]);
+        expect(await committedHistory()).toHaveLength(3);
     });
 
     // ========================================================================

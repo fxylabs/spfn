@@ -93,9 +93,11 @@ import {
     assertSignInAdmits,
     failedCredentialAnswer,
     recordSignInFailure,
+    reportAccountRefusal,
     reportSignIn,
+    signInAttempt,
 } from './sign-in-guard.service';
-import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
+import type { SignInAttempt } from '../lib/sign-in-guard';
 import {
     assertNotLastListedFactor,
     enrolmentNeedsProof,
@@ -365,11 +367,12 @@ export interface VerifyMfaChallengeResult extends LoginResult
  * The account half of the admission is asked here too, on the primary, before
  * any proof is looked at: an account that is not active spends no recovery
  * code and is charged no failure. The credential half stays where it is, after
- * the activation (`assertSignInAdmitted`).
+ * the activation (`assertSignInAdmitted`). At `mfa/verify` (`verifying`) the
+ * account refused is told to the app's `settled` (`reportAccountRefusal`).
  *
  * @throws MfaVerificationFailedError
  */
-async function spendableChallenge(challengeHash: string): Promise<SpendableChallenge>
+async function spendableChallenge(challengeHash: string, verifying?: VerifyMfaChallengeParams): Promise<SpendableChallenge>
 {
     const row = await mfaChallengesRepository.findByHash(challengeHash);
 
@@ -380,8 +383,18 @@ async function spendableChallenge(challengeHash: string): Promise<SpendableChall
 
     const account = await usersRepository.findByIdOnPrimary(row.userId);
 
-    if (!account || row.keyEpoch !== account.keyEpoch || await accountRefusal(account))
+    if (!account || row.keyEpoch !== account.keyEpoch)
     {
+        throw new MfaVerificationFailedError();
+    }
+
+    const refusal = await accountRefusal(account);
+
+    if (refusal)
+    {
+        const step = verifying && secondStepOf(row, account, verifying);
+        await reportAccountRefusal(step?.attempt ?? null, refusal, row.keyId);
+
         throw new MfaVerificationFailedError();
     }
 
@@ -394,17 +407,27 @@ async function spendableChallenge(challengeHash: string): Promise<SpendableChall
  * the account active, and the challenge of its current key generation. A
  * suspension or a revoke-all that committed while the proof was being checked
  * refuses the activation here; one that arrives later waits for it, and then
- * revokes the key it activated.
+ * revokes the key it activated. An account refused here is told to the app's
+ * `settled` once the transaction has rolled back (`reportAccountRefusal`).
  *
  * @returns the account as of the lock
  * @throws MfaVerificationFailedError
  */
-async function assertAccountStillAdmits(row: MfaChallenge): Promise<User>
+async function assertAccountStillAdmits(row: MfaChallenge, step: SecondStep | null): Promise<User>
 {
     const account = await usersRepository.lockAccount(row.userId);
 
-    if (!account || row.keyEpoch !== account.keyEpoch || await accountRefusal(account))
+    if (!account || row.keyEpoch !== account.keyEpoch)
     {
+        throw new MfaVerificationFailedError();
+    }
+
+    const refusal = await accountRefusal(account);
+
+    if (refusal)
+    {
+        await reportAccountRefusal(step && { ...step.attempt, user: account }, refusal, row.keyId);
+
         throw new MfaVerificationFailedError();
     }
 
@@ -484,8 +507,8 @@ export async function verifyMfaChallengeService(
 ): Promise<VerifyMfaChallengeResult>
 {
     const challengeHash = hashCredential(params.challenge);
-    const { row, account } = await spendableChallenge(challengeHash);
-    const step = signInGuard() && secondStepOf(row, account, params);
+    const { row, account } = await spendableChallenge(challengeHash, params);
+    const step = secondStepOf(row, account, params);
 
     if (step)
     {
@@ -502,11 +525,11 @@ export async function verifyMfaChallengeService(
     // the account is read again under it.
     return await runInTransaction(async () =>
     {
-        const locked = await assertAccountStillAdmits(row);
+        const locked = await assertAccountStillAdmits(row, step);
 
         if (step)
         {
-            await assertSignInAdmits({ ...step.attempt, user: locked });
+            await assertSignInAdmits({ ...step.attempt, user: locked }, step.keyId);
         }
 
         if (!await proof.spend() || !await mfaChallengesRepository.markVerified(row))
@@ -529,24 +552,19 @@ export async function verifyMfaChallengeService(
     }, { context: 'auth:mfa-verify' });
 }
 
-/** The sign-in a `mfa/verify` completes, on the channel the 202 came through, from this request. */
-function secondStepOf(row: MfaChallenge, account: User, params: VerifyMfaChallengeParams): SecondStep
+/**
+ * The sign-in a `mfa/verify` completes, on the channel the 202 came through,
+ * from this request; null without the app's `signIn` guard.
+ */
+function secondStepOf(row: MfaChallenge, account: User, params: VerifyMfaChallengeParams): SecondStep | null
 {
-    return {
-        attempt: {
-            user: account,
-            channel: row.channel,
-            stage: 'second-factor',
-            ip: params.ip,
-            userAgent: params.userAgent,
-            webProxy: params.webProxy === true,
-        },
-        keyId: row.keyId,
-    };
+    const attempt = signInAttempt(account, row.channel, params, { stage: 'second-factor' });
+
+    return attempt && { attempt, keyId: row.keyId };
 }
 
 /**
- * `admit`, asked before the proof is judged. A refusal is recorded in a
+ * `admit`, asked before the proof is judged. A refusal is reported in a
  * transaction of its own and answered, with the challenge left unspent.
  *
  * @throws SignInRefusedError

@@ -46,7 +46,8 @@ import { authPasswordResetEvent } from '../events';
 import { issuePasswordResetLink } from './link-mail.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
-import { admitsAccount } from './admission.service';
+import { accountRefusal, admitsAccount } from './admission.service';
+import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
@@ -67,12 +68,29 @@ import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../t
  * own address — no password needed — and reset once it is back. The request
  * answers it as it answers every input (no mail), so the pointer is in the
  * deletion notice the account was sent, never in this answer.
+ *
+ * At the completion (`signingIn`), the sign-in a reset is, an account refused
+ * is told to the app's `settled` once the transaction has rolled back
+ * (`reportAccountRefusal`). A link refused at its confirmation is not: no
+ * sign-in was attempted yet.
  */
-async function lockActiveUserOf(userId: number)
+async function lockActiveUserOf(userId: number, signingIn?: CompletePasswordResetParams)
 {
     const user = await usersRepository.lockAccount(userId);
 
-    return user && admitsAccount(user) ? user : null;
+    if (!user || admitsAccount(user))
+    {
+        return user;
+    }
+
+    const attempt = signingIn && signInAttempt(user, 'password-reset', signingIn);
+
+    if (attempt)
+    {
+        await reportAccountRefusal(attempt, await accountRefusal(user), signingIn?.keyId);
+    }
+
+    return null;
 }
 
 /**
@@ -378,7 +396,7 @@ export async function completePasswordResetService(
 
     // Hashed before the account lock is taken: the hash is the slow step.
     const passwordHash = await hashPassword(params.password);
-    const user = await lockActiveUserOf(row.userId);
+    const user = await lockActiveUserOf(row.userId, params);
 
     if (!user)
     {

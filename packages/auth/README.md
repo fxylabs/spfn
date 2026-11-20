@@ -700,10 +700,27 @@ attempt — no transaction argument to thread.
   your rows and then calls a package writer that locks the account (`setAccountStatus`,
   `revokeAllKeysService`, …) can deadlock against a sign-in. Call the package writer first, or do
   not hold your row locks across it.
-- **A failure** is told in a transaction of its own, under the account lock, committed before the
-  refusal is answered — a 401 does not roll it back. `admit` is then asked again in that
-  transaction: a failure that crossed your limit is answered with the refusal. An unknown identifier
-  has no account row to lock; count it with one statement (an upsert).
+- **Every failure is told, committed.** Whatever said no — a wrong password or proof, your `admit`,
+  the package's refusal of an account that is not active — `settled` is told `failed` in a
+  transaction of its own, under the account lock, committed before the answer: the 401 or 403 does
+  not roll it back. It gets there one of two ways:
+  - **A wrong credential checked before any transaction** — the password on `password` and
+    `deletion-cancel`, the proof at `mfa/verify`, a spent second-factor budget — is told, and `admit`
+    is then asked again in that transaction: a failure that crossed your limit is answered with the
+    refusal. An unknown identifier has no account row to lock; count it with one statement (an
+    upsert).
+  - **A refusal decided inside the session's transaction** — the deciding `admit` (`refused`), an
+    account the package refuses (`accountDisabled`, `pendingDeletion`), a passkey assertion that
+    fails for a known credential (`credential`) — is told once that transaction, and every one
+    around it, has rolled back: nothing of the refused session is in the report, and the report is
+    committed before the refusal is answered. `admit` is not asked again. On a channel that creates
+    the account (`register`, `signup-link`, `invitation`) the refused account never existed, and
+    `user` is null. A throw from `settled` here is logged and the refusal stands — the session is
+    already gone.
+- **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
+  refusal told back to you; whether it counts toward anything is your policy's choice. The worked
+  example below counts `credential` only, so a locked account's further attempts do not extend its
+  lock.
 - **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
   quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
   `auth.login`.
@@ -720,15 +737,21 @@ attempt — no transaction argument to thread.
 | Channel | Credential the package checks | `admit` asked | `settled` told |
 |---|---|---|---|
 | `password` (`POST /_auth/login`) | password for an identifier | before the comparison (no lock), and under the lock in the session's transaction, which decides | `failed` (`credential`, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
-| `passkey`, `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the passkey, the provider, the reset link, the approving device | under the lock where the key is written | `challenged` or `succeeded` |
-| `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `succeeded` |
-| second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`), `stage: 'second-factor'`; `succeeded` once |
+| `passkey` | the passkey assertion | under the lock where the key is written | `failed` (`credential` for a known credential, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the provider, the reset link, the approving device | under the lock where the key is written | `failed` (`refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `failed` (`refused`, `user: null`); `succeeded` |
+| second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`, `accountDisabled`, `pendingDeletion`), `stage: 'second-factor'`; `succeeded` once |
 | `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`) |
 | renewal, `keys/rotate` | — | never | never |
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
-sign-in. A refusal by the deciding `admit` — the one under the lock — is not reported to `settled`:
-that `admit` call is the record.
+sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
+malformed request, an unknown passkey credential id, an expired or spent challenge, link or code, an
+identity the OAuth provider would not vouch for — and the verification-code path of
+`deletion/cancel` (no password is checked; no session results). A reset link refused at its
+confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is
+reported. Do not record from inside `admit`: a write there rolls back with a refused session — the
+report of the refusal is `settled`'s.
 
 **Why a refused account still costs a comparison.** On `password` and `deletion-cancel`, `admit` is
 asked before the password is compared. An account it refuses is compared against the **dummy hash**,

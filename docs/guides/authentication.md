@@ -181,8 +181,9 @@ answers `{ refuse: { code } }` to refuse a sign-in — the client gets 403 `Sign
 where every sign-in channel writes its key, and at `mfa/verify`; a password sign-in,
 `deletion/cancel` and `mfa/verify` also ask it before the credential is checked, and a refused account
 is compared against a dummy hash and refused whatever the password was. `settled(outcome)` is told
-`challenged` at a 202, `succeeded` once a session exists, and `failed` with a closed `reason`; a
-failure is committed in a transaction of its own before the 401. Both run inside the package's
+`challenged` at a 202, `succeeded` once a session exists, and `failed` with a closed `reason` for
+every attempt that names an account or a credential, refusals included; a failure is committed in a
+transaction of its own before the 401 or 403. Both run inside the package's
 transaction, holding the account lock — app repositories extending `BaseRepository` join it; keep
 them to fast database work, lock no second account, and expect a second run on an OAuth sign-in that
 lost a race. Renewal and key rotation are never asked. Omitted, nothing changes; two lifecycles

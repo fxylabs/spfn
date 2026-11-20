@@ -420,8 +420,12 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   refused account is compared against a dummy hash and refused whatever
      *   the password was. Never asked on renewal or key rotation.
      * - `settled(outcome)` — `succeeded` once a session exists, `challenged` on
-     *   a 202, `failed` with a `reason`. A failure is recorded in a transaction
-     *   of its own, committed before the answer, and `admit` asked again there.
+     *   a 202, `failed` with a `reason` for every attempt that names an account
+     *   or a credential, refusals included. A failure is recorded in a
+     *   transaction of its own, committed before the answer; a wrong credential
+     *   checked before any transaction has `admit` asked again there, and a
+     *   refusal decided inside the session's transaction is told once that
+     *   transaction has rolled back.
      *
      * Both run inside the package's transaction, holding the account's lock: an
      * app repository extending `BaseRepository` joins it. Database work only,

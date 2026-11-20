@@ -67,7 +67,9 @@ import {
     KEY_FINGERPRINT_PREFIX_LENGTH,
 } from './key.service';
 import { updateLastLoginService } from './user.service';
-import { admitPrincipal, type PrincipalCredential } from './admission.service';
+import { admitPrincipal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
+import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
+import { signInGuard } from '../lib/sign-in-guard';
 import { assertPasskeyProven } from '../lib/passkey-proof';
 import { checkPasskeyProof } from './passkey.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
@@ -690,6 +692,8 @@ async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User
         return admission.admitted.user;
     }
 
+    await reportCollectionRefusal(params, admission.refused);
+
     switch (admission.refused.reason)
     {
         case 'accountMissing':
@@ -703,6 +707,23 @@ async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User
         default:
             throw params.expiredRecord();
     }
+}
+
+/**
+ * An account refused at collection, told to the app's `settled` as the polling
+ * device's sign-in once the poll's transaction has rolled back
+ * (`reportAccountRefusal`). Read only with a guard configured.
+ */
+async function reportCollectionRefusal(params: CompleteDeviceLoginParams, refusal: AdmissionRefusal): Promise<void>
+{
+    if (!signInGuard())
+    {
+        return;
+    }
+
+    const account = await usersRepository.findByIdOnPrimary(params.userId);
+
+    await reportAccountRefusal(account && signInAttempt(account, params.channel, params.provenance), refusal, params.key.keyId);
 }
 
 /**
