@@ -145,6 +145,7 @@ interface ParsedUrl
 /**
  * A file's identity on disk: inode, size and status-change time, which any
  * write, rename onto it or chmod moves.
+ * Known limit: with coarse ctime (Linux before 6.13), two same-length rewrites in one tick share a key.
  */
 function revisionOf(file: string): string
 {

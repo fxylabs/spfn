@@ -31,7 +31,7 @@
  * | H2 | type-less package: `.ts` with TypeScript syntax, through tsx's        | ESM, transformed (tsx's scoped  |
  * |    | `tsImport` (as `spfn env` loads a schema), bare and with `?v=3`       | loader keeps its namespace)     |
  * | H3 | type-less package: `.js` imported as CommonJS (`?v=1`), rewritten     | CommonJS, then ESM: a format    |
- * |    | with `export` and imported again (`?v=2`)                             | is what the file holds when it  |
+ * |    | in place, same length, with `export` and imported again (`?v=2`)      | is what the file holds when it  |
  * |    |                                                                       | is loaded                       |
  * | H3 | the hook alone: a `.ts` URL resolved before its file is written; a    | no format, then ESM, for both   |
  * |    | `.js` symlink naming a dependency, then retargeted to app source      |                                 |
@@ -265,12 +265,16 @@ describe('spfn dev resolve hook', () =>
     it('H3 classifies a .js file by what it holds when it is loaded, not when its path was first resolved', () =>
     {
         const root = join(tmp, 'rewritten');
+        // Same length, same inode: only the status-change time tells the two apart (rv375c)
+        const commonJs = `${records('.js rewritten as ESM ?v=1')}module.exports = {};\n`;
+        const esm = `${records('.js rewritten as ESM ?v=2')}export const v1 = 1;\n`;
 
+        expect(esm.length).toBe(commonJs.length);
         write(root, 'package.json', '{ "name": "app" }');
-        write(root, 'rewritten.js', `${records('.js rewritten as ESM ?v=1')}module.exports = {};\n`);
+        write(root, 'rewritten.js', commonJs);
         write(root, 'rewriter.ts', 'import { writeFileSync } from \'node:fs\';\n'
             + 'await import(\'./rewritten.js?v=1\');\n'
-            + `writeFileSync(new URL('./rewritten.js', import.meta.url), ${JSON.stringify(`${records('.js rewritten as ESM ?v=2')}export const value = 1;\n`)});\n`
+            + `writeFileSync(new URL('./rewritten.js', import.meta.url), ${JSON.stringify(esm)});\n`
             + 'await import(\'./rewritten.js?v=2\');\n');
 
         expect(runProject(root, ['./rewriter.ts'])).toEqual({
