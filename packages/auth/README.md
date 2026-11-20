@@ -850,13 +850,18 @@ export const signInHistoryRepository = new SignInHistoryRepository();
 
 ```typescript
 // server.config.ts
-createAuthLifecycle({
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+// The app's own record of the temporary passwords it issued.
+import { temporaryPasswordsRepository } from './src/server/repositories/temporary-passwords.repository';
+
+export const authLifecycle = createAuthLifecycle({
     signIn: {
         admit: async ({ user, channel }) =>
         {
             if (!user)
             {
-                return;
+                return undefined;
             }
 
             if (await signInHistoryRepository.failuresSinceLift(user.id) >= 5)
@@ -871,10 +876,12 @@ createAuthLifecycle({
             {
                 return { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } };
             }
+
+            return undefined;
         },
         settled: outcome => signInHistoryRepository.record(outcome),
     },
-})
+});
 ```
 
 The lift is an ops or admin route calling `signInHistoryRepository.lift(userId)` behind
