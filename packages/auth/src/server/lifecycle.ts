@@ -7,7 +7,7 @@
 import type { AuthInitOptions } from './rbac';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import type { PurgeStrategy } from './types';
-import type { AccountDeletionPurgeUser } from './lib/deletion-config';
+import type { AccountDeletionPurgeUser, PurgedAccount } from './lib/deletion-config';
 import type { Hono } from 'hono';
 import { ensureAdminExists } from './setup';
 import { assertAppFromThisHono } from './lib/hono-copy';
@@ -176,9 +176,11 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *         gracePeriodDays: 14,
      *         purgeStrategy: 'anonymize',
      *         allowSelfImmediate: false,
-     *         sendNotifications: true,
      *         onBeforePurge: async (user) => {
      *             await appDataCleanup(user.id); // throw to skip this user this sweep
+     *         },
+     *         onPurge: async (account) => {
+     *             await deletionNoticeOutbox.add(account); // database only: a job sends it
      *         },
      *     },
      * })
@@ -218,18 +220,28 @@ export interface AuthLifecycleOptions extends AuthInitOptions
         purgeCron?: string;
 
         /**
-         * Whether to email users (when they have one on file) at request,
-         * recovery, and final-purge time.
-         * @default true
-         */
-        sendNotifications?: boolean;
-
-        /**
          * Invoked immediately before a user is purged (both the immediate inline
          * path and the cron sweep). Throw to skip that user for this run — they
          * stay `pending` and are retried on the next sweep.
          */
         onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
+
+        /**
+         * The package sends no deletion notice; this hook is how an app learns
+         * the address of an account it may no longer read. Called inside the
+         * purge transaction, after the purge's own writes and before the commit,
+         * once per committed purge (both strategies), with
+         * `{ publicId, email, phone, purgeStrategy }` read under the account
+         * lock. Never published or queued.
+         *
+         * Database work only: it runs under the account lock. Write an outbox
+         * row through the app's own repository — it joins this transaction, so
+         * the row commits with the purge or not at all — and send from a job
+         * after the commit. A throw rolls the purge back (no
+         * `auth.deletion.completed`); the request stays `pending` and the next
+         * sweep calls it again.
+         */
+        onPurge?: (account: PurgedAccount) => Promise<void>;
     };
 
     /**

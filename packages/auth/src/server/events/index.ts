@@ -358,6 +358,10 @@ export const invitationAcceptedEvent = defineEvent(
  * 발행 시점:
  * - requestAccountDeletionService() 성공 시 (self/admin 공통)
  *
+ * `immediate`: 유예 기간이 0일 때(설정값 0, 또는 요청의 `immediate: true`) true —
+ * 파기가 이 커밋 직후 실행되므로 "예정" 안내를 보내지 않는다. 구독자가 `userId`로
+ * 계정을 읽을 때 이미 익명화되어 있을 수 있다.
+ *
  * @example
  * ```typescript
  * authDeletionRequestedEvent.subscribe(async (payload) => {
@@ -372,6 +376,7 @@ export const authDeletionRequestedEvent = defineEvent(
         userPublicId: Type.String(),
         purgeScheduledAt: Type.String(),
         requestedBy: Type.Union([Type.Literal('self'), Type.Literal('admin')]),
+        immediate: Type.Boolean(),
     }),
 );
 
@@ -396,7 +401,9 @@ export const authDeletionCancelledEvent = defineEvent(
  * - purge job(또는 즉시 파기 경로)이 유저를 파기한 직후
  *
  * PII를 담지 않는다 — userId(내부 순번)/email/phone 없이 userPublicId만 실어
- * 파기 완료 이후에도 구독자가 식별 정보를 다시 축적하지 않도록 한다.
+ * 파기 완료 이후에도 구독자가 식별 정보를 다시 축적하지 않도록 한다. 파기된 계정의
+ * 연락처가 필요하면(완료 안내) 이벤트가 아니라 `deletion.onPurge` 훅을 쓴다 —
+ * 발행·큐잉되지 않고 파기 트랜잭션 안에서 호출된다.
  */
 export const authDeletionCompletedEvent = defineEvent(
     'auth.deletion.completed',

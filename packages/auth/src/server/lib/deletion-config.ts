@@ -42,28 +42,55 @@ export interface AuthDeletionConfig
      */
     purgeCron: string;
 
-    /** Whether to email users (when they have one) at request/recovery/purge time. */
-    sendNotifications: boolean;
-
     /**
      * Synchronous hook invoked immediately before a user is purged. Throw to skip
      * that user for this sweep (they stay `pending`, retried on the next tick).
      */
     onBeforePurge?: (user: AccountDeletionPurgeUser) => Promise<void>;
+
+    /**
+     * Called inside the purge transaction, after the purge's own writes and
+     * before its commit, with the contact read under the account lock. Never
+     * published or queued. Database work only — it runs under the account lock:
+     * write an outbox row through the app's own repository (it joins this
+     * transaction) and send from a job after the commit. A throw rolls the purge
+     * back; the request stays `pending` and the next sweep retries it.
+     */
+    onPurge?: (account: PurgedAccount) => Promise<void>;
+}
+
+/** The account a purge destroys, as read under its lock before the destructive step. */
+export interface PurgedAccount
+{
+    publicId: string;
+    email: string | null;
+    phone: string | null;
+    purgeStrategy: PurgeStrategy;
 }
 
 export const DEFAULT_DELETION_GRACE_PERIOD_DAYS = 30;
 export const DEFAULT_DELETION_PURGE_STRATEGY: PurgeStrategy = 'anonymize';
 export const DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE = false;
 export const DEFAULT_DELETION_PURGE_CRON = '0 4 * * *';
-export const DEFAULT_DELETION_SEND_NOTIFICATIONS = true;
+
+const DELETION_OPTIONS: ReadonlyArray<keyof AuthDeletionConfig> = [
+    'gracePeriodDays',
+    'purgeStrategy',
+    'allowSelfImmediate',
+    'purgeCron',
+    'onBeforePurge',
+    'onPurge',
+];
+
+const SEND_NOTIFICATIONS_REMOVED = 'deletion.sendNotifications was removed: @spfn/auth sends no account-deletion notice. '
+    + 'Send your own from the auth.deletion.requested / auth.deletion.cancelled events and the deletion.onPurge hook — '
+    + 'see the @spfn/auth README, "Account Deletion & Recovery", recipe "Telling the person".';
 
 let config: AuthDeletionConfig = {
     gracePeriodDays: DEFAULT_DELETION_GRACE_PERIOD_DAYS,
     purgeStrategy: DEFAULT_DELETION_PURGE_STRATEGY,
     allowSelfImmediate: DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE,
     purgeCron: DEFAULT_DELETION_PURGE_CRON,
-    sendNotifications: DEFAULT_DELETION_SEND_NOTIFICATIONS,
 };
 
 /**
@@ -71,24 +98,40 @@ let config: AuthDeletionConfig = {
  * (not from `afterInfrastructure`) so it takes effect before any route/job handler
  * that reads `getDeletionConfig()` can run.
  *
- * @throws Error for a `purgeStrategy` outside `PURGE_STRATEGIES`, or an
- *   `allowSelfImmediate` / `sendNotifications` that is not a boolean — the
- *   string `'false'` would otherwise read as true
+ * @throws Error for an option it does not know — `sendNotifications`, removed,
+ *   named as such, so an app that relied on it learns at boot that nothing is
+ *   mailed any more — a `purgeStrategy` outside `PURGE_STRATEGIES`, or an
+ *   `allowSelfImmediate` that is not a boolean (the string `'false'` would
+ *   otherwise read as true)
  */
 export function configureDeletion(options?: Partial<AuthDeletionConfig>): void
 {
+    assertKnownDeletionOptions(options ?? {});
     assertDeletionOption('purgeStrategy', options?.purgeStrategy, PURGE_STRATEGIES);
     assertDeletionOption('allowSelfImmediate', options?.allowSelfImmediate, [true, false]);
-    assertDeletionOption('sendNotifications', options?.sendNotifications, [true, false]);
 
     config = {
         gracePeriodDays: options?.gracePeriodDays ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
         purgeStrategy: options?.purgeStrategy ?? DEFAULT_DELETION_PURGE_STRATEGY,
         allowSelfImmediate: options?.allowSelfImmediate ?? DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE,
         purgeCron: options?.purgeCron ?? DEFAULT_DELETION_PURGE_CRON,
-        sendNotifications: options?.sendNotifications ?? DEFAULT_DELETION_SEND_NOTIFICATIONS,
         onBeforePurge: options?.onBeforePurge,
+        onPurge: options?.onPurge,
     };
+}
+
+function assertKnownDeletionOptions(options: object): void
+{
+    if ('sendNotifications' in options)
+    {
+        throw new Error(SEND_NOTIFICATIONS_REMOVED);
+    }
+
+    const unknown = Object.keys(options).find((key) => !(DELETION_OPTIONS as readonly string[]).includes(key));
+    if (unknown !== undefined)
+    {
+        throw new Error(`deletion has no option '${unknown}'. Allowed: ${DELETION_OPTIONS.join(', ')}.`);
+    }
 }
 
 function assertDeletionOption(name: string, value: unknown, allowed: readonly unknown[]): void

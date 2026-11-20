@@ -29,7 +29,6 @@ const {
     verifyPassword,
     getDummyPasswordHash,
     validateVerificationToken,
-    sendEmail,
     runInTransaction,
     revokeAllOAuth2GrantsForUser,
     setAccountDeletion,
@@ -88,7 +87,6 @@ const {
     verifyPassword: vi.fn(async () => true),
     getDummyPasswordHash: vi.fn(async () => '$2b$12$dummydummydummydummydummydummydummydummydummydummydu'),
     validateVerificationToken: vi.fn(),
-    sendEmail: vi.fn(async () => ({ success: true })),
     runInTransaction: vi.fn(async (fn: () => Promise<unknown>) => fn()),
     revokeAllOAuth2GrantsForUser: vi.fn(async () => undefined),
     // The one writer of users.deletion: it writes the deletion and, entering
@@ -132,7 +130,6 @@ vi.mock('../../server/services/admission.service', async importOriginal => ({
     admitCompletion,
     admissionRefusalError: (refusal: { reason: string }) => new Error(refusal.reason),
 }));
-vi.mock('@spfn/notification/server', () => ({ sendEmail }));
 vi.mock('@spfn/core/db', async (importOriginal) =>
 {
     const actual = await importOriginal<typeof import('@spfn/core/db')>();
@@ -248,11 +245,6 @@ describe('account-deletion.service', () =>
             const diffDays = (result.purgeScheduledAt.getTime() - Date.now()) / 86_400_000;
             expect(diffDays).toBeGreaterThan(29);
             expect(diffDays).toBeLessThan(31);
-
-            // Event + notification are deferred via onAfterCommit — outside a real
-            // transaction that runs immediately (see @spfn/core/db docs), so still
-            // observable synchronously-ish here; this asserts the wiring fires at all.
-            await vi.waitFor(() => expect(sendEmail).toHaveBeenCalled());
         });
 
         it('a refused recent authentication moves nothing', async () =>

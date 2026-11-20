@@ -14,7 +14,6 @@
 
 import { ValidationError, NotFoundError } from '@spfn/core/errors';
 import { runInTransaction, onAfterCommit } from '@spfn/core/db';
-import { sendEmail, sendSMS } from '@spfn/notification/server';
 
 import {
     InvalidCredentialsError,
@@ -42,7 +41,7 @@ import {
 } from '../repositories';
 import type { User } from '../entities/users';
 import type { AccountDeletionRequest } from '../entities/account-deletion-requests';
-import type { AccountDeletionRequestedBy, PurgeStrategy } from '../types';
+import type { AccountDeletionRequestedBy } from '../types';
 import { verifyPassword, getDummyPasswordHash, normalizeEmail } from '../helpers';
 import { validateVerificationToken, type VerificationTokenPayload } from './verification.service';
 import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
@@ -51,7 +50,7 @@ import { assertStepUp } from './mfa.service';
 import { proveRecentAuthentication, recentAuthenticationHolds, type RecentAuthenticationProof } from './passkey.service';
 import { accountRefusalReason, admissionRefusalError, admitCompletion, admitsAccount, type PrincipalCredential } from './admission.service';
 import { ROUTE_ENROLMENT } from '../routes/channels';
-import { getDeletionConfig } from '../lib/deletion-config';
+import { getDeletionConfig, type AuthDeletionConfig } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
@@ -272,95 +271,6 @@ function addressOf(user: User, targetType: VerificationTokenPayload['targetType'
 }
 
 // ============================================================================
-// Notifications (best-effort — never blocks the lifecycle transition)
-// ============================================================================
-
-async function sendDeletionEmail(
-    to: string,
-    subject: string,
-    text: string,
-): Promise<void>
-{
-    const result = await sendEmail({ to, subject, text });
-
-    if (!result.success)
-    {
-        authLogger.email.error('Failed to send account deletion email', { to, subject, error: result.error });
-    }
-}
-
-async function sendDeletionSMS(to: string, message: string): Promise<void>
-{
-    const result = await sendSMS({ to, message });
-
-    if (!result.success)
-    {
-        authLogger.sms.error('Failed to send account deletion SMS', { to, error: result.error });
-    }
-}
-
-/**
- * The notice is the one place the person learns the purge date and that a
- * code cancels it — a pending account is not reset — so it goes to the
- * channel the account has: e-mail when it has an address, otherwise SMS
- * through the sender verification codes use.
- */
-async function notifyDeletionRequested(user: User, purgeScheduledAt: Date): Promise<void>
-{
-    if (!getDeletionConfig().sendNotifications)
-    {
-        return;
-    }
-
-    if (user.email)
-    {
-        await sendDeletionEmail(
-            user.email,
-            'Account deletion requested',
-            `We received a request to delete your account. It is scheduled for permanent deletion on `
-            + `${purgeScheduledAt.toISOString()}. To cancel it before then, confirm with your password or with a `
-            + `verification code sent to this address — no password needed.`,
-        );
-    }
-    else if (user.phone)
-    {
-        await sendDeletionSMS(
-            user.phone,
-            `Your account is scheduled for deletion on ${purgeScheduledAt.toISOString().slice(0, 10)}. `
-            + `To cancel, confirm with a verification code sent to this number.`,
-        );
-    }
-}
-
-async function notifyDeletionCancelled(user: User): Promise<void>
-{
-    if (!getDeletionConfig().sendNotifications || !user.email)
-    {
-        return;
-    }
-
-    await sendDeletionEmail(
-        user.email,
-        'Account deletion cancelled',
-        'Your account deletion request was cancelled.',
-    );
-}
-
-async function notifyPurgeFinal(email: string): Promise<void>
-{
-    if (!getDeletionConfig().sendNotifications)
-    {
-        return;
-    }
-
-    await sendDeletionEmail(
-        email,
-        'Your account has been deleted',
-        'Your account and associated data have now been permanently deleted, as requested.',
-    );
-}
-
-// ============================================================================
 // Request
 // ============================================================================
 
@@ -404,8 +314,7 @@ function addDays(date: Date, days: number): Date
  *
  * Moves the account's deletion to `pending` and leaves its status — a suspended
  * account stays suspended — records the request, revokes every active
- * session key, and (after commit) emits `auth.deletion.requested` and sends the
- * request-received notice. With a zero grace period (explicit `immediate: true`,
+ * session key, and (after commit) emits `auth.deletion.requested`. With a zero grace period (explicit `immediate: true`,
  * gated for self-service by `allowSelfImmediate`), purges once the request commits instead of
  * waiting for the cron sweep.
  */
@@ -523,7 +432,7 @@ async function recordDeletionRequest(
     });
 
     await endWaysBackIn(user.id);
-    announceDeletionRequested(user, request);
+    announceDeletionRequested(user, request, gracePeriodDays === 0);
 
     return request;
 }
@@ -563,12 +472,11 @@ async function endWaysBackIn(userId: number): Promise<void>
 }
 
 /**
- * Deferred to after commit: event subscribers and the outbound email must not
- * observe (or be triggered by) a request that ultimately rolls back, and an
- * external I/O call (email provider) must not run while a DB transaction/row
- * lock is held.
+ * Deferred to after commit: subscribers must not observe a request that
+ * ultimately rolls back. `immediate` — a grace period of 0 — tells them the
+ * purge runs right after this commit, so there is nothing scheduled to word.
  */
-function announceDeletionRequested(user: User, request: AccountDeletionRequest): void
+function announceDeletionRequested(user: User, request: AccountDeletionRequest, immediate: boolean): void
 {
     onAfterCommit(() =>
         authDeletionRequestedEvent.emit({
@@ -576,8 +484,8 @@ function announceDeletionRequested(user: User, request: AccountDeletionRequest):
             userPublicId: user.publicId,
             purgeScheduledAt: request.purgeScheduledAt.toISOString(),
             requestedBy: request.requestedBy,
+            immediate,
         }));
-    onAfterCommit(() => notifyDeletionRequested(user, request.purgeScheduledAt));
 }
 
 // ============================================================================
@@ -646,7 +554,6 @@ export async function cancelAccountDeletionService(
             userId: String(user.id),
             userPublicId: user.publicId,
         }));
-    onAfterCommit(() => notifyDeletionCancelled(user));
 
     return { userId: String(user.id) };
 }
@@ -786,6 +693,59 @@ async function anonymizeUser(user: User): Promise<void>
 }
 
 /**
+ * The purge's transaction: the account lock (`usersRepository.lockAccount`)
+ * and the status read under it — the authoritative check, closing the window
+ * between findDueForPurge (replica)/the pre-check and this transaction, so a
+ * cancel that committed in between is honored — then the claim, the
+ * destructive DML, and `onPurge` with the contact read under the lock.
+ *
+ * @returns the account's publicId once destroyed; null, with nothing written,
+ *   when the account or its request is no longer pending
+ */
+async function destroyPendingAccount(userId: number, requestId: number, config: AuthDeletionConfig): Promise<string | null>
+{
+    const user = await usersRepository.lockAccount(userId);
+    if (!user || user.deletion !== 'pending')
+    {
+        return null;
+    }
+
+    // Conditional claim: fails closed (returns null) if the request row was
+    // moved off 'pending' concurrently (cancelled, or claimed by another purge
+    // attempt). The UPDATE's row lock also serializes concurrent purge/cancel
+    // attempts on this same row. Only past this point do we touch `users`.
+    const { purgeStrategy } = config;
+    if (!await accountDeletionRequestsRepository.markCompleted(requestId, purgeStrategy))
+    {
+        return null;
+    }
+
+    if (purgeStrategy === 'hard-delete')
+    {
+        await usersRepository.deleteById(user.id);
+    }
+    else
+    {
+        await anonymizeUser(user);
+    }
+
+    // Codes and account-exists notice windows have no userId FK (target-keyed)
+    // — clean up regardless of strategy so neither lingers for a reused
+    // email/phone.
+    for (const target of [user.email, user.phone].filter((value): value is string => !!value))
+    {
+        await verificationCodesRepository.deleteByTarget(target);
+        await accountExistsNoticesRepository.deleteByTarget(target);
+    }
+
+    // Last, so the app's write commits with the purge or not at all; a throw
+    // rolls everything back and the next sweep retries.
+    await config.onPurge?.({ publicId: user.publicId, email: user.email, phone: user.phone, purgeStrategy });
+
+    return user.publicId;
+}
+
+/**
  * Purge a single user for a given (already fetched) request row. Shared by the
  * immediate path (after the request commits), the standalone admin/DSR entry point, and the cron sweep.
  *
@@ -801,11 +761,12 @@ async function anonymizeUser(user: User): Promise<void>
  *    a primary re-read of the user (closes the replica-lag/TOCTOU window against
  *    `findDueForPurge`'s replica read and the pre-check above), the conditional
  *    `markCompleted` claim (fails closed — 0 rows — if the request was cancelled
- *    or already completed concurrently), and the destructive DML itself. Nothing
- *    proceeds to destructive DML unless both re-checks pass.
- * 4. Notifications and the `auth.deletion.completed` event are deferred to
- *    `onAfterCommit` — they must never fire for a purge that ultimately aborted
- *    or rolled back, and the email send must not run with a transaction open.
+ *    or already completed concurrently), the destructive DML itself, and last
+ *    `onPurge` with the contact read under the lock — the app's database hand-off,
+ *    committed with the purge or rolled back with it. Nothing proceeds to
+ *    destructive DML unless both re-checks pass.
+ * 4. The `auth.deletion.completed` event is deferred to `onAfterCommit` — it
+ *    must never fire for a purge that ultimately aborted or rolled back.
  */
 async function purgePendingRequest(request: AccountDeletionRequest): Promise<PurgeUserResult>
 {
@@ -858,72 +819,13 @@ async function purgePendingRequest(request: AccountDeletionRequest): Promise<Pur
         }
     }
 
-    const purgeStrategy: PurgeStrategy = config.purgeStrategy;
-    let purgedUser: User | null = null;
-
-    await runInTransaction(async () =>
-    {
-        // The account lock (`usersRepository.lockAccount`) first, and the status
-        // read under it — the authoritative check. Closes the window between
-        // findDueForPurge (replica)/the pre-check above and this transaction: a
-        // cancel that committed in between must be honored.
-        const user = await usersRepository.lockAccount(userId);
-        if (!user || user.deletion !== 'pending')
-        {
-            return;
-        }
-
-        // Conditional claim: fails closed (returns null) if the request row was
-        // moved off 'pending' concurrently (cancelled, or claimed by another purge
-        // attempt). The UPDATE's row lock also serializes concurrent purge/cancel
-        // attempts on this same row. Only past this point do we touch `users`.
-        const claimed = await accountDeletionRequestsRepository.markCompleted(request.id, purgeStrategy);
-        if (!claimed)
-        {
-            return;
-        }
-
-        if (purgeStrategy === 'hard-delete')
-        {
-            await usersRepository.deleteById(user.id);
-        }
-        else
-        {
-            await anonymizeUser(user);
-        }
-
-        // Codes and account-exists notice windows have no userId FK (target-keyed)
-        // — clean up regardless of strategy so neither lingers for a reused
-        // email/phone.
-        for (const target of [user.email, user.phone].filter((value): value is string => !!value))
-        {
-            await verificationCodesRepository.deleteByTarget(target);
-            await accountExistsNoticesRepository.deleteByTarget(target);
-        }
-
-        purgedUser = user;
-    });
-
-    if (!purgedUser)
+    const userPublicId = await runInTransaction(() => destroyPendingAccount(userId, request.id, config));
+    if (!userPublicId)
     {
         return { outcome: 'skipped' };
     }
 
-    const { email, publicId } = purgedUser;
-
-    // Final notice is sent after the purge actually committed — never before, and
-    // never if the transaction aborted/rolled back (so a retried sweep can't send
-    // it twice). This holds for hard-delete too: the address is captured above,
-    // before the row is gone, and the notice still goes out post-commit.
-    if (email)
-    {
-        onAfterCommit(() => notifyPurgeFinal(email));
-    }
-    onAfterCommit(() =>
-        authDeletionCompletedEvent.emit({
-            userPublicId: publicId,
-            purgeStrategy,
-        }));
+    onAfterCommit(() => authDeletionCompletedEvent.emit({ userPublicId, purgeStrategy: config.purgeStrategy }));
 
     return { outcome: 'purged' };
 }

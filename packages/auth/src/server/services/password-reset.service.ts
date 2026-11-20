@@ -67,8 +67,9 @@ import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../t
  * An account pending deletion is not reset: it is recovered through
  * `/_auth/deletion/cancel`, with the password or a verification code sent to its
  * own address — no password needed — and reset once it is back. The request
- * answers it as it answers every input (no mail), so the pointer is in the
- * deletion notice the account was sent, never in this answer.
+ * answers it as it answers every input (no mail), so the pointer belongs in
+ * the app's own deletion notice (from `auth.deletion.requested`), never in
+ * this answer.
  *
  * At the completion (`signingIn`), the sign-in a reset is, an account refused
  * is told to the app's `settled` once the transaction has rolled back

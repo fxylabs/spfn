@@ -11,6 +11,24 @@
  *   but cancelled before that batch item is processed, must not be purged and must
  *   not have its (now 'cancelled') audit row overwritten back to 'completed'
  *
+ * The package sends no deletion notice (spfn/spfn#170); the app gets the events
+ * and the `onPurge` hook. Each row, and what goes unnoticed without it:
+ *
+ * | Row | Checks                                                              | Unnoticed without it                              |
+ * |-----|---------------------------------------------------------------------|---------------------------------------------------|
+ * | N1  | request, cancel, purge (both strategies): zero sendEmail/sendSMS    | a package-sent notice left behind                 |
+ * | N2  | `requested.immediate` true for a configured 0 and for `immediate`,  | an app wording "scheduled" for a purge that runs  |
+ * |     | false otherwise                                                     | at once                                           |
+ * | N3  | `onPurge` called once with the contact read under the lock, both    | a hook given the anonymized address, or none      |
+ * |     | strategies                                                          |                                                   |
+ * | N4  | inside the hook the purge's writes are in its transaction and not   | a hook run outside the purge transaction: an      |
+ * |     | yet committed; its outbox row is there after the commit             | outbox row for a purge that never committed       |
+ * | N5  | a throwing hook: account and request stay pending, its write is     | a purge committed without the app's hand-off      |
+ * |     | rolled back, no `completed`                                         |                                                   |
+ * | N6  | a second purge of the same batch row calls the hook no more         | the notice sent twice                             |
+ * | N7  | `completed` carries exactly `{ userPublicId, purgeStrategy }`       | the address added to the event "for convenience"  |
+ * | B1  | (extended) a cancel that won the race: the hook is not called       | a notice for an account that was kept             |
+ *
  * OAuth-login status gate coverage lives in the unit test
  * `unit/oauth-status-gate.test.ts` (mocked — a full code-exchange OAuth round trip
  * would need to mock an external provider's token endpoint, disproportionate to
@@ -18,15 +36,18 @@
  * users before a session is issued).
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import { and, eq, desc } from 'drizzle-orm';
+import { and, eq, desc, sql } from 'drizzle-orm';
+import { pgSchema, serial, text } from 'drizzle-orm/pg-core';
+import { BaseRepository } from '@spfn/core/db';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { verificationCodes, users, accountDeletionRequests } from '@/server/entities';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 
-const { sendEmailMock } = vi.hoisted(() => ({
+const { sendEmailMock, sendSMSMock } = vi.hoisted(() => ({
     sendEmailMock: vi.fn().mockResolvedValue({ success: true }),
+    sendSMSMock: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 vi.mock('@spfn/notification/server', async (importOriginal) =>
@@ -36,7 +57,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
     return {
         ...actual,
         sendEmail: sendEmailMock,
-        sendSMS: vi.fn().mockResolvedValue({ success: true }),
+        sendSMS: sendSMSMock,
     };
 });
 
@@ -45,13 +66,44 @@ const { defineRouter, registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { configureDeletion } = await import('@/server/lib/deletion-config');
-const { sweepDuePurges, purgePendingRequest } = await import('@/server/services/account-deletion.service');
+const { sweepDuePurges, purgePendingRequest, requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
+const { authDeletionRequestedEvent, authDeletionCancelledEvent, authDeletionCompletedEvent } = await import('@/server/events');
 const { accountDeletionRequestsRepository } = await import('@/server/repositories');
 const { authenticate } = await import('@/server/middleware/authenticate');
 
 const dbAvailable = await isDatabaseAvailable();
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+// Each account its own client address, so the route limiters count no account against another's.
+let lastIp = 0;
+const nextIp = () => `198.51.100.${++lastIp % 250}`;
+
+/** An app's own outbox, as the README recipe has it: `onPurge` writes here, a job sends from here. */
+const noticeOutbox = pgSchema('spfn_auth').table('test_deletion_notice_outbox', {
+    id: serial('id').primaryKey(),
+    publicId: text('public_id').notNull(),
+    email: text('email'),
+    phone: text('phone'),
+});
+
+class NoticeOutboxRepository extends BaseRepository
+{
+    async add(account: { publicId: string; email: string | null; phone: string | null }): Promise<void>
+    {
+        await this.db.insert(noticeOutbox).values({ publicId: account.publicId, email: account.email, phone: account.phone });
+    }
+
+    /** The account's deletion as this repository's connection sees it — the purge's transaction, inside `onPurge`. */
+    async deletionOf(userId: number): Promise<string | null | undefined>
+    {
+        const [row] = await this.db.select({ deletion: users.deletion }).from(users).where(eq(users.id, userId));
+
+        return row?.deletion;
+    }
+}
+
+const noticeOutboxRepository = new NoticeOutboxRepository();
 
 describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
 {
@@ -60,6 +112,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        await getTestDb().execute(sql`CREATE TABLE spfn_auth.test_deletion_notice_outbox (id serial PRIMARY KEY, public_id text NOT NULL, email text, phone text)`);
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
 
@@ -76,6 +129,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
 
     afterAll(async () =>
     {
+        await getTestDb().execute(sql`DROP TABLE IF EXISTS spfn_auth.test_deletion_notice_outbox`);
         await teardownTestDb();
     });
 
@@ -84,18 +138,32 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         const db = getTestDb();
         await clearTables(db);
         await initializeAuth();
+        await db.execute(sql`TRUNCATE spfn_auth.test_deletion_notice_outbox`);
         configureDeletion(); // reset to defaults between tests
         sendEmailMock.mockClear();
+        sendSMSMock.mockClear();
+        vi.spyOn(authDeletionRequestedEvent, 'emit');
+        vi.spyOn(authDeletionCancelledEvent, 'emit');
+        vi.spyOn(authDeletionCompletedEvent, 'emit');
+    });
+
+    afterEach(() =>
+    {
+        for (const event of [authDeletionRequestedEvent, authDeletionCancelledEvent, authDeletionCompletedEvent])
+        {
+            vi.mocked(event.emit).mockRestore();
+        }
     });
 
     /** Register a user through the full verification flow with a real key pair. */
     async function registerViaFlow(email: string, password: string): Promise<{ userId: string; key: KeyPair }>
     {
         const key = generateKeyPair('ES256');
+        const headers = { ...JSON_HEADERS, 'x-forwarded-for': nextIp() };
 
         await app.request('/_auth/codes', {
             method: 'POST',
-            headers: JSON_HEADERS,
+            headers,
             body: JSON.stringify({ target: email, targetType: 'email', purpose: 'registration' }),
         });
 
@@ -107,14 +175,14 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
 
         const verifyRes = await app.request('/_auth/codes/verify', {
             method: 'POST',
-            headers: JSON_HEADERS,
+            headers,
             body: JSON.stringify({ target: email, targetType: 'email', code: codeRow.code, purpose: 'registration' }),
         });
         const { verificationToken } = await verifyRes.json();
 
         const response = await app.request('/_auth/register', {
             method: 'POST',
-            headers: JSON_HEADERS,
+            headers,
             body: JSON.stringify({
                 email,
                 verificationToken,
@@ -267,21 +335,10 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(row.passwordHash).toBeNull();
         expect(row.deletedAt).not.toBeNull();
 
-        // m3: the final-notice email was sent, only after the purge actually
-        // committed. `onAfterCommit` callbacks are fire-and-forget (not awaited by
-        // the transaction helper), so poll rather than assert synchronously.
-        // 3 calls total by this point: the registration-flow verification code,
-        // the "requested" notice from the request step above, and this "final" one
-        // (call count, not content, is asserted).
-        const emailCallsAfterFirstPurge = 3;
-        await vi.waitFor(() => expect(sendEmailMock).toHaveBeenCalledTimes(emailCallsAfterFirstPurge));
-
-        // A second sweep tick must not re-process (or re-notify) an already-completed
-        // request — findDueForPurge only matches status='pending'. Nothing async is
-        // queued on this path (0 due requests), so this is safe to assert synchronously.
+        // A second sweep tick must not re-process an already-completed request —
+        // findDueForPurge only matches status='pending'.
         const secondSweep = await sweepDuePurges();
         expect(secondSweep).toEqual({ processed: 0, purged: 0, skipped: 0 });
-        expect(sendEmailMock).toHaveBeenCalledTimes(emailCallsAfterFirstPurge);
 
         // The original email is free again — same-email re-registration succeeds.
         const reRegistered = await registerViaFlow(email, 'AnotherPassword123!');
@@ -320,8 +377,12 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(cancelRes.status).toBe(204);
 
         // The sweep now processes the STALE row it already had in hand.
+        const onPurge = vi.fn(async () => undefined);
+        configureDeletion({ onPurge });
         const purgeResult = await purgePendingRequest(staleBatch[0]);
         expect(purgeResult.outcome).not.toBe('purged');
+        // The account was kept: the app is not handed a purge to tell anyone of.
+        expect(onPurge).not.toHaveBeenCalled();
 
         const [userRow] = await db.select().from(users).where(eq(users.id, Number(userId)));
         expect(userRow.deletion).toBeNull();   // recovered, not purged
@@ -366,5 +427,184 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         expect(completed).toBeDefined();
         expect(completed.userId).toBeNull();
         expect(completed.purgeStrategy).toBe('hard-delete');
+    });
+    /** An account with a deletion request past its grace period, as the sweep finds it. */
+    async function dueAccount(email: string, phone: string | null = null): Promise<{ userId: number; publicId: string }>
+    {
+        const password = 'SecurePassword123!';
+        const { userId, key } = await registerViaFlow(email, password);
+        const db = getTestDb();
+        await db.update(users).set({ phone }).where(eq(users.id, Number(userId)));
+
+        const requestRes = await app.request('/_auth/deletion/request', {
+            method: 'POST',
+            headers: { ...JSON_HEADERS, 'x-forwarded-for': nextIp(), Authorization: bearerFor(key) },
+            body: JSON.stringify({ password }),
+        });
+        expect(requestRes.status).toBe(200);
+
+        await db.update(accountDeletionRequests)
+            .set({ purgeScheduledAt: new Date(Date.now() - 1000) })
+            .where(eq(accountDeletionRequests.userId, Number(userId)));
+        const [row] = await db.select({ publicId: users.publicId }).from(users).where(eq(users.id, Number(userId)));
+
+        return { userId: Number(userId), publicId: row.publicId };
+    }
+
+    async function deletionState(userId: number): Promise<{ deletion: string | null; email: string | null; request: string }>
+    {
+        const db = getTestDb();
+        const [user] = await db.select({ deletion: users.deletion, email: users.email }).from(users).where(eq(users.id, userId));
+        const [request] = await db.select({ status: accountDeletionRequests.status }).from(accountDeletionRequests)
+            .where(eq(accountDeletionRequests.userId, userId));
+
+        return { deletion: user.deletion, email: user.email, request: request.status };
+    }
+
+    async function outboxRows()
+    {
+        return getTestDb().select({ publicId: noticeOutbox.publicId, email: noticeOutbox.email, phone: noticeOutbox.phone }).from(noticeOutbox);
+    }
+
+    const sends = () => sendEmailMock.mock.calls.length + sendSMSMock.mock.calls.length;
+
+    it.each(['anonymize', 'hard-delete'] as const)('N1 (%s): a request, a cancel and a purge send no e-mail and no SMS', async (purgeStrategy) =>
+    {
+        configureDeletion({ purgeStrategy });
+        const email = `n1-${purgeStrategy}@example.com`;
+        const password = 'SecurePassword123!';
+        const { userId, key } = await registerViaFlow(email, password);
+        // The registration code is the package's to send: it carries a credential.
+        await vi.waitFor(() => expect(sendEmailMock).toHaveBeenCalledTimes(1));
+        sendEmailMock.mockClear();
+
+        const ip = nextIp();
+        const requestRes = await app.request('/_auth/deletion/request', {
+            method: 'POST',
+            headers: { ...JSON_HEADERS, 'x-forwarded-for': ip, Authorization: bearerFor(key) },
+            body: JSON.stringify({ password }),
+        });
+        expect(requestRes.status).toBe(200);
+        await vi.waitFor(() => expect(authDeletionRequestedEvent.emit).toHaveBeenCalledTimes(1));
+
+        const cancelRes = await app.request('/_auth/deletion/cancel', {
+            method: 'POST',
+            headers: { ...JSON_HEADERS, 'x-forwarded-for': ip },
+            body: JSON.stringify({ email, password }),
+        });
+        expect(cancelRes.status).toBe(204);
+        await vi.waitFor(() => expect(authDeletionCancelledEvent.emit).toHaveBeenCalledTimes(1));
+
+        await requestAccountDeletionService(Number(userId), { requestedBy: 'admin' });
+        await getTestDb().update(accountDeletionRequests)
+            .set({ purgeScheduledAt: new Date(Date.now() - 1000) })
+            .where(and(eq(accountDeletionRequests.userId, Number(userId)), eq(accountDeletionRequests.status, 'pending')));
+        expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
+        await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(1));
+
+        // Every after-commit callback of the three steps has started by now:
+        // each step's event was emitted, and a send would have started beside it.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(sends()).toBe(0);
+    });
+
+    it('N2: requested carries immediate — true for a configured grace period of 0 and for an immediate request, false otherwise', async () =>
+    {
+        const scheduled = await dueAccount('n2-scheduled@example.com');
+        expect(vi.mocked(authDeletionRequestedEvent.emit).mock.calls[0]![0]).toMatchObject({ userPublicId: scheduled.publicId, immediate: false });
+
+        configureDeletion({ gracePeriodDays: 0 });
+        const configured = await dueAccount('n2-configured@example.com');
+        await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(authDeletionRequestedEvent.emit).mock.calls[1]![0]).toMatchObject({ userPublicId: configured.publicId, immediate: true });
+
+        configureDeletion();
+        const { userId } = await registerViaFlow('n2-asked@example.com', 'SecurePassword123!');
+        await requestAccountDeletionService(Number(userId), { requestedBy: 'admin', immediate: true });
+        await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(authDeletionRequestedEvent.emit).mock.calls[2]![0]).toMatchObject({ userId: String(userId), immediate: true });
+    });
+
+    it.each(['anonymize', 'hard-delete'] as const)('N3 (%s): onPurge is called once with the contact read under the lock', async (purgeStrategy) =>
+    {
+        const onPurge = vi.fn(async () => undefined);
+        configureDeletion({ purgeStrategy, onPurge });
+        const email = `n3-${purgeStrategy}@example.com`;
+        const phone = purgeStrategy === 'anonymize' ? '+15550100001' : '+15550100002';
+        const { publicId } = await dueAccount(email, phone);
+
+        expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
+
+        expect(onPurge).toHaveBeenCalledTimes(1);
+        expect(onPurge).toHaveBeenCalledWith({ publicId, email, phone, purgeStrategy });
+    });
+
+    it('N4: onPurge runs in the purge transaction after its writes, and its outbox row is there after the commit', async () =>
+    {
+        const seen: Array<{ inTransaction: unknown; outside: unknown }> = [];
+        configureDeletion({
+            onPurge: async (account) =>
+            {
+                const [outside] = await getTestDb().select({ deletion: users.deletion }).from(users).where(eq(users.publicId, account.publicId));
+                seen.push({ inTransaction: await noticeOutboxRepository.deletionOf(userId), outside: outside?.deletion });
+                await noticeOutboxRepository.add(account);
+                expect(await outboxRows()).toEqual([]);
+            },
+        });
+        const email = 'n4@example.com';
+        const { userId, publicId } = await dueAccount(email);
+
+        expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
+
+        expect(seen).toEqual([{ inTransaction: 'deleted', outside: 'pending' }]);
+        expect(await outboxRows()).toEqual([{ publicId, email, phone: null }]);
+    });
+
+    it('N5: a throwing onPurge rolls the purge back — account and request pending, its write gone, no completed', async () =>
+    {
+        configureDeletion({
+            onPurge: async (account) =>
+            {
+                await noticeOutboxRepository.add(account);
+                throw new Error('outbox unavailable');
+            },
+        });
+        const email = 'n5@example.com';
+        const { userId } = await dueAccount(email);
+
+        expect(await sweepDuePurges()).toEqual({ processed: 1, purged: 0, skipped: 1 });
+
+        expect(await deletionState(userId)).toEqual({ deletion: 'pending', email, request: 'pending' });
+        expect(await outboxRows()).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(authDeletionCompletedEvent.emit).not.toHaveBeenCalled();
+    });
+
+    it('N6: a second purge of the same batch row, and a later sweep, do not call onPurge again', async () =>
+    {
+        const onPurge = vi.fn(async () => undefined);
+        configureDeletion({ onPurge });
+        const { userId } = await dueAccount('n6@example.com');
+        const [batchRow] = await accountDeletionRequestsRepository.findDueForPurge(new Date());
+
+        expect((await purgePendingRequest(batchRow!)).outcome).toBe('purged');
+        // Another instance's sweep read the same batch before the first committed.
+        expect((await purgePendingRequest(batchRow!)).outcome).not.toBe('purged');
+        expect(await sweepDuePurges()).toEqual({ processed: 0, purged: 0, skipped: 0 });
+
+        expect(onPurge).toHaveBeenCalledTimes(1);
+        expect((await deletionState(userId)).request).toBe('completed');
+    });
+
+    it.each(['anonymize', 'hard-delete'] as const)('N7 (%s): completed carries exactly { userPublicId, purgeStrategy }', async (purgeStrategy) =>
+    {
+        configureDeletion({ purgeStrategy });
+        const { publicId } = await dueAccount(`n7-${purgeStrategy}@example.com`, '+15550100007');
+
+        expect(await sweepDuePurges()).toMatchObject({ purged: 1 });
+
+        await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(1));
+        const [payload] = vi.mocked(authDeletionCompletedEvent.emit).mock.calls[0]!;
+        expect(payload).toStrictEqual({ userPublicId: publicId, purgeStrategy });
     });
 });

@@ -344,6 +344,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code, device link and one-time-token sign-in keep their answers. The mobile contract does not
   change: its error list is one list for the whole surface, and both codes stay in it for those
   operations.
+- **BREAKING: @spfn/auth: the package sends no account-deletion notice; events and an `onPurge`
+  hook give the app what it needs (spfn/spfn#170).** The package sends a message itself only when it
+  carries, or stands in for, a credential it minted; deletion has none. Removed:
+  `deletion.sendNotifications` (and the exported `DEFAULT_DELETION_SEND_NOTIFICATIONS`) and the
+  three fixed-English notices it switched — "requested" (e-mail, else SMS), "cancelled" and "deleted"
+  (e-mail only). With the default configuration nothing is sent on request, cancel or purge.
+  - `createAuthLifecycle({ deletion })` refuses to boot for an option it does not know, and names
+    `sendNotifications` as removed, pointing at the README recipe, so an app that relied on the
+    notices does not silently stop sending them. A misspelt option is refused the same way, listing
+    the options.
+  - `auth.deletion.requested` gains `immediate: boolean`, true whenever the grace period is 0
+    (`gracePeriodDays: 0`, or a request with `immediate: true`): the purge runs right after that
+    commit, so there is no date to announce and nothing to cancel. `auth.deletion.cancelled` and
+    `auth.deletion.completed` (`{ userPublicId, purgeStrategy }`, no contact details) are unchanged.
+  - New `deletion.onPurge(account)` hook, with type `PurgedAccount` (`{ publicId, email, phone,
+    purgeStrategy }`, read under the account lock before the destructive step). It is called inside
+    the purge transaction, after the purge's writes and before the commit, once per committed purge,
+    and is never published or queued. Database work only: write an outbox row through the app's own
+    repository and send from a job after the commit. A throw rolls the purge back — account and
+    request stay `pending`, no `completed` — and the next sweep retries.
+
+  **Migrate from `sendNotifications: true`:** remove the option, then follow the README recipe
+  ("Account Deletion & Recovery" → "Telling the person"): `registerTemplate` three templates with
+  `locales`, subscribe to `authDeletionRequestedEvent` (skip when `immediate`) and
+  `authDeletionCancelledEvent` and send with `sendEmail`/`sendSMS` to the account read by `userId`,
+  and have `onPurge` write an outbox row that a job sends. An app that passed
+  `sendNotifications: false` only removes the option.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
   worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's

@@ -28,7 +28,10 @@ const AUTH_CONFIG_REFUSALS: [string, unknown, RegExp][] = [
 const LIFECYCLE_REFUSALS: [string, AuthLifecycleOptions['deletion'], RegExp][] = [
     ['deletion.purgeStrategy', { purgeStrategy: 'hard_delete' as never }, /deletion\.purgeStrategy does not accept "hard_delete"\. Allowed: anonymize, hard-delete/],
     ['deletion.allowSelfImmediate', { allowSelfImmediate: 'false' as never }, /deletion\.allowSelfImmediate does not accept "false"\. Allowed: true, false/],
-    ['deletion.sendNotifications', { sendNotifications: 'false' as never }, /deletion\.sendNotifications does not accept "false"\. Allowed: true, false/],
+    // Removed (#170): an app upgrading with it set must learn at boot that nothing is mailed any more.
+    ['deletion.sendNotifications', { sendNotifications: true } as never, /deletion\.sendNotifications was removed: @spfn\/auth sends no account-deletion notice\..*README, "Account Deletion & Recovery"/],
+    // A misspelt hook would otherwise never be called, and its notice never sent.
+    ['deletion.<unknown key>', { onPurged: async () => undefined } as never, /deletion has no option 'onPurged'\. Allowed: gracePeriodDays, purgeStrategy, allowSelfImmediate, purgeCron, onBeforePurge, onPurge/],
 ];
 
 describe('T5: unknown policy values refuse at configuration', () =>
