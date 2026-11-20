@@ -5,7 +5,8 @@
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
  * RV-D and the recovery-code generation — D2 of #329, SU1–SU3 of #372
  * (a marking registration records a step-up), M399-1–M399-4 of #399 (a
- * user-verified registration is marked whenever the policy requires a factor)
+ * user-verified registration is marked whenever the policy requires a factor),
+ * RV412-P1 of its review (only a listed passkey is marked)
  * and SU4–SU5 of #393 (one spend of a step-up assertion across its two
  * consumers), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
@@ -1610,6 +1611,18 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
             expect.objectContaining({ passkeyId: unverified.passkeyId, secondFactor: false, userVerified: false }),
             expect.objectContaining({ passkeyId: marked.passkeyId, secondFactor: true, userVerified: true }),
         ]));
+    });
+
+    it('RV412-P1: required, methods [\'totp\'], an account enrolled by TOTP — a user-verified registration marks nothing, and the answer has no mfaStatus', async () =>
+    {
+        usePolicy({ required: true, methods: ['totp'], recoveryCodes: false });
+        const session = await signIn();
+        await enrolTotp(session);
+
+        const { passkeyId, answer } = await registerPasskey(session);
+
+        expect(answer).toEqual({ passkeyId, label: null, createdAt: expect.any(String) });
+        expect(await liveMarkedPasskeys()).toBe(0);
     });
 
     it('SU3: first set-up — a temporary-password session registers its marking passkey and changes the password with no second ceremony', async () =>
