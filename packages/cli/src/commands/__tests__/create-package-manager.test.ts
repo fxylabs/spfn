@@ -30,8 +30,9 @@ vi.mock('../init/steps/readme.js', () => ({ setupReadme: vi.fn() }));
 
 import { createCommand } from '../create.js';
 import { initializeSpfn } from '../init/index.js';
-import { setupServerStructure } from '../init/steps/server-structure.js';
 import { logger } from '../../utils/logger.js';
+import { DRIZZLE_TYPEBOX_REFUSAL } from '../../utils/package-manager.js';
+import { NPM_ERESOLVE_DRIZZLE_TYPEBOX } from '../../utils/__tests__/fixtures/npm-eresolve.js';
 
 const originalCwd = process.cwd();
 let repository: string;
@@ -166,14 +167,21 @@ describe('spfn create under a pnpm workspace, the manager detected or pnpm', () 
     });
 });
 
-describe('spfn init in an npm app that still lists drizzle-typebox', () =>
+/** What execa rejects with when npm exits 1 having written `stderr`. */
+function npmFailure(stderr: string): Error
 {
-    it('refuses before writing a file or running npm, saying how to fix it', async () =>
+    return Object.assign(new Error(`Command failed with exit code 1: npm install\n${stderr}`), { exitCode: 1, stdout: '', stderr });
+}
+
+describe('an npm install that npm refuses over drizzle-typebox (npm 10.9.9 output, fixtures/npm-eresolve.ts)', () =>
+{
+    it('spfn init prints npm\'s lines and the explanation, then exits non-zero', async () =>
     {
         const app = join(repository, 'scratch/app');
         mkdirSync(app, { recursive: true });
         writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'app', dependencies: { 'next': '16', 'drizzle-typebox': '^0.3.3' } }));
         process.chdir(app);
+        mocks.execa.mockRejectedValueOnce(npmFailure(NPM_ERESOLVE_DRIZZLE_TYPEBOX));
         const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
         {
             throw new Error(`process.exit(${code})`);
@@ -182,12 +190,23 @@ describe('spfn init in an npm app that still lists drizzle-typebox', () =>
 
         await expect(initializeSpfn({ pm: 'npm', mode: 'bare', yes: true })).rejects.toThrow('process.exit(1)');
 
-        expect(setupServerStructure).not.toHaveBeenCalled();
-        expect(mocks.execa).not.toHaveBeenCalled();
-        expect(error).toHaveBeenCalledWith(expect.stringContaining(
-            'Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.',
-        ));
+        expect(mocks.spinner.fail).toHaveBeenCalledWith('Failed to install dependencies');
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('npm error peer drizzle-orm@">=0.36.0" from drizzle-typebox@0.3.3'));
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(DRIZZLE_TYPEBOX_REFUSAL));
         exit.mockRestore();
+        error.mockRestore();
+    });
+
+    it('spfn create\'s @svgr/webpack install warns as before and prints npm\'s lines and the explanation', async () =>
+    {
+        mocks.execa.mockImplementation((command: string, args: string[], options: { cwd: string }) =>
+            (args.includes('@svgr/webpack') ? Promise.reject(npmFailure(NPM_ERESOLVE_DRIZZLE_TYPEBOX)) : fakeProcess(command, args, options)));
+        const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+        await createFrom(join(repository, 'scratch'));
+
+        expect(mocks.spinner.warn).toHaveBeenCalledWith('Failed to setup SVGR (you can run `spfn setup icons` later)');
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(DRIZZLE_TYPEBOX_REFUSAL));
         error.mockRestore();
     });
 });

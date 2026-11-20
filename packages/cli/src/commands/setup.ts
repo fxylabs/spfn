@@ -2,14 +2,13 @@ import { Command } from 'commander';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import ora from 'ora';
-import { execa } from 'execa';
 import fse from 'fs-extra';
 import chalk from 'chalk';
 
 const { ensureDirSync, writeFileSync, readFileSync } = fse;
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, getAddArgs } from '../utils/package-manager.js';
+import { detectPackageManager, getAddArgs, runInstall } from '../utils/package-manager.js';
 
 interface PackageJson {
     name?: string;
@@ -62,19 +61,16 @@ export async function setupIcons(): Promise<void>
         logger.step(`Detected package manager: ${pm}`);
 
         const spinner = ora('Installing @svgr/webpack...').start();
+        const failure = await runInstall(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd });
 
-        try
-        {
-            await execa(pm, getAddArgs(pm, ['@svgr/webpack'], { dev: true }), { cwd });
-
-            spinner.succeed('@svgr/webpack installed');
-        }
-        catch (error)
+        if (failure)
         {
             spinner.fail('Failed to install @svgr/webpack');
-            logger.error(String(error));
+            logger.error(failure);
             process.exit(1);
         }
+
+        spinner.succeed('@svgr/webpack installed');
     }
 
     // 4. Update next.config

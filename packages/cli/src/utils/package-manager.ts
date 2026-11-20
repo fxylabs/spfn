@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import { execa, type Options } from 'execa';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, posix, relative, sep } from 'path';
 import { parse } from 'yaml';
@@ -81,26 +82,6 @@ export function pnpmNonMemberReason(appDir: string): string | null
 
     return `${appDir} is not in the packages of ${join(root, 'pnpm-workspace.yaml')}, so pnpm installed that workspace instead.`
         + ' Add the directory to its packages, or install with the app\'s own manager (--pm npm).';
-}
-
-/**
- * Why `pm` cannot install the app in `appDir`, or null when nothing it declares
- * is known to stop it. drizzle-typebox's peer range on drizzle-orm (`>=0.36.0`)
- * admits no prerelease, so npm refuses (`ERESOLVE`) an app that declares it
- * beside the `1.0.0-rc.4` SPFN pins, as every app an earlier `spfn init`
- * scaffolded does. pnpm, yarn and bun do not refuse it.
- */
-export function installRefusalReason(pm: PackageManager, appDir: string): string | null
-{
-    const manifest = readManifest(join(appDir, 'package.json'), JSON.parse);
-    const listsDrizzleTypebox = ['dependencies', 'devDependencies', 'optionalDependencies']
-        .map(field => isObject(manifest) ? manifest[field] : undefined)
-        .some(dependencies => isObject(dependencies) && 'drizzle-typebox' in dependencies);
-
-    return pm === 'npm' && listsDrizzleTypebox
-        ? 'npm refuses this app (ERESOLVE): package.json lists drizzle-typebox, whose peer range drizzle-orm >=0.36.0 excludes the 1.0.0-rc.4 SPFN pins.'
-            + ' Remove drizzle-typebox from package.json, or import drizzle-orm/typebox-legacy instead.'
-        : null;
 }
 
 /**
@@ -261,6 +242,49 @@ function isWorkspaceMember(path: string, patterns: string[]): boolean
 
     return included.some(pattern => posix.matchesGlob(path, pattern))
         && !excluded.some(pattern => posix.matchesGlob(path, pattern));
+}
+
+/**
+ * Why npm refused the install and how to fix it, printed under npm's own lines
+ * when they report `ERESOLVE` and name drizzle-typebox: its peer range on
+ * drizzle-orm admits no prerelease, so npm refuses it beside the
+ * `1.0.0-rc.4` SPFN pins, as it does in every npm app an earlier `spfn init`
+ * scaffolded. The CLI does not predict this; npm alone knows what it resolves.
+ */
+export const DRIZZLE_TYPEBOX_REFUSAL = 'npm refused the install (ERESOLVE above) over drizzle-typebox:'
+    + ' its peer range on drizzle-orm excludes the drizzle-orm prerelease SPFN pins.'
+    + ' Remove drizzle-typebox from the package.json that declares it (the app\'s, or its npm workspace root\'s),'
+    + ' move to a drizzle-typebox version that accepts the prerelease, or import drizzle-orm/typebox-legacy instead.';
+
+/**
+ * Runs `pm` with `args` — every install and add the CLI makes goes through
+ * here — and resolves to null when it succeeds. When it fails, resolves to the
+ * report to print: the failure, the manager's own output in it, and below it
+ * `DRIZZLE_TYPEBOX_REFUSAL` when that is what npm refused.
+ */
+export async function runInstall(pm: PackageManager, args: string[], options?: Options): Promise<string | null>
+{
+    try
+    {
+        await execa(pm, args, options);
+
+        return null;
+    }
+    catch (error)
+    {
+        return pm === 'npm' && refusesDrizzleTypebox(error)
+            ? `${String(error)}\n\n${DRIZZLE_TYPEBOX_REFUSAL}`
+            : String(error);
+    }
+}
+
+/** Whether a failed npm run's output reports `ERESOLVE` and names drizzle-typebox. */
+function refusesDrizzleTypebox(error: unknown): boolean
+{
+    const { stdout, stderr } = isObject(error) ? error : {};
+    const output = [stdout, stderr].filter(stream => typeof stream === 'string').join('\n');
+
+    return output.includes('ERESOLVE') && output.includes('drizzle-typebox');
 }
 
 /**

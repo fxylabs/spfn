@@ -1,8 +1,7 @@
 import ora, { type Ora } from 'ora';
-import { execa } from 'execa';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
-import { findUnresolvedPackages, getInstallArgs, pnpmNonMemberReason, type PackageManager } from '../../../utils/package-manager.js';
+import { findUnresolvedPackages, getInstallArgs, pnpmNonMemberReason, runInstall, type PackageManager } from '../../../utils/package-manager.js';
 import { getSpfnTag } from '../../../utils/version.js';
 import type { PackageJson } from './validate.js';
 import type { ScaffoldMode } from '../mode.js';
@@ -121,15 +120,12 @@ export async function setupPackageJson(
 async function installDependencies(spinner: Ora, cwd: string, packageManager: PackageManager): Promise<void>
 {
     spinner.start('Installing dependencies...');
+    const failure = await runInstall(packageManager, getInstallArgs(packageManager), { cwd });
 
-    try
-    {
-        await execa(packageManager, getInstallArgs(packageManager), { cwd });
-    }
-    catch (error)
+    if (failure)
     {
         spinner.fail('Failed to install dependencies');
-        logger.error(String(error));
+        logger.error(failure);
         process.exit(1);
     }
 
