@@ -3399,7 +3399,7 @@ is the rejected promise, before any prompt.
 
 If the verify still answers 403 `PASSKEY_PROOF_REQUIRED` — binding was turned on since the read —
 `enrollPasskey` runs the proof once and sends the **same** attestation again; the refusal did not
-spend its challenge. A second refusal is a rejected promise. An app that ran
+spend its challenge. A second refusal is a rejected promise (carrying `retry`, below). An app that ran
 `provePasskey(api, 'passkeyAdd')` itself passes the assertion as
 `enrollPasskey(api, { passkeyResponse })`: it is sent as given, the binding is not read, and no
 proof prompt is shown — a refusal of that proof (spent, say) is the rejected promise.
@@ -3413,6 +3413,33 @@ and the authenticator already holds the new credential. So the `busy` result car
 const result = await enrollPasskey(authApi, { label: 'MacBook Touch ID' });
 const settled = !result.ok && result.retry ? await enrollPasskey(authApi, { retry: result.retry }) : result;
 ```
+
+The same holds for every other way the helper ends after the registration prompt without the
+passkey stored. A proof asked after it and dismissed is `no-credential` with `retry`. A rejection
+after it — `passkey-proof/options` refused (429, say), a refusal of the verify, or the network's
+`TypeError('fetch failed')` — stays a rejection, as every helper here rejects a failed call, and is
+the error as it came with `retry` on it: `enrollPasskeyRetryOf(error)` reads it, and is `undefined`
+for a rejection before the prompt, when nothing was made. A retry whose post the verify answers
+with the proof request runs the proof again, unless the app supplied it.
+
+```ts
+import { enrollPasskey, enrollPasskeyRetryOf, type EnrollPasskeyRetry } from '@spfn/auth/client';
+
+async function addPasskey(retry?: EnrollPasskeyRetry)
+{
+    return await enrollPasskey(authApi, { label: 'MacBook Touch ID', retry }).catch((error: unknown) =>
+    {
+        offerTryAgain(enrollPasskeyRetryOf(error));   // its button calls addPasskey(retry)
+
+        return Promise.reject(error);
+    });
+}
+```
+
+A `retry` lives as long as the registration's challenge (`SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS`,
+five minutes by default) and until a post stores the passkey. After either, the re-post answers
+401 `PasskeyChallengeError` — so does one whose first post was stored but its answer lost to the
+network; the passkey list says which — and a new ceremony is the only way.
 
 A session that may only enrol a second factor ([`secondFactorEnrolmentRequired`](#requiring-a-second-factor-secondfactor))
 reads `session/binding` — it is an enrolment route while `'passkey'` is listed, because this helper
@@ -3477,7 +3504,7 @@ someone who simply changed their mind.
 | `{ ok: true, ... }` | signed in / enrolled; the rest of the object is the server's answer |
 | `{ ok: false, reason: 'unsupported' }` | this browser has no WebAuthn; nothing was sent to the server |
 | `{ ok: false, reason: 'cancelled' }` | the person dismissed the enrollment prompt (the registration's `create()`) |
-| `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it. Enrolling: the account has session binding on, and the proof prompt was dismissed or this device offered none of the account's passkeys — nothing was registered. A bound account with no passkey left turns binding off first ([An owner who lost every passkey](#session-binding)) |
+| `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it. Enrolling: the account has session binding on, and the proof prompt was dismissed or this device offered none of the account's passkeys. Asked before the registration prompt, nothing was registered; asked after it (binding turned on in between), the authenticator holds the new credential and the result carries `retry` — `enrollPasskey(api, { retry })` asks the proof again and stores it. A bound account with no passkey left turns binding off first ([An owner who lost every passkey](#session-binding)) |
 | `{ ok: false, reason: 'busy', error }` | the server answered 503 (`AccountBusyError`) — another change held the account, nothing was written or spent. `renewSession`, `stepUpWithPasskey`: call again (an assertion leaves nothing behind). Enrolling: the result also carries `retry`; `enrollPasskey(api, { retry })` posts the same attestation again — a fresh call would leave the first credential on the authenticator unstored |
 | `{ ok: false, reason: 'error', error }` | anything else, with the original error attached |
 

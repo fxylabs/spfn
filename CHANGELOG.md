@@ -606,8 +606,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends an app's own proof as given; its refusal rejects, with no proof prompt of the helper's. A
   binding read that fails rejects as itself before any prompt. New results: a dismissed proof
   prompt is `no-credential`, and a 503 at the verify is `busy` with `retry`, which
-  `enrollPasskey(api, { retry })` posts again — the same attestation and proof, no prompt. A
-  dismissed registration prompt is still `cancelled`. Not breaking. `GET /_auth/session/binding` is
+  `enrollPasskey(api, { retry })` posts again — the same attestation and proof, no prompt. Every
+  other way it ends after the registration prompt without the passkey stored hands `retry` back
+  too: a proof asked after it (binding turned on since the read) and dismissed is `no-credential`
+  with `retry`, and a rejection after it — `passkey-proof/options` refused, the verify refused, a
+  network `TypeError` — is the error as it came, carrying `retry` (`enrollPasskeyRetryOf(error)`).
+  A `retry` past the registration's challenge answers 401 `PasskeyChallengeError`; a new ceremony
+  is then the only way. A dismissed registration prompt is still `cancelled`. Not breaking. `GET /_auth/session/binding` is
   an enrolment route while `'passkey'` is listed (`ROUTE_ENROLMENT`), so an enrolment-only session
   reads it; on a bound account its proof is refused before the registration prompt, and it marks an
   existing passkey instead (README, "Enrolling, from a Next.js client component").

@@ -39,14 +39,17 @@ export type { AuthApi };
  * - `no-credential`: the authenticator had nothing for this relying party.
  *   From `enrollPasskey`: the account has session binding on, and the proof
  *   prompt (an assertion with a passkey it already holds) was dismissed or this
- *   device offered none of its passkeys
+ *   device offered none of its passkeys. When the proof was asked only after
+ *   the registration prompt, the result carries `retry`
  * - `busy`: the server answered 503 — another change to the account held it
  *   (`AccountBusyError`). Retryable: the session is not over, and nothing was
  *   spent. One rule for every helper: a retry never needs the authenticator to
  *   make something new. An assertion leaves nothing behind, so `renewSession`
  *   and `stepUpWithPasskey` are simply called again; a registration made a
  *   credential on the authenticator, so `enrollPasskey`'s `busy` carries
- *   `retry`, which posts that same attestation again
+ *   `retry`, which posts that same attestation again — as does every other
+ *   way `enrollPasskey` ends after the registration prompt without the
+ *   passkey stored, a rejection included (`enrollPasskeyRetryOf`)
  * - `error`: anything else, with the original error attached
  */
 export type PasskeyFailureReason = 'unsupported' | 'cancelled' | 'no-credential' | 'busy' | 'error';
@@ -100,10 +103,19 @@ export interface EnrollPasskeyOptions
      */
     passkeyResponse?: AuthenticationResponseJSON;
     /**
-     * A `busy` result's `retry`: `register/verify` is posted again with the
-     * attestation and proof it carried, which the 503 did not spend. Nothing
-     * else runs — no binding read, no prompt — and the other options are not
-     * read; the label travels in it.
+     * A `retry` handed back after the registration prompt — a `busy` or
+     * `no-credential` result's, or a rejection's (`enrollPasskeyRetryOf`):
+     * `register/verify` is posted again with the attestation and proof it
+     * carried. No binding read and no registration prompt; the proof prompt
+     * only if the verify asks the proof and the app did not supply it. The
+     * other options are not read; the label travels in it.
+     *
+     * The registration's challenge lives `SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS`
+     * (five minutes by default) and is spent by the post that stores the
+     * passkey. After either, the re-post answers 401 `PasskeyChallengeError` —
+     * so does one whose first post was stored but its answer lost to the
+     * network (the passkey list says which) — and a new ceremony is the only
+     * way.
      */
     retry?: EnrollPasskeyRetry;
 }
@@ -117,8 +129,9 @@ export interface EnrolmentBody
 }
 
 /**
- * A `register/verify` that answered 503, kept to be posted again: hand it back
- * as `enrollPasskey(api, { retry })`. Built by the helper, not by the app.
+ * A `register/verify` that did not store the passkey, kept to be posted again:
+ * hand it back as `enrollPasskey(api, { retry })`. Built by the helper, not by
+ * the app.
  */
 export interface EnrollPasskeyRetry
 {
@@ -127,7 +140,10 @@ export interface EnrollPasskeyRetry
     readonly mayProve: boolean;
 }
 
-/** `PasskeyResult`, with `retry` set on a `busy` failure and on no other. */
+/**
+ * `PasskeyResult`, with `retry` set on a failure after the registration
+ * prompt: `busy`, and `no-credential` when the proof was asked after it.
+ */
 export type EnrollPasskeyResult =
     | ({ ok: true } & EnrollPasskeyValue)
     | { ok: false; reason: PasskeyFailureReason; error?: unknown; retry?: EnrollPasskeyRetry };
@@ -173,8 +189,13 @@ export interface EnrollPasskeyValue
  *
  * A dismissed proof prompt is `no-credential`, a dismissed registration prompt
  * `cancelled`, and a 503 at the verify `busy` (`AccountBusyError`: nothing was
- * written or spent). The `busy` result carries `retry`; `enrollPasskey(api,
- * { retry })` posts the same attestation and proof again, with no prompt.
+ * written or spent). Once the registration prompt has made the credential,
+ * every way this ends without it stored hands back `retry`: on the result
+ * (`busy`; `no-credential` from a proof asked after it), or on the rejected
+ * error, which is otherwise the server's refusal or the network's `TypeError`
+ * as it came (`enrollPasskeyRetryOf(error)`) — a rejection, as every helper
+ * here rejects a failed call. `enrollPasskey(api, { retry })` posts the same
+ * attestation again, with no registration prompt.
  */
 export async function enrollPasskey(
     api: AuthApi,
