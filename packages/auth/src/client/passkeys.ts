@@ -517,3 +517,52 @@ export async function completeMfaWithPasskey(
 
     return { ok: true, ...verified };
 }
+
+// ============================================================================
+// Step-up on this device (#372)
+// ============================================================================
+
+/**
+ * Prove the second factor again on a signed-in device with a passkey, so the
+ * change that answered 403 `STEP_UP_REQUIRED` can be retried.
+ *
+ * `mfa/step-up/options`, `navigator.credentials`, `mfa/step-up` — and the same
+ * split `completeMfaWithPasskey` makes: a ceremony that did not happen is a
+ * result, the server declining is a rejected promise. A passkey the owner never
+ * marked, or an assertion without user verification, is `MfaVerificationFailedError`
+ * (401, with the body a wrong code gets); too many wrong proofs, 429
+ * `SECOND_FACTOR_LOCKED`.
+ *
+ * @example
+ * const stepUp = await stepUpWithPasskey(api);
+ * if (stepUp.ok)
+ * {
+ *     await api.changePassword.call({ body: { currentPassword, newPassword } });
+ * }
+ */
+export async function stepUpWithPasskey(api: AuthApi): Promise<PasskeyResult<{}>>
+{
+    if (!isPasskeySupported())
+    {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    const optionsJSON = await api.mfaStepUpOptions.call({
+        body: {},
+    }) as PublicKeyCredentialRequestOptionsJSON;
+
+    let response: AuthenticationResponseJSON;
+
+    try
+    {
+        response = await startAuthentication({ optionsJSON });
+    }
+    catch (error)
+    {
+        return { ok: false, reason: failureReason(error, 'no-credential'), error };
+    }
+
+    await api.mfaStepUp.call({ body: { response } });
+
+    return { ok: true };
+}
