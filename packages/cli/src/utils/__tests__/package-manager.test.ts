@@ -20,6 +20,7 @@ import {
     getAddArgs,
     getInstallArgs,
     getRunScriptArgs,
+    pnpmNonMemberReason,
 } from '../package-manager.js';
 
 describe('getRunScriptArgs', () =>
@@ -260,6 +261,18 @@ describe('detectPackageManager', () =>
         expect(findWorkspace(join(root, 'apps/web'))).toEqual({ root, packageManager: 'pnpm' });
         expect(findWorkspace(join(root, 'tools/cli'))).toBeNull();
     });
+
+    it('answers from the nearest declaration: an inner pnpm-workspace.yaml that does not list the app outranks an outer one that does', () =>
+    {
+        const root = makeRepository({
+            'pnpm-workspace.yaml': 'packages:\n  - "**"\n',
+            'pnpm-lock.yaml': '',
+            'inner/pnpm-workspace.yaml': 'packages:\n  - other/*\n',
+        });
+
+        expect(findWorkspace(join(root, 'inner/apps/x'))).toBeNull();
+        expect(detectPackageManager(join(root, 'inner/apps/x'))).toBe('npm');
+    });
 });
 
 describe('findUnresolvedPackages', () =>
@@ -369,5 +382,23 @@ describe('findUnresolvedPackages', () =>
         });
 
         expect(findUnresolvedPackages(join(root, 'app'))).toEqual([]);
+    });
+});
+
+describe('pnpmNonMemberReason', () =>
+{
+    it('names the workspace that does not list the app', () =>
+    {
+        const root = makeRepository({ 'pnpm-workspace.yaml': 'packages:\n  - packages/*\n' });
+
+        expect(pnpmNonMemberReason(join(root, 'apps/web')))
+            .toContain(`is not in the packages of ${join(root, 'pnpm-workspace.yaml')}`);
+    });
+
+    it('gives no reason for the app\'s own settings-only pnpm-workspace.yaml, as create-next-app writes one', () =>
+    {
+        const root = makeRepository({ 'app/pnpm-workspace.yaml': 'onlyBuiltDependencies:\n  - sharp\n' });
+
+        expect(pnpmNonMemberReason(join(root, 'app'))).toBeNull();
     });
 });
