@@ -53,12 +53,18 @@ alone.
 Per package (run inside `packages/<name>/`):
 
 ```bash
-pnpm build              # tsup build (+ madge circular check)
+pnpm build              # tsup build (+ madge circular check, bundle identity check)
 pnpm type-check         # tsc --noEmit
 pnpm test               # vitest run
 pnpm test:unit          # unit tests only (where present)
 pnpm check:circular     # madge --circular
 ```
+
+Every package's `build` ends with `scripts/check-bundle-identity.mjs`, which fails when one source
+module is emitted into two `dist/` files, so that a class or a singleton is one object in every entry
+point. When it fails, keep `splitting: true` in the package's tsup config; a separate tsup config,
+such as auth's `'use client'` build, must reach the main build's modules by package name (or the
+package's private `imports`), never by a relative path.
 
 Codegen and migrations (in packages/apps that use them):
 
