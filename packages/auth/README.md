@@ -3897,7 +3897,12 @@ the app's `checkSecondFactorProof(userId, { response }, { kind: 'stepUp', creden
 `spend()` runs first; only the session that asked for it can spend it — `credential` is that
 session's, from `getAuth(c)`. It is **not tied to an action**: what it authorizes is the app
 route's to decide, and nothing stops the same session spending it on another route of the app's
-that takes one. Under a policy that does not list passkeys it counts as a wrong proof.
+that takes one. It proves the second factor as at `mfa/step-up`: with user verification, from a
+passkey marked as a second factor while the policy lists `'passkey'`; anything else is a wrong
+proof. In the [enrolment-only state](#the-enrolment-only-state) any live passkey of the account
+proves it, marked or not, whatever is listed — but an app route never meets that state: `authenticate`
+refuses such a session 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` before app code runs, and
+`optionalAuth` reads it as anonymous.
 
 ```typescript
 import { stepUpAssertion } from '@spfn/auth/client';

@@ -537,8 +537,12 @@ export interface StepUpAssertionValue
  * `mfa/step-up/options` and `navigator.credentials`; nothing is posted after.
  * The assertion is spent once, by whichever of `mfa/step-up` or the app's
  * `spend()` runs first; only the session that asked for it can spend it. It is
- * not tied to an action: what it authorizes is the app's to decide. Under a
- * policy that does not list passkeys it counts as a wrong proof.
+ * not tied to an action: what it authorizes is the app's to decide. It proves
+ * the second factor as at `mfa/step-up`: with user verification, from a passkey
+ * marked as a second factor while the policy lists `'passkey'`; anything else
+ * is a wrong proof. In the enrolment-only state any live passkey proves it, but
+ * an app route never meets that state: `authenticate` refuses such a session
+ * 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` before app code runs.
  *
  * A dismissed prompt is `no-credential`, as for the other assertions here,
  * whose `allowCredentials` is empty too. A refusal of the options call is a
