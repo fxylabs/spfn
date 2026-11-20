@@ -268,6 +268,11 @@ inside repository methods.
 | `_deleteMany(table, where)` | `T[]` |
 | `_count(table, where?, { cap?, primary? })` | `number` — with `cap`, at most `cap + 1` |
 
+`{ primary: true }` goes after `where` (`_findOne(table, { id }, { primary: true })`, `_count(table,
+undefined, { primary: true })`) or into the `_findMany` / `_findManyKeyset` options object: in the
+`where` position (`_findOne(table, { primary: true })`) it type-checks, since `where` is
+`Record<string, any>`, and fails at run time as malformed SQL (`syntax error at or near "="`).
+
 `_count` with `cap` stops counting past `cap` rows: it reads at most `cap + 1` rows through a
 limited subquery, and a result of `cap + 1` means "more than `cap`". A list label such as
 "1,000+" needs nothing more, and the count no longer scans every matching row on each
@@ -418,6 +423,10 @@ where "notes"."tenant_id" = $2
 | `_deleteOne` / `_deleteMany(tenantId, table, where)` | added to WHERE |
 | `_select(tenantId, fields?, { primary? })` | the `from` table in WHERE, each joined tenant-aware table in its ON clause |
 | `_selectOfUser(userId, fields?, { primary? })` | by person, not by tenant: the `from` table must be a `visibleTo` tenancy table and gets `user = userId` in WHERE, each joined `visibleTo` table in its ON clause; see [A second key](#a-second-key-visibleto) |
+
+`{ primary: true }` goes after `where` here too (`_findOne(tenantId, table, { id }, { primary:
+true })`), never in its place: `_findOne(tenantId, table, { primary: true })` type-checks, since
+`where` is `Record<string, any>`, and fails at run time as malformed SQL (`syntax error at or near "="`).
 
 - **The tenant id must be a positive safe integer.** Anything else — `0`, `NaN`,
   `undefined`, a string — throws before a query is built.
