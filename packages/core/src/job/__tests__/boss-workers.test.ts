@@ -165,6 +165,27 @@ describe('core\'s fetch loop keeps pg-boss\'s worker behaviour', () =>
         expect(boss.fetch).not.toHaveBeenCalled();
     });
 
+    it('K9: stopWorkers in the tick a poll begins waits for that poll\'s fetch, or the poll fetches nothing', async () =>
+    {
+        let unsettled = 0;
+        boss.fetch.mockImplementation(() =>
+        {
+            unsettled++;
+
+            return new Promise((resolve) => setTimeout(() =>
+            {
+                unsettled--;
+                resolve([]);
+            }, 500));
+        });
+
+        void boss.work('q', async () => undefined);
+        const atStop = stopWorkers(boss as unknown as PgBoss, 1000).then(() => ({ unsettled, fetches: fetchesOf('q') }));
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(await atStop).toEqual({ unsettled: 0, fetches: fetchesOf('q') });
+    });
+
     function fetchesOf(queue: string): number
     {
         return boss.fetch.mock.calls.filter(([name]) => name === queue).length;

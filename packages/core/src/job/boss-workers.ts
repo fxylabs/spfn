@@ -380,19 +380,14 @@ async function runLoop(boss: PgBoss, record: BossWorkers, loop: Loop): Promise<v
 }
 
 /**
- * One fetch and, when it took jobs, their batch; a failure is emitted as
- * pg-boss's worker emits it, and the loop goes on
+ * One fetch — none once the loop is stopping — and, when it took jobs, their
+ * batch; a failure is emitted as pg-boss's worker emits it, and the loop goes on
  */
 async function poll(boss: PgBoss, record: BossWorkers, loop: Loop): Promise<void>
 {
     try
     {
-        // No await before this call: a loop is never between "not stopping" and a fetch it holds
-        loop.fetching = boss.fetch<object>(loop.queue, loop.fetchOptions).finally(() =>
-        {
-            loop.fetching = null;
-        });
-        const jobs = await loop.fetching;
+        const jobs = await takeFetch(boss, loop) ?? [];
 
         if (jobs.length > 0)
         {
@@ -403,6 +398,29 @@ async function poll(boss: PgBoss, record: BossWorkers, loop: Loop): Promise<void
     {
         emitError(boss, loop, error);
     }
+}
+
+/**
+ * Start the loop's fetch and hold it where `stopWorkers` sees it, unless the
+ * loop is stopping
+ *
+ * The check and the take are one synchronous step, so `stopWorkers` either
+ * sees the fetch or the loop starts none — whatever a caller awaits first.
+ * Keep it synchronous: an await between them is the #359 race again.
+ */
+function takeFetch(boss: PgBoss, loop: Loop): Promise<PgBoss.Job[]> | null
+{
+    if (loop.stopping)
+    {
+        return null;
+    }
+
+    loop.fetching = boss.fetch<object>(loop.queue, loop.fetchOptions).finally(() =>
+    {
+        loop.fetching = null;
+    });
+
+    return loop.fetching;
 }
 
 /**
