@@ -496,7 +496,7 @@ describe('ErrorHandler Middleware', () =>
             expect(lines.find(line => line.message === 'Error occurred')!.context!.error).toEqual({ kind: 'error', name: 'Error', message: 'boom', code: 'E_BOOM' });
         });
 
-        it('F3: the request logger keeps an error body it copies, stack and all — it is data, not an error', async () =>
+        it('F3: the request logger keeps an error body it copies, stack, details and error envelope — it is data, not an error', async () =>
         {
             const { lines } = captureLoggerClass(Logger);
             const app = new Hono();
@@ -504,7 +504,7 @@ describe('ErrorHandler Middleware', () =>
             app.onError(ErrorHandler({ includeStack: true }));
             app.get('/x', () =>
             {
-                throw new ValidationError({ message: 'bad', fields: [{ path: 'email', message: 'required' }] } as any);
+                throw new ValidationError({ message: 'bad', fields: [{ path: 'email', message: 'required' }], details: { form: 'signup' } });
             });
 
             await app.request('/x');
@@ -514,8 +514,15 @@ describe('ErrorHandler Middleware', () =>
             expect(copy).toMatchObject({
                 __type: 'ValidationError',
                 fields: [{ path: 'email', message: 'required' }],
+                details: { form: 'signup' },
                 stack: expect.any(String),
-                error: { code: 'ValidationError', requestId: expect.any(String) },
+            });
+            // The envelope is the body's own data: under alreadySentToClient its
+            // `error` key is not described as a caught value
+            expect((copy as Record<string, unknown>).error).toEqual({
+                code: 'ValidationError',
+                message: 'bad',
+                requestId: expect.stringMatching(/^req_/),
             });
         });
     });

@@ -27,6 +27,7 @@
 export { logger } from './factory';
 export { Logger } from './logger';
 export { describeError } from './error-description';
+export { alreadySentToClient } from './formatters';
 
 // Types
 export type { LogLevel, Transport } from './types';

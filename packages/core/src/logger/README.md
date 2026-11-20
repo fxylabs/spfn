@@ -208,12 +208,22 @@ Masked key tokens (a key matches if it contains any of these):
 `credit_card`, `cardnumber`, `card_number`, `cvv`, `ssn`, `pin`.
 
 An `Error` found anywhere in the context is replaced by its description, not walked key by
-key. A value under the keys `error`, `err`, `cause` or `reason` at the **top level** of the
-context is described whatever its shape, Error or not: `logger.error('x', { error })`
-describes it as `logger.error('x', error, {})` does. The console prints a described context
-value on its own lines after the message, prefixed with its key (`error: Error: boom` and the
-frames), not inline as `[error=…]`. Deeper down those keys are data (the `error`
-envelope of a response body the request logger copies).
+key. A value under the keys `error`, `err`, `cause` or `reason` — at any depth of the context —
+is described whatever its shape, Error or not: `logger.error('x', { error })` describes it as
+`logger.error('x', error, {})` does, and so is `{ job: { error } }`. Under `errors`, each element
+of an array or a Set is described (`{ errors: aggregate.errors }`); any other value there is
+walked. A `Map` logs as its `[key, value]` pairs, a string key ruling its value as an object key
+does (masked, described or walked); a `Set` as its values. The console prints a described
+context value on its own lines after the message, prefixed with its key (`error: Error: boom` and
+the frames), not inline as `[error=…]`.
+
+A body already sent to a client is not a context that may hold caught values: its `error` key
+is the envelope the client received. `alreadySentToClient(body)` (from `@spfn/core/logger`)
+marks it so: under the mark, keys are still masked by their sensitive names and an `Error`
+instance is still described, but a value under the error keys is kept as data. Core's request
+logger marks its copy of a 4xx/5xx response body, which the error handler built from a
+description. An app may mark a value only when that value, as it is, was sent to the client —
+never a caught value, or an object holding one.
 
 > Masking only applies to the **context** object. It does **not** scan the `message`
 > string. Never interpolate a secret into the message — `logger.info(\`token: ${t}\`)`

@@ -52,11 +52,24 @@ const MASKED_VALUE = '***MASKED***';
 const UNREADABLE_VALUE = '[Unreadable]';
 
 /**
- * The context keys a caught value conventionally sits under. A value there is
- * described whatever its shape: a thrown `{ code, params }` is not an Error,
- * and walking it would print its params.
+ * The keys a caught value conventionally sits under, at any depth of a
+ * context. A value there is described whatever its shape: a thrown
+ * `{ code, params }` is not an Error, and walking it would print its params.
  */
 const ERROR_KEYS: ReadonlySet<string> = new Set(['error', 'err', 'cause', 'reason']);
+
+/**
+ * The key a list of caught values conventionally sits under — an array, or
+ * an `AggregateError`'s `errors`. Each element of an array or a Set there is
+ * described; any other value there is walked.
+ */
+const ERRORS_KEY = 'errors';
+
+/**
+ * Marks a value `alreadySentToClient` vouches for. `Symbol.for`: a second
+ * copy of this module reads the same mark.
+ */
+const SENT_TO_CLIENT = Symbol.for('@spfn/core:logger.alreadySentToClient');
 
 /**
  * 키가 민감 정보를 포함하는지 확인
@@ -102,10 +115,54 @@ function readEntry(data: object, key: string): unknown
 }
 
 /**
- * A log line's context, masked: a value under one of `ERROR_KEYS` at its top
- * level is described, any other is masked by `maskSensitiveData`. Only the
- * top level: deeper down, an `error` key is data — the error envelope of a
- * response body the request logger copies.
+ * Mark a value as a body already sent to a client, before it goes into a log
+ * context
+ *
+ * Under the mark, keys are still masked by their sensitive names, and an
+ * Error instance is still described; a value under `error`, `err`, `cause`,
+ * `reason` or `errors` is not: there it is the body's own data — the error
+ * envelope a client received — not a caught value. A body that came out of
+ * `JSON.parse` holds no Error, and whatever it carries the client already has.
+ *
+ * Core's request logger applies it to its copy of a 4xx/5xx response body,
+ * which the error handler built from a description. An app may apply it only
+ * to a value that was itself sent, as it is, to the client — never to a
+ * caught value or to an object holding one.
+ *
+ * Returns the value; a primitive or a non-extensible object is returned
+ * unmarked, and so is masked as any other context value.
+ *
+ * @example
+ * ```typescript
+ * logger.warn('Upstream refused', { response: alreadySentToClient(await res.clone().json()) });
+ * ```
+ */
+export function alreadySentToClient<T>(body: T): T
+{
+    if (typeof body === 'object' && body !== null && Object.isExtensible(body))
+    {
+        Object.defineProperty(body, SENT_TO_CLIENT, { value: true });
+    }
+
+    return body;
+}
+
+function isSentToClient(data: object): boolean
+{
+    try
+    {
+        return (data as Record<symbol, unknown>)[SENT_TO_CLIENT] === true;
+    }
+    catch
+    {
+        // A revoked Proxy
+        return false;
+    }
+}
+
+/**
+ * A log line's context, masked by `maskSensitiveData`; a context that is
+ * itself an Error is its description under `error`
  */
 export function maskContext(context: Record<string, unknown>): Record<string, unknown>
 {
@@ -114,17 +171,17 @@ export function maskContext(context: Record<string, unknown>): Record<string, un
         return { error: describeError(context) };
     }
 
-    const seen = new WeakSet<object>([context]);
-    const masked: Record<string, unknown> = {};
+    return maskSensitiveData(context) as Record<string, unknown>;
+}
 
-    for (const [key, value] of entriesOf(context))
-    {
-        masked[key] = ERROR_KEYS.has(key) && value !== undefined
-            ? describeError(value)
-            : maskEntry(key, value, seen);
-    }
-
-    return masked;
+/**
+ * How a walk treats the keys it meets
+ */
+interface Walk
+{
+    seen: WeakSet<object>;
+    /** False under a value marked `alreadySentToClient` */
+    describesErrorKeys: boolean;
 }
 
 /**
@@ -132,30 +189,34 @@ export function maskContext(context: Record<string, unknown>): Record<string, un
  * Context 객체에서 민감한 정보(비밀번호, 토큰 등)를 마스킹
  * Circular reference를 안전하게 처리
  *
+ * At every depth: an Error is described, a value under `ERROR_KEYS` is
+ * described whatever its shape, each element of a list under `errors` is
+ * described. A Map logs as its `[key, value]` pairs, a string key ruling its
+ * value as an object key does; a Set as its values.
+ *
  * @param data - 원본 데이터
  * @param seen - 순환 참조 감지용 WeakSet (내부 사용)
  * @returns 마스킹된 데이터
  */
 export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): unknown
 {
-    // null, undefined 처리
-    if (data === null || data === undefined)
-    {
-        return data;
-    }
+    return walkValue(data, { seen, describesErrorKeys: true });
+}
 
+function walkValue(data: unknown, walk: Walk): unknown
+{
     // 기본 타입은 그대로 반환
-    if (typeof data !== 'object')
+    if (typeof data !== 'object' || data === null)
     {
         return data;
     }
 
     // Circular reference 감지
-    if (seen.has(data as object))
+    if (walk.seen.has(data))
     {
         return '[Circular]';
     }
-    seen.add(data as object);
+    walk.seen.add(data);
 
     // An error is described, not walked: its enumerable fields (drizzle's
     // `params`, the driver's `detail`) hold the values a log must not carry
@@ -164,30 +225,87 @@ export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): 
         return describeError(data);
     }
 
-    // 배열 처리
+    return walkObject(data, isSentToClient(data) ? { ...walk, describesErrorKeys: false } : walk);
+}
+
+function walkObject(data: object, walk: Walk): unknown
+{
     if (isArray(data))
     {
-        return entriesOf(data).map(([, item]) => maskSensitiveData(item, seen));
+        return entriesOf(data).map(([, item]) => walkValue(item, walk));
     }
 
-    // 객체 처리
-    const masked: Record<string, unknown> = {};
-
-    for (const [key, value] of entriesOf(data))
+    if (isInstance(data, Set))
     {
-        masked[key] = maskEntry(key, value, seen);
+        return membersOf(data).map(item => walkValue(item, walk));
     }
 
-    return masked;
+    if (isInstance(data, Map))
+    {
+        return (membersOf(data) as [unknown, unknown][]).map(([key, value]) =>
+            [walkValue(key, walk), typeof key === 'string' ? maskEntry(key, value, walk) : walkValue(value, walk)]);
+    }
+
+    return Object.fromEntries(entriesOf(data).map(([key, value]) => [key, maskEntry(key, value, walk)]));
 }
 
 /**
- * One entry of an object: masked if its key is sensitive, otherwise walked
- * (`maskSensitiveData` returns a primitive as it is)
+ * `instanceof`, false for a Proxy whose prototype trap throws
  */
-function maskEntry(key: string, value: unknown, seen: WeakSet<object>): unknown
+function isInstance<T>(value: unknown, type: new (...args: never[]) => T): value is T
 {
-    return isSensitiveKey(key) ? MASKED_VALUE : maskSensitiveData(value, seen);
+    try
+    {
+        return value instanceof type;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+/**
+ * A Set's values or a Map's entries, none if iterating throws (a Proxy)
+ */
+function membersOf(collection: Set<unknown> | Map<unknown, unknown>): unknown[]
+{
+    try
+    {
+        return [...collection];
+    }
+    catch
+    {
+        return [];
+    }
+}
+
+function itemsOf(list: unknown[] | Set<unknown>): unknown[]
+{
+    return isArray(list) ? entriesOf(list).map(([, item]) => item) : membersOf(list);
+}
+
+/**
+ * One entry of an object: masked if its key is sensitive, described if its
+ * key names a caught value, otherwise walked
+ */
+function maskEntry(key: string, value: unknown, walk: Walk): unknown
+{
+    if (isSensitiveKey(key))
+    {
+        return MASKED_VALUE;
+    }
+
+    if (walk.describesErrorKeys && ERROR_KEYS.has(key) && value !== undefined)
+    {
+        return describeError(value);
+    }
+
+    if (walk.describesErrorKeys && key === ERRORS_KEY && (isArray(value) || isInstance(value, Set)))
+    {
+        return itemsOf(value).map(item => describeError(item));
+    }
+
+    return walkValue(value, walk);
 }
 
 /**

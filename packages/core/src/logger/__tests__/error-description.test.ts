@@ -22,6 +22,9 @@
  * | A2  | `undefined`, a string or a plain object, with a context | the context dropped (a transaction id missing from the line) |
  * | A3  | an app error with `code`, `statusCode`, `details` | a failed job's `output` losing the error's `code`      |
  * | A4  | as `{ error }`, on the console              | its stack frames printed as one escaped line of JSON        |
+ * | A5  | under an error key below the top level, or in a list under `errors` | a nested thrown object's params printed (H2)  |
+ * | A6  | inside a Map or a Set in the context        | the collection logged as `{}`, hiding its entries; or its entries skipping the key rules |
+ * | A7  | under a body marked `alreadySentToClient`   | the mark disabling the sensitive-name masking or the description of an Error instance |
  *
  * And describing never throws into the log call that asked for it (G4):
  *
@@ -36,7 +39,7 @@
 import { describe, it, expect } from 'vitest';
 import { Logger } from '../logger';
 import { CAUSE_DEPTH_LIMIT, describeError } from '../error-description';
-import { formatConsole } from '../formatters';
+import { alreadySentToClient, formatConsole } from '../formatters';
 import { BOUND_VALUES, capturingLogger, expectNoValues, failedInsert, FAILED_INSERT } from './helpers/leak-probe';
 
 /** Let the logger's transports, which run on a microtask, finish */
@@ -189,6 +192,67 @@ describe('the caught value is described whatever its shape', () =>
 
         expect(describeError(new AppError('taken'))).toMatchObject({ kind: 'error', name: 'Error', message: 'taken', code: 'E_APP', statusCode: 409 });
         expect(JSON.stringify(describeError(new AppError('taken')))).not.toContain(BOUND_VALUES[0]);
+    });
+
+    it('A5: below the top level, a value under an error key is described, and so is each element of a list under errors', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+        const described = { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' };
+
+        logger.error('Job failed', { job: { id: 'job-1', error: thrownObject() } });
+        logger.error('Batch failed', { errors: [thrownObject(), failedInsert()] });
+        logger.error('Batch failed', { batch: { errors: new AggregateError([thrownObject()]).errors } });
+        logger.error('Batch failed', { errors: new Set([thrownObject()]), nested: [{ reason: thrownObject() }] });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({ job: { id: 'job-1', error: described } });
+        expect((lines[1].context!.errors as unknown[])[0]).toEqual(described);
+        expect((lines[1].context!.errors as unknown[])[1]).toMatchObject({ kind: 'database', code: '23505' });
+        expect(lines[2].context).toEqual({ batch: { errors: [described] } });
+        expect(lines[3].context).toEqual({ errors: [described], nested: [{ reason: described }] });
+    });
+
+    it('A6: a Map logs as its [key, value] pairs, a Set as its values, through the same key rules', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+
+        logger.info('Cache state', {
+            byKey: new Map<unknown, unknown>([['user-1', 'cached'], ['error', thrownObject()], ['password', 'p'], [7, failedInsert()]]),
+            tags: new Set(['a', 'b']),
+        });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({
+            byKey: [
+                ['user-1', 'cached'],
+                ['error', { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' }],
+                ['password', '***MASKED***'],
+                [7, expect.objectContaining({ kind: 'database', code: '23505' })],
+            ],
+            tags: ['a', 'b'],
+        });
+    });
+
+    it('A7: under alreadySentToClient an error key is data; sensitive names are still masked and an Error still described', async () =>
+    {
+        const { logger, lines, output } = capturingLogger(Logger);
+        const body = { error: { code: 'ValidationError', message: 'bad', requestId: 'req-1' }, token: 't', nested: { cause: failedInsert() } };
+
+        logger.warn('Request completed', { response: alreadySentToClient(body), error: thrownObject() });
+        await settle();
+
+        expectNoValues(output());
+        expect(lines[0].context).toEqual({
+            response: {
+                error: { code: 'ValidationError', message: 'bad', requestId: 'req-1' },
+                token: '***MASKED***',
+                nested: { cause: expect.objectContaining({ kind: 'database', code: '23505' }) },
+            },
+            error: { kind: 'error', name: 'NonError', message: 'broken', code: 'BROKEN' },
+        });
+        expect(alreadySentToClient('text')).toBe('text');
     });
 });
 

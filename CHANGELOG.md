@@ -201,6 +201,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class keeps no message. It never copies
   `params`, `parameters`, `detail`, `hint`, `where`, `internal_query`, drizzle's message or a stack
   header (#382).
+- **@spfn/core: `alreadySentToClient(body)` from `@spfn/core/logger`** marks a body that was sent,
+  as it is, to a client before it goes into a log context: its `error` key is then the envelope
+  the client received, kept as data, not described as a caught value; sensitive names are still
+  masked. Core's request logger marks its copy of a 4xx/5xx response body with it (#382).
 
 ### Changed
 
@@ -248,13 +252,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it used to be dropped when the value was not an Error. `logger.error(message, value)`: an Error
   (or a primitive) is the caught value, any other object the context. An object with a string
   `stack` is no longer read as an error, as the argument or inside the context. A value under
-  `error`, `err`, `cause` or `reason` at the context's top level is described whatever its shape.
+  `error`, `err`, `cause` or `reason`, at any depth of the context, is described whatever its
+  shape, and so is each element of an array or a Set under `errors` — except under a body marked
+  `alreadySentToClient` (see its entry above).
 - **BREAKING: @spfn/core: log line shapes (#382).** Each change, against the last release:
   - JSON `error`: `{ kind: 'error' | 'database', name, … }` with `stack` frames only, not
     `{ name, message, stack }`.
   - An Error's string `cause`: an object `{ kind: 'error', name: 'NonError', message }`
     (`Caused by: NonError: …`), not the bare string.
   - An Error inside the context: its description, not `{}`.
+  - A `Map` in the context: its `[key, value]` pairs, not `{}`; a `Set`: its values, not `{}`.
   - A thrown string or number logged as the error: `{ kind: 'error', name: 'NonError', message }`
     with no stack, not an Error wrapped at the log site with that site's stack.
   - A thrown non-Error object: its class name (`NonError` for a plain one), string `message` and
