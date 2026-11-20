@@ -31,6 +31,9 @@
  *     the wrong password does not send
  * 14. the owner's one channel for that refusal lost: `settled` told
  *     `credential` for the right password, so the app cannot tell the owner why
+ * 15. that reason rebuilding the oracle: a lockout counted from `settled`, as
+ *     the README's worked example counts, that fires after a wrong fifth
+ *     password on a refused account and not after the right one
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -151,11 +154,14 @@ class SignInHistoryRepository extends BaseRepository
                 ${outcome.ip ?? null}, ${outcome.webProxy})`);
     }
 
-    /** Wrong passwords recorded against the account: the policy's "after five". */
-    async credentialFailures(userId: number): Promise<number>
+    /**
+     * Failures at the stage where the credential is judged, whatever the
+     * reason: the policy's "after five", as the README's `failuresSinceLift`.
+     */
+    async credentialStageFailures(userId: number): Promise<number>
     {
         const [row] = await this.db.execute<{ count: number }>(sql`select count(*)::int as count
-            from sign_in_guard_test.history where user_id = ${userId} and result = 'failed' and reason = 'credential'`);
+            from sign_in_guard_test.history where user_id = ${userId} and result = 'failed' and stage = 'credential'`);
 
         return row!.count;
     }
@@ -177,10 +183,10 @@ const guard = {
     settled: (outcome: SignInOutcome) => policy.settled(outcome),
 };
 
-/** The app's policy: refuse after five recorded wrong passwords. */
+/** The app's policy: refuse after five failures recorded at the credential stage. */
 async function lockAfterFive(attempt: SignInAttempt): Promise<SignInAdmission>
 {
-    return attempt.user && await history.credentialFailures(attempt.user.id) >= 5 ? LOCKED : undefined;
+    return attempt.user && await history.credentialStageFailures(attempt.user.id) >= 5 ? LOCKED : undefined;
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void }
@@ -879,7 +885,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         {
             await history.record(outcome);
 
-            if (outcome.result === 'failed' && await history.credentialFailures(owner.id) === 5)
+            if (outcome.result === 'failed' && await history.credentialStageFailures(owner.id) === 5)
             {
                 fifthWritten.resolve();
             }
@@ -1511,5 +1517,44 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             { user_id: suspended.id, channel: 'deletion-cancel', result: 'failed', reason: 'accountDisabled' },
         ]);
         expect(await committedHistory()).toHaveLength(4);
+    });
+
+    // ========================================================================
+    // Row 15 — a counter read from settled tells no password either
+    // ========================================================================
+
+    // deletion/cancel refuses only a disabled account: a pending deletion is
+    // its door, and the right password cancels it.
+    const COUNTED_REFUSALS = [
+        { name: '/login, suspended (accountDisabled)', state: { status: 'suspended' }, door: login },
+        { name: '/login, pending deletion (pendingDeletion)', state: { deletion: 'pending' }, door: login },
+        {
+            name: 'deletion/cancel, suspended (accountDisabled)',
+            state: { status: 'suspended' },
+            door: (email: string, password: string) => post('/_auth/deletion/cancel', { email, password }),
+        },
+    ] as const;
+
+    it.each(COUNTED_REFUSALS)('row 15 — $name, "refuse after five": after four wrong passwords the fifth answers alike, right or wrong', async ({ state, door }) =>
+    {
+        policy.admit = lockAfterFive;
+        const fifthAfterFourWrong = async (email: string, candidate: string) =>
+        {
+            const owner = await seedUser(email);
+            await getTestDb().update(users).set(state).where(eq(users.id, owner.id));
+
+            for (let failure = 1; failure <= 4; failure++)
+            {
+                expect((await door(email, WRONG_PASSWORD)).status).toBe(401);
+            }
+
+            return await answerAndCost(() => door(email, candidate));
+        };
+
+        const wrong = await fifthAfterFourWrong('wrong-fifth@test.com', 'AnotherWrong123!');
+        const right = await fifthAfterFourWrong('right-fifth@test.com', PASSWORD);
+
+        expect(wrong.answer).toMatchObject({ status: 403, error: { code: 'SignInRefusedError' } });
+        expect(right).toEqual(wrong);
     });
 });

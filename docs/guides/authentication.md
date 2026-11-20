@@ -192,7 +192,10 @@ where every sign-in channel writes its key, and at `mfa/verify`; a password sign
 is compared against a dummy hash and refused whatever the password was. `settled(outcome)` is told
 `challenged` at a 202, `succeeded` once a session exists, and `failed` with a closed `reason` for
 every attempt that names an account or a credential, refusals included; a failure is committed in a
-transaction of its own before the 401 or 403. Each runs in a transaction of the package's, holding
+transaction of its own before the 401 or 403. `accountDisabled` and `pendingDeletion` are told only
+for the right password, so a counter, a delay or any answer derived from `settled` must treat them
+exactly as `credential` — count failures by `stage`, never by reason; they exist to tell the owner,
+out of band. Each runs in a transaction of the package's, holding
 the account lock — except `admit`'s first call on `password`, `deletion-cancel` and `mfa/verify`,
 before the credential is compared, which runs in none — and app repositories extending
 `BaseRepository` join it; keep them to fast database work, lock no second account, and expect a

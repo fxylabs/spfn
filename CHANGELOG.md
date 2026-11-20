@@ -166,6 +166,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With a sign-in guard, `settled` is told `failed` with `accountDisabled` / `pendingDeletion` for the
   right password (`credential` for a wrong one), and `admit` is asked again after either, as after a
   wrong password; the README has a recipe for e-mailing the owner from there. No separate event.
+  Those two reasons are told only for the right password, so a counter, a delay or any answer
+  derived from `settled` must treat them exactly as `credential`: the README's lockout example now
+  counts every failure at `stage: 'credential'` (and records `stage`) instead of
+  `reason = 'credential'`, which fired after five wrong passwords and never after the right one.
   **Migrate:** a client that showed the account status or offered restore on a 403 from password
   sign-in gets a 401 instead; tell the owner out of band (`signIn.settled`). OAuth, passkey, device
   code, device link and one-time-token sign-in keep their answers. The mobile contract does not

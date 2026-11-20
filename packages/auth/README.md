@@ -838,9 +838,11 @@ decides what becomes of a write it makes:
     your history is missing. On the first path the same two failures change the answer instead: a
     busy lock answers 503 (`AccountBusyError`), a throw 500, and nothing is lost unseen.
 - **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
-  refusal told back to you; whether it counts toward anything is your policy's choice. The worked
-  example below counts `credential` only, so a locked account's further attempts do not extend its
-  lock.
+  refusal told back to you. The worked example below counts it all the same, with every failure at
+  `stage: 'credential'`: the deciding `admit` is reached only by a right password, so a right
+  password it refuses is told `refused` where a wrong one is told `credential`, and a counter that
+  skipped either would count them apart. A locked account's further attempts add to a count that is
+  already past the limit, and the lift starts it again.
 - **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
   quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
   `auth.login`.
@@ -863,6 +865,14 @@ decides what becomes of a write it makes:
 | second factor (`POST /_auth/mfa/verify`), the 202's channel | the TOTP code, recovery code or passkey | before the proof is judged, and under the lock where the key is activated | `failed` (`secondFactor`, `secondFactorLocked`, `refused`, `accountDisabled`, `pendingDeletion`), `stage: 'second-factor'`; `succeeded` once |
 | `deletion-cancel` (`POST /_auth/deletion/cancel`) | the password for an identifier — no session results | before the comparison; a verification-code cancel is not guarded | `failed` (`credential`, `refused`, `accountDisabled` for an account not active with nothing pending) |
 | renewal, `keys/rotate` | — | never | never |
+
+**Count by stage, never by reason.** A counter, a delay or any answer the app derives from
+`settled` must treat `accountDisabled` and `pendingDeletion` exactly as `credential`: they exist so
+the app can tell the **owner**, out of band. On `password` and `deletion-cancel` they are told only
+for the right password, and a wrong one is told `credential`, so a lockout that counts `credential`
+alone fires after five wrong guesses and never after the right one — the oracle the package's own
+answer no longer is. Count every `failed` outcome with `stage: 'credential'`, whatever its reason,
+as the worked example below does; a reason added later is then counted without a change of yours.
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
 sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
@@ -927,7 +937,8 @@ export const authLifecycle = createAuthLifecycle({
 The mail goes to the account's own address, never to the caller: for `pendingDeletion` it carries
 the purge date and the restore path (`POST /_auth/deletion/cancel`), for `accountDisabled` the
 status and how to reach support. The reason arrives only with the right password, so the mail is
-sent only when the owner's password was used — rate-limit it (one per account per hour, say) so a
+sent only when the owner's password was used — which is why nothing but this mail may read it
+(see "Count by stage, never by reason" above). Rate-limit it (one per account per hour, say) so a
 leaked password cannot flood the inbox. Without a guard the package tells nobody.
 
 **Under concurrency** an attempt already past `admit` when your limit is reached is still judged, but
@@ -949,6 +960,7 @@ export const signInHistory = pgTable('sign_in_history', {
     id: serial('id').primaryKey(),
     userId: bigint('user_id', { mode: 'number' }),
     channel: text('channel').notNull(),
+    stage: text('stage').notNull(),
     result: text('result').notNull(),
     reason: text('reason'),
     ip: text('ip'),
@@ -976,6 +988,7 @@ export class SignInHistoryRepository extends BaseRepository
         await this.db.insert(signInHistory).values({
             userId: outcome.user?.id ?? null,
             channel: outcome.channel,
+            stage: outcome.stage,
             result: outcome.result,
             reason: outcome.result === 'failed' ? outcome.reason : null,
             ip: outcome.ip ?? null,
@@ -983,13 +996,18 @@ export class SignInHistoryRepository extends BaseRepository
         });
     }
 
-    /** Wrong passwords since the last lift — read in the package's transaction, under the account lock. */
+    /**
+     * Failures at the credential stage since the last lift, whatever their reason — read in the
+     * package's transaction, under the account lock. Never a list of reasons: `accountDisabled` and
+     * `pendingDeletion` are told only for the right password.
+     */
     async failuresSinceLift(userId: number): Promise<number>
     {
         const [lift] = await this.db.select().from(signInLockLifts).where(eq(signInLockLifts.userId, userId));
         const [row] = await this.db.select({ n: count() }).from(signInHistory).where(and(
             eq(signInHistory.userId, userId),
-            eq(signInHistory.reason, 'credential'),
+            eq(signInHistory.result, 'failed'),
+            eq(signInHistory.stage, 'credential'),
             gt(signInHistory.at, lift?.liftedAt ?? new Date(0)),
         ));
 
