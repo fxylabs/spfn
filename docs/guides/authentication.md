@@ -1867,8 +1867,8 @@ no flag can be passed. Both log the pending list as a warning instead.
 
 The same refusal names `bookkeeping does not match local migrations` when the project's
 `drizzle.__drizzle_migrations`, written before drizzle-orm 1.0, has a row no folder in
-`src/server/drizzle` matches. `spfn db migrate` refuses that database too; restore the folder
-or correct the row first.
+`src/server/drizzle` matches. `spfn db migrate` refuses that database too, so the opt-outs above
+do not start it; restore the folder or correct the row first.
 
 ### "SPFN_AUTH_SESSION_SECRET is required"
 

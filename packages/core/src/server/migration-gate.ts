@@ -20,6 +20,7 @@ import {
     getDatabase,
     hasMigrationTargets,
     MigrationBookkeepingMismatchError,
+    MISMATCH_OVERRIDE_NOTE,
     pendingMigrationTargets,
     pendingMigrationsSummary,
     PROJECT_TARGET_NAME,
@@ -191,7 +192,8 @@ function pendingIsAllowed(config?: ServerConfig): boolean
  * its migrations — `spfn db migrate` refuses that database, so it cannot be
  * brought up to date either.
  *
- * @throws PendingMigrationsError unless the opt-out is set
+ * @throws PendingMigrationsError unless the opt-out is set; on a bookkeeping
+ * mismatch whatever it says
  */
 export async function runMigrationBootGate(config?: ServerConfig, cwd: string = process.cwd()): Promise<MigrationSnapshot>
 {
@@ -199,9 +201,7 @@ export async function runMigrationBootGate(config?: ServerConfig, cwd: string = 
 
     if (mismatch)
     {
-        refuseMismatchedBookkeeping(mismatch, config);
-
-        return snapshot;
+        refuseMismatchedBookkeeping(mismatch);
     }
 
     if (snapshot.state === 'skipped')
@@ -254,25 +254,17 @@ export async function runMigrationBootGate(config?: ServerConfig, cwd: string = 
 }
 
 /**
- * A bookkeeping mismatch is refused like pending migrations, and the same
- * opt-out lets a rollout that must proceed start with it, loudly.
+ * A bookkeeping mismatch is refused whatever the opt-out says. The opt-out
+ * means "start although migrations are still to be applied"; here
+ * `spfn db migrate` refuses the database, so nothing applied later brings it
+ * up to date.
  *
- * @throws PendingMigrationsError unless the opt-out is set
+ * @throws PendingMigrationsError always
  */
-function refuseMismatchedBookkeeping(mismatch: MigrationBookkeepingMismatchError, config?: ServerConfig): void
+function refuseMismatchedBookkeeping(mismatch: MigrationBookkeepingMismatchError): never
 {
-    if (pendingIsAllowed(config))
-    {
-        serverLogger.warn(`Starting with unmatched migration bookkeeping — ${mismatch.message}`);
-
-        return;
-    }
-
     serverLogger.error(`Refusing to start: ${mismatch.message}`);
-    serverLogger.error('  To start anyway: SPFN_ALLOW_PENDING_MIGRATIONS=true (or `spfn dev --allow-pending-migrations`)');
+    serverLogger.error(`  ${MISMATCH_OVERRIDE_NOTE}`);
 
-    throw new PendingMigrationsError(
-        `${mismatch.message} Fix the bookkeeping, or set SPFN_ALLOW_PENDING_MIGRATIONS=true to start anyway.`,
-        [PROJECT_TARGET_NAME],
-    );
+    throw new PendingMigrationsError(`${mismatch.message} ${MISMATCH_OVERRIDE_NOTE}`, [PROJECT_TARGET_NAME]);
 }

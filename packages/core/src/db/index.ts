@@ -54,6 +54,7 @@ export {
     hasMigrationTargets,
     MigrationBookkeepingMismatchError,
     migrationTargets,
+    MISMATCH_OVERRIDE_NOTE,
     pendingFunctionMigrations,
     pendingMigrationTargets,
     pendingMigrationsSummary,

@@ -9,6 +9,14 @@ import type { MigrationTargetStatus } from './status';
 export const RUN_MIGRATIONS_HINT = 'Run: pnpm spfn db migrate';
 
 /**
+ * Why the opt-out does not start a server whose project bookkeeping does not
+ * match its migrations.
+ */
+export const MISMATCH_OVERRIDE_NOTE = 'SPFN_ALLOW_PENDING_MIGRATIONS (--allow-pending-migrations) does not apply: '
+    + 'it starts a server whose migrations are still to be applied, and `spfn db migrate` refuses this database, '
+    + 'so nothing applied later brings it up to date.';
+
+/**
  * Plain (uncoloured) lines listing every target with pending migrations and the
  * name of each migration still waiting.
  */

@@ -133,7 +133,7 @@ There is **no validation in the builder** — validation runs inside `startServe
 | `.healthCheck({...})` | `healthCheck` | `{ enabled?, path?, detailed? }` |
 | `.serverTime({...})` | `serverTime` | Inject `{ clock: { now() } }` for deterministic tests; production defaults to `Date.now()` |
 | `.infrastructure({...})` | `infrastructure` | `{ database?, redis? }` — `false` disables auto-init |
-| `.migrations({...})` | `migrations` | `{ allowPending? }` — `true` boots with pending migrations (warn instead of refuse) |
+| `.migrations({...})` | `migrations` | `{ allowPending? }` — `true` boots with pending migrations (warn instead of refuse); never with a bookkeeping mismatch |
 | `.debug(boolean)` | `debug` | Default `NODE_ENV === 'development'` |
 | `.lifecycle({...})` | merged | **Mergeable** — see below |
 | `.build()` | — | Returns the final `ServerConfig` |
@@ -682,8 +682,10 @@ One status error does refuse: the project's bookkeeping table does not match
 drizzle-orm 1.0 with a row no folder matches, or the drizzle-kit ≤0.31 `meta/_journal.json`
 layout). Migrate refuses that database, so the server would never be brought up to date; the
 gate logs `bookkeeping does not match local migrations` and throws `PendingMigrationsError`
-naming the project target. The opt-outs below start it anyway, with a warning. Detailed
-health reports it as `status: "unknown"` with that reason.
+naming the project target. The opt-outs below do **not** apply to it: they mean "start although
+migrations are still to be applied", and here nothing applied later repairs the bookkeeping —
+the refusal says so. Fix the bookkeeping as the message says (`spfn db status` prints the same
+text), then start. Detailed health reports it as `status: "unknown"` with that reason.
 
 Opt out — a harness that migrates after boot, a rollout that must proceed — with any of:
 
@@ -695,7 +697,8 @@ SPFN_ALLOW_PENDING_MIGRATIONS=true    # env — for containers, which take no CL
 spfn dev --allow-pending-migrations   # CLI flag
 ```
 
-All three log the pending list as a warning rather than continuing silently.
+All three log the pending list as a warning rather than continuing silently. None of them
+starts a server whose project bookkeeping does not match (above).
 `createServerlessApp()` has no boot to gate — run `spfn db migrate` as a deploy step there.
 
 ---

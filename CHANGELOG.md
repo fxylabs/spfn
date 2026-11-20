@@ -141,7 +141,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bookkeeping does not match local migrations` (new `MigrationBookkeepingMismatchError` in
   `@spfn/core/db`) instead of a clean count: `db status` exits 1, `db status --json` reports
   `reachable: false`, health reports `status: "unknown"` with the reason, and the boot gate refuses
-  to start (`SPFN_ALLOW_PENDING_MIGRATIONS=true` starts it with a warning). Restore the missing
+  to start whatever `SPFN_ALLOW_PENDING_MIGRATIONS` / `allowPending` say — they mean "start
+  although migrations are still to be applied", and migrate refusing the database means nothing
+  applied later repairs it; the refusal says so. Restore the missing
   folder or correct the row (or run `drizzle-kit up` for the journal layout), then
   `pnpm spfn db migrate`. Function package migrations keep #357's rule.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`

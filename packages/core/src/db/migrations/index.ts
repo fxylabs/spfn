@@ -40,6 +40,7 @@ export type {
 
 export {
     formatPendingMigrations,
+    MISMATCH_OVERRIDE_NOTE,
     pendingMigrationsSummary,
     RUN_MIGRATIONS_HINT,
 } from './format';
