@@ -148,17 +148,24 @@ server's `afterInfrastructure` step (once the database is ready):
 Environment variables are not checked here. Each `SPFN_AUTH_*` value is validated the
 first time it is read, against the schema in `@spfn/auth/config`.
 
-`createAuthLifecycle({ channels })` chooses which sign-in channels the app offers — `signup`,
-`passwordReset`, `deviceCode`, `deviceLink`, `passkeyLogin`, each `true` unless set to `false`. A channel turned off
+`createAuthLifecycle({ channels })` chooses which channels the app offers — `signup`,
+`passwordReset`, `deviceCode`, `deviceLink`, `passkeyLogin`, `invitations`, `selfDeletion`, each `true`
+unless set to `false`. A channel turned off
 answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`, `details.channel`) on every one of its routes,
 before the route's rate limit — after the global `auth` middleware, so a signed-in route still answers
 an anonymous caller 401. A later `createAuthLifecycle()` without `channels` does not reopen one, and
 two that state different channels refuse boot — partial ones such as `{ signup: false }` and
 `{ deviceCode: false }` included, since an omitted key means `true`. `signup: false` also
 refuses the account a first social sign-in would create (`SignupDisabledError`, 403
-`SIGNUP_DISABLED`, `reason=signup_disabled`). Service functions are not affected. A sign-in page
+`SIGNUP_DISABLED`, `reason=signup_disabled`). `invitations: false` closes all seven invitation
+routes, acceptance and the public `GET /_auth/invitations/:token` included; pending invitations stay
+pending until your code settles them with `cancelInvitation` / `deleteInvitation`.
+`selfDeletion: false` closes `POST /_auth/deletion/request` only — `deletion/cancel` and the
+`account_deletion` code stay on, since a pending deletion blocks every sign-in — and refuses boot
+beside `deletion.allowSelfImmediate: true`. Service functions are not affected. A sign-in page
 reads which channels are on from the public `GET /_auth/channels` (`authApi.getAuthChannels`) —
-`{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin }`, one boolean each — and draws no
+`{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin, invitations, selfDeletion }`, one
+boolean each — and draws no
 button that would answer 404. See
 [Which sign-in channels exist](../../packages/auth/README.md#which-sign-in-channels-exist-channels).
 
@@ -754,7 +761,7 @@ notifications) and the purge job registration caveat live in the package README 
 
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|
-| `/_auth/deletion/request` | POST | Required | Request deletion — step-up for an account with a second factor (403 `STEP_UP_REQUIRED`), and recent authentication or the `password` (403 `RECENT_AUTH_REQUIRED`) |
+| `/_auth/deletion/request` | POST | Required | Request deletion — step-up for an account with a second factor (403 `STEP_UP_REQUIRED`), and recent authentication or the `password` (403 `RECENT_AUTH_REQUIRED`). 404 `CHANNEL_DISABLED` under `channels: { selfDeletion: false }` |
 | `/_auth/deletion/cancel` | POST | Public | Cancel a pending deletion with the password or a one-time code (`purpose: 'account_deletion'`) to the account's e-mail or phone — sessions were revoked at request time |
 
 ```typescript
@@ -1629,7 +1636,7 @@ full design.
 | `/_auth/session/renew/verify` | POST | Renewing key | Verify the assertion; answers exactly as `/_auth/login` |
 | `/_auth/password` | PUT | Required | Change password; signs every other device out (`includeCurrent: true`: this one too) |
 | `/_auth/session` | GET | Required | Get session info |
-| `/_auth/channels` | GET | — | Which sign-in channels the app offers: `{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin }` |
+| `/_auth/channels` | GET | — | Which channels the app offers: `{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin, invitations, selfDeletion }` |
 | `/_auth/tokens` | POST | Required | Issue one-time token |
 | `/_auth/device/start` | POST | — | Begin device-code login: park a key, get the codes |
 | `/_auth/device/start/web` | POST | — | `device/start` for a browser behind the Next.js proxy, which supplies the key; shares its rate limit |
@@ -1696,6 +1703,9 @@ full design.
 | `/_auth/invitations/resend` | POST | Required | `user:invite` | Resend invitation (new link; the old one stops working) |
 | `/_auth/invitations/delete` | POST | Required | `superadmin` | Delete invitation |
 
+`channels: { invitations: false }` closes all seven with 404 `CHANNEL_DISABLED`; the invitation
+services stay callable.
+
 The invitation token is stored only as a hash. Create and resend answer it (with
 `invitationUrl`) once, and `invitationCreatedEvent` carries it for your mailer; the list
 answers no token. Resend and cancel also require the right to assign the invitation's role, as
@@ -1756,7 +1766,7 @@ catch (error)
 | `OAuthProviderAlreadyLinkedError` | 409 | `OAUTH_PROVIDER_ALREADY_LINKED`: the account already holds an identity of this provider — a link start, or a first social sign-in matching it by email |
 | `OAuthSignInContendedError` | 409 | `OAUTH_SIGN_IN_CONTENDED`: a concurrent sign-in or sign-up committed the same identity or address first, and the sign-in run again could not settle it; a new sign-in does |
 | `SignupDisabledError` | 403 | `SIGNUP_DISABLED`: a first social sign-in would have created an account and `channels.signup` is `false` |
-| `ChannelDisabledError` | 404 | `CHANNEL_DISABLED`: a route of a sign-in channel the app turned off with `channels`; `details.channel` names it |
+| `ChannelDisabledError` | 404 | `CHANNEL_DISABLED`: a route of a channel the app turned off with `channels`; `details.channel` names it |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED`: the app requires a second factor and this account has no listed one; only the enrolment routes answer |
 | `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED`: a route of a method `secondFactor.methods` does not list, or recovery codes turned off; `details.method` names it |
 | `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED`: removing the last listed second factor while one is required |

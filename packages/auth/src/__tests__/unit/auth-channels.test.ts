@@ -5,6 +5,9 @@
  * by default, a value that is not a boolean and a key that is not a channel
  * refused rather than ignored, and `createAuthLifecycle` resolving it in its
  * constructor. The route rows C2–C12 are in integration/auth-channels.test.ts.
+ *
+ * #381 adds `invitations` and `selfDeletion`: U2 pins which routes they close,
+ * B1 the boot refusal beside `deletion.allowSelfImmediate`.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -22,6 +25,7 @@ import {
     requireChannel,
     type AuthChannelsOptions,
 } from '@/server/lib/channels-config';
+import { configureDeletion } from '@/server/lib/deletion-config';
 import { createAuthLifecycle } from '@/server/lifecycle';
 import { AUTH_SURFACE_OPERATIONS } from '@/server/client-proof/contract-types';
 
@@ -30,6 +34,7 @@ describe('channels (#308)', () =>
     afterEach(() =>
     {
         __resetChannelsForTests();
+        configureDeletion();
     });
 
     it('C13: every key of mainAuthRouter is in the classification table', () =>
@@ -58,9 +63,21 @@ describe('channels (#308)', () =>
         expect(stale).toEqual([]);
     });
 
+    it('#381 U2: invitations closes exactly the /_auth/invitations routes, selfDeletion exactly the deletion request', () =>
+    {
+        const routes = mainAuthRouter.routes as Record<string, { path: string }>;
+        const keysOf = (channel: string) => Object.keys(ROUTE_CHANNELS)
+            .filter(key => ROUTE_CHANNELS[key as keyof typeof ROUTE_CHANNELS] === channel)
+            .sort();
+
+        expect(keysOf('invitations')).toEqual(Object.keys(routes).filter(key => routes[key]!.path.startsWith('/_auth/invitations')).sort());
+        expect(keysOf('invitations')).toHaveLength(7);
+        expect(keysOf('selfDeletion')).toEqual(['requestAccountDeletion']);
+    });
+
     it('every channel is on until the app says otherwise', () =>
     {
-        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([true, true, true, true, true]);
+        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([true, true, true, true, true, true, true]);
         expect(() => AUTH_CHANNELS.forEach(requireChannel)).not.toThrow();
     });
 
@@ -92,7 +109,7 @@ describe('channels (#308)', () =>
         createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
         createAuthLifecycle({ channels: { signup: false, deviceCode: false } });
 
-        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([false, true, false, true, true]);
+        expect(AUTH_CHANNELS.map(isChannelEnabled)).toEqual([false, true, false, true, true, true, true]);
         expect(() => assertChannelsConsistent()).not.toThrow();
     });
 
@@ -104,6 +121,13 @@ describe('channels (#308)', () =>
         expect(isChannelEnabled('signup')).toBe(false);
         expect(() => assertChannelsConsistent()).toThrow(/signup/);
         await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/different channels in two calls: signup\b/);
+    });
+
+    it('#381 B1: deletion.allowSelfImmediate beside a closed selfDeletion channel refuses boot', async () =>
+    {
+        const lifecycle = createAuthLifecycle({ channels: { selfDeletion: false }, deletion: { allowSelfImmediate: true } });
+
+        await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/allowSelfImmediate is true, but the selfDeletion channel is off/);
     });
 
     it('refuses a key that is not a channel, and a value that is not a boolean', () =>

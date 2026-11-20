@@ -1036,7 +1036,7 @@ export const getAuthSession = route.get('/_auth/session')
     });
 
 /**
- * GET /_auth/channels - Which sign-in channels this application offers
+ * GET /_auth/channels - Which channels this application offers
  *
  * One boolean per channel of `createAuthLifecycle({ channels })`, so a sign-in
  * page draws only the doors that open — no passkey button that would answer

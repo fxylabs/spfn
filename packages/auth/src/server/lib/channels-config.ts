@@ -1,9 +1,9 @@
 /**
- * Sign-in Channel Configuration
+ * Channel Configuration
  *
- * Which ways into an account this application offers, set once during
- * `createAuthLifecycle()` and read at request time, as `device-auth-config.ts`
- * is.
+ * Which ways into an account — and which ways to create or end one — this
+ * application offers, set once during `createAuthLifecycle()` and read at
+ * request time, as `device-auth-config.ts` is.
  *
  * Every channel defaults to on, so an application that says nothing serves
  * exactly the routes it served before the option existed. Password sign-in has
@@ -20,7 +20,15 @@
 import { ChannelDisabledError } from '@spfn/auth/errors';
 
 /** The channels an application can turn off. */
-export const AUTH_CHANNELS = ['signup', 'passwordReset', 'deviceCode', 'deviceLink', 'passkeyLogin'] as const;
+export const AUTH_CHANNELS = [
+    'signup',
+    'passwordReset',
+    'deviceCode',
+    'deviceLink',
+    'passkeyLogin',
+    'invitations',
+    'selfDeletion',
+] as const;
 
 export type AuthChannel = typeof AUTH_CHANNELS[number];
 
@@ -34,6 +42,12 @@ export type AuthChannel = typeof AUTH_CHANNELS[number];
  * - `deviceLink` — device link (`/_auth/device/link/*`)
  * - `passkeyLogin` — passkey sign-in (`/_auth/passkeys/login/*`). Passkey
  *   registration, the second-factor ceremonies and session renewal stay on.
+ * - `invitations` — the whole invitation family (`/_auth/invitations/*`):
+ *   issuing, listing, settling, reading and accepting. A pending invitation
+ *   stays pending and cannot be accepted while it is off.
+ * - `selfDeletion` — `POST /_auth/deletion/request` only. Cancelling a
+ *   pending deletion and its `account_deletion` code stay on: a pending
+ *   deletion blocks every sign-in, and that is its only way back.
  */
 export type AuthChannelsOptions = Partial<Record<AuthChannel, boolean>>;
 

@@ -18,6 +18,7 @@
  */
 
 import { PURGE_STRATEGIES, type PurgeStrategy } from '../types';
+import { isChannelEnabled } from './channels-config';
 
 export interface AccountDeletionPurgeUser
 {
@@ -231,6 +232,24 @@ export function __resetDeletionForTests(): void
     stated = {};
     contradiction = null;
     config = { ...DEFAULTS };
+}
+
+/**
+ * Refuse boot on `allowSelfImmediate: true` beside `channels.selfDeletion: false`.
+ *
+ * The option only shapes a request made through `POST /_auth/deletion/request`,
+ * and that route is closed: a setting that silently does nothing. Called from
+ * `afterInfrastructure`, after `assertChannelsConsistent` and
+ * `assertDeletionConsistent`, because both settings are final only once every
+ * `createAuthLifecycle()` call has run.
+ */
+export function assertSelfDeletionConsistent(): void
+{
+    if (config.allowSelfImmediate && !isChannelEnabled('selfDeletion'))
+    {
+        throw new Error('deletion.allowSelfImmediate is true, but the selfDeletion channel is off, so no one can '
+            + 'request their own deletion. Drop allowSelfImmediate, or turn the channel back on.');
+    }
 }
 
 /**

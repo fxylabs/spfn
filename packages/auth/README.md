@@ -360,7 +360,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
 | `changePassword` | PUT `/_auth/password` | yes | change password; signs every other device out, this one too with `includeCurrent: true` — see [Registered devices](#registered-devices-key-management) |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user, with the role in force (`null` for none) and the permissions `requirePermissions` enforces |
-| `getAuthChannels` | GET `/_auth/channels` | public | which sign-in channels the app offers, one boolean each — see [channels](#which-sign-in-channels-exist-channels) |
+| `getAuthChannels` | GET `/_auth/channels` | public | which channels the app offers, one boolean each — see [channels](#which-sign-in-channels-exist-channels) |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
 | `checkUsername` / `updateUsername` / `updateLocale` | — | mixed | username availability/update (answers the profile, as `getUserProfile` does); set or clear (`null`) the language choice |
 | `getUserProfile` / `updateUserProfile` | — | yes | profile read/update; `metadata` is checked against `defineProfileFields` when declared |
@@ -392,8 +392,9 @@ private key proves it (`replacementProof`); otherwise it is a new device — see
 
 ### Which sign-in channels exist (`channels`)
 
-Every route above is mounted for every app. An app that offers fewer ways in says so once, in
-`createAuthLifecycle`; it is resolved when the lifecycle is built and read per request:
+Every route above is mounted for every app. An app that offers fewer ways in — or no invitations,
+or no self-service deletion — says so once, in `createAuthLifecycle`; it is resolved when the
+lifecycle is built and read per request:
 
 ```typescript
 createAuthLifecycle({
@@ -403,12 +404,14 @@ createAuthLifecycle({
         deviceCode: false,
         deviceLink: false,
         passkeyLogin: true,
+        invitations: false,     // ...and issued only by the app's own code
+        selfDeletion: true,
     },
 })
 ```
 
 Every key is optional and defaults to `true`, so an app that passes nothing serves exactly what it
-served before. A key that is not one of these five, or a value that is not a boolean, is refused at
+served before. A key that is not one of these seven, or a value that is not a boolean, is refused at
 startup — either would leave open a channel the app believes it closed.
 
 A closed channel stays closed until the app itself says otherwise. A second `createAuthLifecycle()`
@@ -426,6 +429,8 @@ not a merge.
 | `deviceCode` | `startDeviceAuth`, `startDeviceAuthWeb`, `pollDeviceAuth`, `getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth` |
 | `deviceLink` | `issueDeviceLink`, `redeemDeviceLink`, `redeemDeviceLinkWeb`, `getDeviceLinkStatus`, `confirmDeviceLink`, `denyDeviceLink`, `cancelDeviceLink`, `pollDeviceLink` |
 | `passkeyLogin` | `passkeyLoginOptions`, `passkeyLoginVerify` |
+| `invitations` | `createInvitation`, `listInvitations`, `resendInvitation`, `cancelInvitation`, `deleteInvitation`, `getInvitation`, `acceptInvitation` |
+| `selfDeletion` | `requestAccountDeletion` |
 
 Every other route is always on. `passkeyLogin: false` closes only signing in with a passkey alone:
 registering, listing, renaming and revoking passkeys, proving one at `mfa/verify` and `mfa/step-up`,
@@ -435,6 +440,19 @@ confirmation and the authorization server's consent ask for a passkey only besid
 is already signed in. There is no key for password sign-in, so no setting leaves an app
 with no way in; whether a second factor is asked for is the second-factor policy's business, not
 this option's.
+
+`invitations: false` closes the whole family: no one can issue, list or accept an invitation through
+the package's routes. Together with `signup: false`, an account exists only if your own code created
+it. Pending invitations stay pending, cannot be accepted while the channel is closed (reopened before
+their `expires_at`, they can be again), and are settled by `cancelInvitation` / `deleteInvitation`
+from your code — until then a pending invitation still blocks deleting its role.
+
+`selfDeletion: false` closes `POST /_auth/deletion/request`. `POST /_auth/deletion/cancel` and the
+`account_deletion` code stay on: a deletion already pending blocks every sign-in until it is
+cancelled or purged, and closing its only way back would lock the person out until the purge. To
+keep an account out, suspend it. `requestAccountDeletionService` stays callable, so an operator still
+requests a deletion. Beside `deletion: { allowSelfImmediate: true }`, which then could never apply,
+it refuses boot in `afterInfrastructure`.
 
 **A sign-in page reads which channels are on** from `GET /_auth/channels` (`authApi.getAuthChannels`),
 so it draws no button that would answer 404:
@@ -446,7 +464,8 @@ import { authApi } from '@spfn/auth';
 export default async function SignInPage()
 {
     const channels = await authApi.getAuthChannels.call({});
-    // { signup: true, passwordReset: true, deviceCode: false, deviceLink: false, passkeyLogin: false }
+    // { signup: true, passwordReset: true, deviceCode: false, deviceLink: false, passkeyLogin: false,
+    //   invitations: true, selfDeletion: true }
 
     return <SignInForm passkey={channels.passkeyLogin} signup={channels.signup} reset={channels.passwordReset} />;
 }
@@ -465,9 +484,11 @@ none is needed. Its `ROUTE_CHANNELS` entry is `'always'` and its `ROUTE_ENROLMEN
 no rate-limit budget is spent, no long poll is held open, no transaction begins and nothing is read
 from the database. The check is the first of the route's own middlewares, so the app's server-level
 middlewares run as they do on any route. On a public route that means every caller gets the 404; on
-a signed-in route (`getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth`, and the device-link
-issuer's five) the global `auth` middleware runs first, so an anonymous caller gets its `401` and a
-signed-in one the 404 — as the authorization server's signed-in routes answer when it is not
+a signed-in route (`getDeviceAuthInfo`, `approveDeviceAuth`, `denyDeviceAuth`, the device-link
+issuer's five, the five invitation routes other than `getInvitation` and `acceptInvitation`, and
+`requestAccountDeletion`) the global `auth` middleware runs first, so an anonymous caller gets its `401` and a
+signed-in one the 404 — before `requirePermissions`, so a caller without `user:invite` meets the
+404 too — as the authorization server's signed-in routes answer when it is not
 configured. The routes still register (registration happens at import, before `createAuthLifecycle`
 runs), so the check is made per request, as the
 [authorization server's](#authorization-server-for-mcp-clients) is. A verification code is judged by
@@ -484,7 +505,8 @@ attaches to an existing account under [`oauthEmailMatch`](#when-a-first-sign-ins
 **Service functions do not read the setting.** `registerService`, `requestSignupLinkService`,
 `startDeviceAuthService` and the rest stay callable by the app, so an operator console that creates
 accounts with `signup: false` keeps working. Invitations (`acceptInvitation`) and
-[admin seeding](#admin-seeding) create accounts whatever `signup` says. The one exception is the
+[admin seeding](#admin-seeding) create accounts whatever `signup` says; close invitations with
+`invitations: false`, and the invitation services still create them for your own code. The one exception is the
 social path above, because an account made by a first social sign-in is sign-up by another door.
 
 | Error | HTTP | `code` | When |
@@ -497,7 +519,8 @@ each operation a closed channel answers `ChannelDisabledError` on with `closedCh
 `auth.enroll.register` (`signup`), the five `auth.device.*` (`deviceCode`) and
 `auth.deviceLink.redeem` / `auth.deviceLink.poll` (`deviceLink`). `passkeyLogin` marks nothing there:
 the passkey ceremonies need a browser WebAuthn API and are not contract operations, so the contract
-is unchanged. In the browser, `signInWithPasskey` meets the 404 as a rejected call.
+is unchanged. Neither do `invitations` and `selfDeletion`: no invitation or deletion route is a
+contract operation. In the browser, `signInWithPasskey` meets the 404 as a rejected call.
 `GET /_auth/channels` is not a contract operation either, as `GET /_auth/oauth/providers` is not: a
 native client learns that a channel is closed from `closedChannel` and the 404.
 
@@ -2472,6 +2495,10 @@ credential (`mintCredential` / `hashCredential`): 32 random bytes, stored only a
 | `POST /_auth/invitations/delete` | `superadmin` | 204 |
 | `GET /_auth/invitations/:token` | public | what the acceptance page shows; 404 / 410 as below |
 | `POST /_auth/invitations/accept` | public | the new account; 404 / 410 as below |
+
+All seven close together with [`channels: { invitations: false }`](#which-sign-in-channels-exist-channels):
+each answers 404 `CHANNEL_DISABLED` before its rate limit, permission check or transaction. The
+invitation services stay callable, and settle the invitations left pending.
 
 - **Mail the link from `invitationCreatedEvent`.** Its `token` (with `isResend` on a resend) is
   the secret; no route returns it again.
@@ -6115,6 +6142,8 @@ is the recommended error. The hook receives the same `metadata` the app supplied
 To turn sign-up off altogether rather than filter it, use
 [`channels: { signup: false }`](#which-sign-in-channels-exist-channels): the sign-up routes answer
 404 `CHANNEL_DISABLED` and a first social sign-in is refused with `SIGNUP_DISABLED` before this hook would run.
+`signup` leaves invitation acceptance open; close it with `channels: { invitations: false }`, which
+answers 404 before acceptance spends its rate limit — rather than a 403 from this hook after it.
 
 To refuse a **sign-in** — every channel, the account existing or not — and to be told of each
 attempt's outcome, use the [sign-in guard](#the-sign-in-guard-signin) instead.
@@ -7461,7 +7490,9 @@ none ──request (step-up, recent auth)──> pending ──grace period elap
 users.status (active | inactive | suspended) is not written by any of them.
 ```
 
-- **Request** — `POST /_auth/deletion/request` (authenticated). The gates every sensitive
+- **Request** — `POST /_auth/deletion/request` (authenticated; closed by
+  [`channels: { selfDeletion: false }`](#which-sign-in-channels-exist-channels), which leaves
+  cancel and the `account_deletion` code on). The gates every sensitive
   change passes, with the shared functions: an account with a second factor re-proves it on this
   device (`assertStepUp` — **403 `STEP_UP_REQUIRED`**, as `keys/revoke-all` answers), and the
   session's credential authenticated within the recent-authentication window (never an

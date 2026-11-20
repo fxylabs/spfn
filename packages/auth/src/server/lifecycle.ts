@@ -15,7 +15,7 @@ import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
 import { settleLinkMail } from './lib/link-mail-delivery';
-import { assertDeletionConsistent, configureDeletion } from './lib/deletion-config';
+import { assertDeletionConsistent, assertSelfDeletionConsistent, configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
@@ -352,7 +352,8 @@ export interface AuthLifecycleOptions extends AuthInitOptions
     authorizationServer?: AuthorizationServerOptions;
 
     /**
-     * Which sign-in channels this application offers
+     * Which channels this application offers: the ways into an account, and
+     * the invitation and self-deletion routes
      *
      * Every key is optional and defaults to `true`, so an application that
      * passes nothing serves every route it served before. A channel set to
@@ -379,16 +380,26 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   closes it, since a passkey sign-in with user verification needs no
      *   second factor. Registering a passkey and proving one as a second
      *   factor stay on.
+     * - `invitations` — every invitation route: create, list, resend, cancel,
+     *   delete, and the public `invitations/:token` read and accept. Pending
+     *   invitations stay pending and cannot be accepted while it is off; the
+     *   app settles them with `cancelInvitation` / `deleteInvitation`.
+     * - `selfDeletion` — `POST /_auth/deletion/request` only. `deletion/cancel`
+     *   and the `account_deletion` code stay on: a pending deletion blocks
+     *   every sign-in, and closing its only way back would lock the person
+     *   out until the purge. Refused at boot beside
+     *   `deletion.allowSelfImmediate: true`, which it would leave dead.
      *
      * Password sign-in has no key. Service functions ignore this setting and
-     * stay callable by the application — invitations and admin seeding create
-     * accounts whatever `signup` says.
+     * stay callable by the application — the invitation services and admin
+     * seeding create accounts whatever `signup` and `invitations` say.
      *
      * @example
      * ```typescript
      * createAuthLifecycle({
      *     channels: {
      *         signup: false,       // accounts are issued, not taken
+     *         invitations: false,  // ...and only by the app's own code
      *         deviceCode: false,
      *     },
      * })
@@ -562,6 +573,9 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // deletion option differently, or two owners of one purge hook.
             // Silent when at most one stated each.
             assertDeletionConsistent();
+            // Same reasoning, after the channels and the deletion options it
+            // reads: allowSelfImmediate beside a closed selfDeletion channel.
+            assertSelfDeletionConsistent();
             // Same reasoning, after the channels it reads: a contradicting
             // second statement, no method listed, a required factor beside a
             // device channel that proves none, passkey-only beside a weaker
