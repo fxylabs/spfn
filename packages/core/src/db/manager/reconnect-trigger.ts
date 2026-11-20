@@ -22,6 +22,7 @@
 
 import { ConnectionError } from '@spfn/core/errors';
 import { logger } from '@spfn/core/logger';
+import { POSTGRES_JS_CONNECTION_CODES } from '../../logger/error-description';
 import { parseNumber } from '@spfn/core/env';
 
 import { isReconnectingNow, triggerForceReconnect } from './health-check';
@@ -31,25 +32,6 @@ const dbLogger = logger.child('@spfn/core:database');
 // ============================================================================
 // Error Classification
 // ============================================================================
-
-/**
- * postgres.js driver-level error codes that indicate a dead connection
- *
- * These are the codes the driver puts on the errors it generates itself
- * (`Errors.connection` / `Errors.generic`), as opposed to the SQLSTATE it
- * copies off a server ErrorResponse. Exported because `Transactional()` reads
- * the same list to recognise a driver-origin error — see `isDriverOriginError`
- * in `db/transaction/middleware.ts`.
- *
- * @see https://github.com/porsager/postgres/blob/master/src/errors.js
- */
-export const POSTGRES_JS_CONNECTION_CODES: ReadonlySet<string> = new Set([
-    'CONNECTION_ENDED',
-    'CONNECTION_CLOSED',
-    'CONNECTION_DESTROYED',
-    'CONNECT_TIMEOUT',
-    'CONNECTION_CONNECT_TIMEOUT',
-]);
 
 /**
  * Node.js socket/network error codes that indicate a lost connection

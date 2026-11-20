@@ -161,7 +161,7 @@ describe('frames after commit', () =>
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn).toHaveBeenCalledWith(
             'State "consent" could not be re-read or published on its change signal; no frame was sent',
-            { state: 'consent', error: 'transport down' },
+            { state: 'consent', error: expect.objectContaining({ message: 'transport down' }) },
         );
     });
 });

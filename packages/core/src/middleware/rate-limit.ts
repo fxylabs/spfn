@@ -146,7 +146,7 @@ async function hitWithFallback(
 
         rateLimitLogger.warn('Cache failed — counting this rate limit in the process instead', {
             path,
-            error: error instanceof Error ? error.message : String(error),
+            error,
         });
 
         return memoryStore.hit(key, windowMs);

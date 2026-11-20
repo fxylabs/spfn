@@ -196,7 +196,7 @@ describe('change signal', () =>
 
         expect(warn).toHaveBeenCalledWith(
             'State "consent" could not be re-read or published on its change signal; no frame was sent',
-            { state: 'consent', error: 'db down' },
+            { state: 'consent', error: expect.objectContaining({ message: 'db down' }) },
         );
         expect(consent.read).toHaveBeenCalledTimes(2);
         expect(s.named(CONSENT)).toHaveLength(1);

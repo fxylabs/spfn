@@ -8,6 +8,7 @@ import { format } from 'node:util';
 import type { LogLevel, LogMetadata, LoggerConfig, Transport } from './types';
 import { LOG_LEVEL_PRIORITY } from './types';
 import { maskSensitiveData } from './formatters';
+import { describeError } from './error-description';
 
 const FORMAT_PATTERN = /%[sdifjoOc%]/;
 
@@ -23,21 +24,6 @@ export class Logger
     {
         this.config = config;
         this.module = config.module;
-    }
-
-    /**
-     * Convert unknown error to Error object
-     */
-    private toError(error: unknown): Error
-    {
-        if (error instanceof Error) return error;
-        if (typeof error === 'string') return new Error(error);
-        if (typeof error === 'object' && error !== null)
-        {
-            return new Error(JSON.stringify(error));
-        }
-
-        return new Error(String(error));
     }
 
     /**
@@ -62,6 +48,25 @@ export class Logger
         // No stack -> treat as context
         // This allows {name: "...", method: "..."} to be treated as context
         return true;
+    }
+
+    /**
+     * Whether the second argument is the error: an Error, an object with a
+     * `stack`, or a bare primitive
+     */
+    private isError(value: unknown): boolean
+    {
+        if (value instanceof Error)
+        {
+            return true;
+        }
+
+        if (typeof value === 'object')
+        {
+            return value !== null && !this.isContext(value);
+        }
+
+        return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
     }
 
     /**
@@ -101,17 +106,9 @@ export class Logger
             return;
         }
 
-        if (errorOrContext instanceof Error)
+        if (this.isError(errorOrContext))
         {
             this.log(level, message, errorOrContext, context);
-        }
-        else if (errorOrContext !== undefined && typeof errorOrContext === 'object' && !this.isContext(errorOrContext))
-        {
-            this.log(level, message, this.toError(errorOrContext), context);
-        }
-        else if (typeof errorOrContext === 'string' || typeof errorOrContext === 'number' || typeof errorOrContext === 'boolean')
-        {
-            this.log(level, message, this.toError(errorOrContext), context);
         }
         else
         {
@@ -176,8 +173,11 @@ export class Logger
 
     /**
      * Log processing (internal)
+     *
+     * The error reaches a transport only as its description: a database
+     * error's bound values, which sit in its message, stack and fields, never do.
      */
-    private log(level: LogLevel, message: string, error?: Error, context?: Record<string, unknown>): void
+    private log(level: LogLevel, message: string, error?: unknown, context?: Record<string, unknown>): void
     {
         // Early return if log level is below configured level
         // This prevents unnecessary metadata creation and processing
@@ -191,7 +191,7 @@ export class Logger
             level,
             message,
             module: this.module,
-            error,
+            error: error === undefined ? undefined : describeError(error),
             // Mask sensitive information in context to prevent credential leaks
             context: context ? maskSensitiveData(context) as Record<string, unknown> : undefined,
         };

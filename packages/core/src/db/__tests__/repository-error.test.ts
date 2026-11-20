@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { BaseRepository, RepositoryError } from '../repository';
+import { expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
 
 // Mock repository for testing
 class TestRepository extends BaseRepository
@@ -39,22 +40,6 @@ describe('RepositoryError', () =>
         expect(error.method).toBe('findById');
         expect(error.table).toBe('users');
         expect(error.originalError).toBe(originalError);
-    });
-
-    it('should preserve original stack trace', () =>
-    {
-        const originalError = new Error('Query failed');
-        const originalStack = originalError.stack;
-
-        const error = new RepositoryError(
-            'Query failed',
-            'UserRepository',
-            'findById',
-            'users',
-            originalError,
-        );
-
-        expect(error.stack).toBe(originalStack);
     });
 });
 
@@ -101,7 +86,7 @@ describe('BaseRepository.withContext', () =>
                 expect(error.repository).toBe('TestRepository');
                 expect(error.method).toBe('findById');
                 expect(error.table).toBe('users');
-                expect(error.message).toBe('Connection failed');
+                expect(error.message).toBe('TestRepository.findById failed');
             }
         }
     });
@@ -130,7 +115,7 @@ describe('BaseRepository.withContext', () =>
             expect(error).toBeInstanceOf(RepositoryError);
             if (error instanceof RepositoryError)
             {
-                expect(error.message).toBe('String error');
+                expect(error.message).toBe('TestRepository.findById failed');
             }
         }
     });
@@ -154,6 +139,21 @@ describe('BaseRepository.withContext', () =>
                 expect(error.table).toBeUndefined();
             }
         }
+    });
+
+    it('R12: a failed query is answered with a fixed message, no value, and the original as cause (#382)', async () =>
+    {
+        const failure = failedInsert();
+
+        const error = await new TestRepository()
+            .testWithContext(() => Promise.reject(failure), { method: 'create', table: 'users' })
+            .catch((caught: RepositoryError) => caught);
+
+        expect(error.message).toBe('TestRepository.create failed');
+        // A walk down `cause` — auth's isUniqueViolation — still reaches the driver's 23505
+        expect(error.cause).toBe(failure);
+        expect((failure.cause as { code?: string }).code).toBe('23505');
+        expectNoValues(`${error.message}\n${error.stack}`);
     });
 
     it('should preserve query result type', async () =>

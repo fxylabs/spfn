@@ -5,6 +5,8 @@
  */
 
 import type { LogLevel, LogMetadata } from './types';
+import { describeError } from './error-description';
+import type { DatabaseErrorDescription, ErrorDescription } from './error-description';
 
 /**
  * 민감 정보로 간주되는 키 목록
@@ -55,6 +57,14 @@ function isSensitiveKey(key: string): boolean
 }
 
 /**
+ * An Error, or an object carrying a string `stack` the way one does
+ */
+function isErrorLike(data: object): boolean
+{
+    return data instanceof Error || typeof (data as { stack?: unknown }).stack === 'string';
+}
+
+/**
  * 민감 정보 마스킹
  * Context 객체에서 민감한 정보(비밀번호, 토큰 등)를 마스킹
  * Circular reference를 안전하게 처리
@@ -83,6 +93,13 @@ export function maskSensitiveData(data: unknown, seen = new WeakSet<object>()): 
         return '[Circular]';
     }
     seen.add(data as object);
+
+    // An error is described, not walked: its enumerable fields (drizzle's
+    // `params`, the driver's `detail`) hold the values a log must not carry
+    if (isErrorLike(data))
+    {
+        return describeError(data);
+    }
 
     // 배열 처리
     if (Array.isArray(data))
@@ -170,31 +187,46 @@ export function formatTimestampHuman(date: Date): string
 }
 
 /**
- * 에러 객체를 문자열로 변환 (스택 트레이스 포함)
+ * An error description as text: its header, the database fields, the stack
+ * frames and the cause chain
  */
-export function formatError(error: Error): string
+export function formatError(error: ErrorDescription | DatabaseErrorDescription): string
 {
-    const lines: string[] = [];
-
-    lines.push(`${error.name}: ${error.message}`);
+    const lines = error.kind === 'database'
+        ? formatDatabaseError(error)
+        : [`${error.name}: ${error.message}`];
 
     if (error.stack)
     {
-        const stackLines = error.stack.split('\n').slice(1);
-        lines.push(...stackLines);
+        lines.push(error.stack);
     }
 
-    // Cause chain — surfaces original PG errors hidden by DrizzleQueryError
-    if (error.cause instanceof Error)
+    if (error.kind === 'error' && error.cause)
     {
         lines.push(`Caused by: ${formatError(error.cause)}`);
     }
-    else if (error.cause !== undefined)
-    {
-        lines.push(`Caused by: ${String(error.cause)}`);
-    }
 
     return lines.join('\n');
+}
+
+function formatDatabaseError(error: DatabaseErrorDescription): string[]
+{
+    const fields = (['code', 'severity', 'constraint', 'schema', 'table', 'column', 'dataType', 'routine'] as const)
+        .filter(key => error[key] !== undefined)
+        .map(key => `[${key}=${error[key]}]`);
+    const lines = [`${error.name}: ${error.message ?? 'database error'}`];
+
+    if (fields.length > 0)
+    {
+        lines.push(`    ${fields.join(' ')}`);
+    }
+
+    if (error.sql !== undefined)
+    {
+        lines.push(`    sql: ${error.sql} (${error.paramCount ?? 0} params)`);
+    }
+
+    return lines;
 }
 
 /**
@@ -325,29 +357,6 @@ export function formatConsole(metadata: LogMetadata, colorize = true): string
 }
 
 /**
- * Error 객체를 cause 체인까지 포함한 직렬화 가능 객체로 변환
- */
-function formatErrorCauseChain(error: Error): Record<string, unknown>
-{
-    const result: Record<string, unknown> = {
-        name: error.name,
-        message: error.message,
-        stack: error.stack,
-    };
-
-    if (error.cause instanceof Error)
-    {
-        result.cause = formatErrorCauseChain(error.cause);
-    }
-    else if (error.cause !== undefined)
-    {
-        result.cause = String(error.cause);
-    }
-
-    return result;
-}
-
-/**
  * JSON 포맷 (파일 저장 및 전송용)
  */
 export function formatJSON(metadata: LogMetadata): string
@@ -370,7 +379,7 @@ export function formatJSON(metadata: LogMetadata): string
 
     if (metadata.error)
     {
-        obj.error = formatErrorCauseChain(metadata.error);
+        obj.error = metadata.error;
     }
 
     return JSON.stringify(obj);
@@ -383,12 +392,14 @@ export function formatJSON(metadata: LogMetadata): string
  * - "Failed query: <QUERY>\nparams: <PARAMS>"
  * - "Query: <QUERY>"
  *
+ * Only the query line is read: the `params:` line holds the bound values,
+ * which a log never carries.
+ *
  * @param error - Error 객체
- * @returns 쿼리 정보 (query, params, table)
+ * @returns 쿼리 정보 (query, table)
  */
 export function extractQueryInfo(error: Error): {
     query?: string;
-    params?: unknown;
     table?: string;
 } | null
 {
@@ -396,44 +407,19 @@ export function extractQueryInfo(error: Error): {
 
     if (!message) return null;
 
-    const result: {
-        query?: string;
-        params?: unknown;
-        table?: string;
-    } = {};
-
     // Extract query from "Failed query: ..." or "Query: ..."
     const queryMatch = message.match(/(?:Failed query:|Query:)\s*([^\n]+)/);
-    if (queryMatch)
-    {
-        result.query = queryMatch[1].trim();
+    if (!queryMatch) return null;
 
-        // Extract table name from query (e.g., UPDATE "table_name" or INSERT INTO "table_name")
-        const tableMatch = result.query.match(/(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?\."?([a-zA-Z_][a-zA-Z0-9_]*)"?|(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/i);
-        if (tableMatch)
-        {
-            // Schema.Table or just Table
-            result.table = tableMatch[2] || tableMatch[3] || tableMatch[1];
-        }
-    }
+    const query = queryMatch[1].trim();
 
-    // Extract params from "params: ..."
-    const paramsMatch = message.match(/params:\s*(.+?)(?:\n|$)/);
-    if (paramsMatch)
-    {
-        const paramsStr = paramsMatch[1].trim();
-        try
-        {
-            // Try to parse as comma-separated values
-            result.params = paramsStr.split(',').map(p => p.trim());
-        }
-        catch (e)
-        {
-            result.params = paramsStr;
-        }
-    }
+    // Extract table name from query (e.g., UPDATE "table_name" or INSERT INTO "table_name")
+    const tableMatch = query.match(/(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?\."?([a-zA-Z_][a-zA-Z0-9_]*)"?|(?:UPDATE|INSERT INTO|DELETE FROM|FROM)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/i);
 
-    return Object.keys(result).length > 0 ? result : null;
+    // Schema.Table or just Table
+    const table = tableMatch ? tableMatch[2] || tableMatch[3] || tableMatch[1] : undefined;
+
+    return table === undefined ? { query } : { query, table };
 }
 
 /**
@@ -456,11 +442,14 @@ export function extractPromiseContext(error: Error): Record<string, unknown>
 
     const stackLines = error.stack.split('\n');
 
-    // Skip first line (error message) and find first meaningful stack frame
+    // Frames only — the header (the message, which for a drizzle error runs
+    // over two lines and ends in its params) is skipped
     // Ignore node_modules and internal Node.js paths
     for (let i = 1; i < stackLines.length; i++)
     {
         const line = stackLines[i].trim();
+
+        if (!line.startsWith('at ')) continue;
 
         // Skip node_modules and node internals
         if (line.includes('node_modules') || line.includes('node:internal')) continue;

@@ -282,7 +282,7 @@ describe('createApi onOutcome - a failing observer', () =>
         expect(logger.error).toHaveBeenCalledTimes(1);
         expect(observerFailureLogs()).toEqual([[
             expect.stringContaining('onOutcome'),
-            { errorName: 'RangeError', errorMessage: 'observer broke' },
+            expect.objectContaining({ name: 'RangeError', message: 'observer broke' }),
         ]]);
     });
 
@@ -321,7 +321,7 @@ describe('createApi onOutcome - a failing observer', () =>
             expect(logger.error).toHaveBeenCalledTimes(1);
             expect(observerFailureLogs()).toEqual([[
                 expect.stringContaining('onOutcome'),
-                { errorName: 'Error', errorMessage: 'observer rejected' },
+                expect.objectContaining({ name: 'Error', message: 'observer rejected' }),
             ]]);
         }
         finally

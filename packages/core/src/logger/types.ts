@@ -15,6 +15,8 @@
  * - src/logger/config.ts (설정)
  */
 
+import type { DatabaseErrorDescription, ErrorDescription } from './error-description';
+
 /**
  * 로그 레벨
  * debug < info < warn < error < fatal
@@ -41,7 +43,8 @@ export interface LogMetadata
     level: LogLevel;
     message: string;
     module?: string;
-    error?: Error;
+    /** The logged error as `describeError` renders it — never the error object itself */
+    error?: ErrorDescription | DatabaseErrorDescription;
     context?: Record<string, unknown>;
 }
 

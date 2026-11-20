@@ -216,17 +216,13 @@ async function sweepOrphanSchedules(boss: PgBoss): Promise<void>
             }
             catch (error)
             {
-                jobLogger.error(`Failed to remove orphan schedule: ${orphan.name}`, {
-                    error: error instanceof Error ? error.message : String(error),
-                });
+                jobLogger.error(`Failed to remove orphan schedule: ${orphan.name}`, error);
             }
         }));
     }
     catch (error)
     {
-        jobLogger.error('Orphan schedule sweep failed', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        jobLogger.error('Orphan schedule sweep failed', error);
     }
 }
 
@@ -327,10 +323,9 @@ async function executeJobHandler(
     catch (error)
     {
         const duration = Date.now() - startTime;
-        jobLogger.error(`[Job:${job.name}] Failed after ${duration}ms`, {
+        jobLogger.error(`[Job:${job.name}] Failed after ${duration}ms`, error, {
             jobId: pgBossJob.id,
             duration,
-            error: error instanceof Error ? error.message : String(error),
         });
         throw error;
     }

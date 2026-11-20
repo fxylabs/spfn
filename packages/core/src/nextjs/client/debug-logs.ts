@@ -79,9 +79,8 @@ export function logErrorDeserializationSuccess(
 ): void
 {
     logger.debug('Error deserialized successfully', {
-        errorName: error?.name,
         errorConstructor: error?.constructor.name,
-        message: error?.message,
+        error,
     });
 }
 
@@ -91,8 +90,7 @@ export function logErrorDeserializationFailure(
 ): void
 {
     logger.debug('Deserialization failed', {
-        errorName: error instanceof Error ? error.name : 'unknown',
-        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
     });
 }
 

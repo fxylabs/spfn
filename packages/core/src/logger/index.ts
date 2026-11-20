@@ -26,6 +26,8 @@
 // Logger Instance
 export { logger } from './factory';
 export { Logger } from './logger';
+export { describeError } from './error-description';
 
 // Types
 export type { LogLevel, Transport } from './types';
+export type { ErrorDescription, DatabaseErrorDescription } from './error-description';

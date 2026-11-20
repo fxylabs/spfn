@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type PgBoss from 'pg-boss';
 
 import { recordWorkers, stopWorkers } from '../boss-workers';
+import { describeError } from '../../logger/error-description';
+import { expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
 
 interface StandInBoss extends EventEmitter
 {
@@ -113,7 +115,7 @@ describe('core\'s fetch loop keeps pg-boss\'s worker behaviour', () =>
         await vi.advanceTimersByTimeAsync(2000);
 
         expect(boss.complete.mock.calls).toEqual([['q', ['1'], { sent: 3 }], ['q', ['2', '3'], undefined]]);
-        expect(boss.fail).toHaveBeenCalledWith('q', ['4'], failure);
+        expect(boss.fail).toHaveBeenCalledWith('q', ['4'], describeError(failure));
     });
 
     it('K5: a completion that fails fails the job instead of leaving it active', async () =>
@@ -125,7 +127,7 @@ describe('core\'s fetch loop keeps pg-boss\'s worker behaviour', () =>
         await boss.work('q', async () => undefined);
         await vi.advanceTimersByTimeAsync(0);
 
-        expect(boss.fail).toHaveBeenCalledWith('q', ['1'], refused);
+        expect(boss.fail).toHaveBeenCalledWith('q', ['1'], describeError(refused));
     });
 
     it('K6: a failed fetch is emitted as an error naming the queue and worker, and the worker polls on', async () =>
@@ -184,6 +186,22 @@ describe('core\'s fetch loop keeps pg-boss\'s worker behaviour', () =>
         await vi.advanceTimersByTimeAsync(1000);
 
         expect(await atStop).toEqual({ unsettled: 0, fetches: fetchesOf('q') });
+    });
+
+    it('R8: a handler\'s database error fails the job with its description, so the job row stores no bound value (#382)', async () =>
+    {
+        boss.fetch.mockResolvedValueOnce([jobOf('1')]);
+
+        await boss.work('q', async () =>
+        {
+            throw failedInsert();
+        });
+        await vi.advanceTimersByTimeAsync(0);
+
+        // pg-boss serialises what fail() is given into the row's `output`
+        const [, , output] = boss.fail.mock.calls[0];
+        expect(output).toMatchObject({ kind: 'database', code: '23505', constraint: 'users_email_key', paramCount: 2 });
+        expectNoValues(JSON.stringify(output));
     });
 
     function fetchesOf(queue: string): number

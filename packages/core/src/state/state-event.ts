@@ -354,7 +354,7 @@ async function onSignal(state: RoutableState, payload: Record<string, unknown>):
     {
         stateLogger.warn(`State "${state.id}" could not be re-read or published on its change signal; no frame was sent`, {
             state: state.id,
-            error: error instanceof Error ? error.message : String(error),
+            error,
         });
     }
 }

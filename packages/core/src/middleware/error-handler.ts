@@ -8,7 +8,8 @@ import { randomBytes } from 'node:crypto';
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { SerializableError, type SerializedError } from '@spfn/core/errors';
-import { logger } from '@spfn/core/logger';
+import { describeError, logger } from '@spfn/core/logger';
+import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
 
 const errorLogger = logger.child('@spfn/core:error-handler');
@@ -96,12 +97,12 @@ interface SerializableErrorLike extends Error
 interface ErrorLogData extends Record<string, unknown>
 {
     type: string;
-    message: string;
     statusCode: number;
     path: string;
     method: string;
-    cause?: string;
 }
+
+type Description = ErrorDescription | DatabaseErrorDescription;
 
 interface StandardErrorResponse
 {
@@ -109,6 +110,8 @@ interface StandardErrorResponse
     message: string;
     cause?: string;
     stack?: string;
+    /** Outside production, a database error's description in place of its message, cause and stack */
+    database?: Description;
 }
 
 /**
@@ -265,8 +268,74 @@ function logError(
     }
     else
     {
-        errorLogger[logLevel]('Error occurred', logData);
+        errorLogger[logLevel]('Error occurred', { ...logData, error: withoutStack(describeError(err)) });
     }
+}
+
+/**
+ * A description with its stack frames dropped, down the cause chain: without
+ * `includeStack` the log line names the error but carries no trace
+ */
+function withoutStack(description: Description): Description
+{
+    const { stack: _stack, ...rest } = description;
+
+    if (rest.kind === 'error' && rest.cause)
+    {
+        return { ...rest, cause: withoutStack(rest.cause) };
+    }
+
+    return rest;
+}
+
+/**
+ * Whether the error is, or was caused by, a database error
+ */
+function isDatabaseDescription(description: Description): boolean
+{
+    if (description.kind === 'database')
+    {
+        return true;
+    }
+
+    return description.cause !== undefined && isDatabaseDescription(description.cause);
+}
+
+/**
+ * The body for an error that is not a SerializableError. Its message, cause
+ * and stack may carry raw SQL or driver text, so production gets a generic
+ * message only. Outside production a database error is answered with its
+ * description — never its message, cause or stack, which hold the bound
+ * values — and any other error with its message, cause and stack.
+ */
+function standardErrorResponse(err: Error, includeStack: boolean): StandardErrorResponse
+{
+    if (!includeStack)
+    {
+        return { __type: 'Error', message: 'Internal Server Error' };
+    }
+
+    const description = describeError(err);
+
+    if (isDatabaseDescription(description))
+    {
+        return { __type: 'Error', message: 'Database error', database: description };
+    }
+
+    const response: StandardErrorResponse = { __type: 'Error', message: err.message || 'Internal Server Error' };
+    const causeMessage = extractCauseMessage(err);
+
+    if (causeMessage)
+    {
+        response.cause = causeMessage;
+    }
+
+    if (err.stack)
+    {
+        response.stack = err.stack;
+    }
+
+    return response;
 }
 
 /**
@@ -358,8 +427,6 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
         const path = c.req.path;
         const method = c.req.method;
 
-        const causeMessage = extractCauseMessage(err);
-
         // Handle SerializableError with automatic serialization
         if (isSerializableError(err))
         {
@@ -369,8 +436,6 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
             {
                 logError(err, {
                     type: err.constructor.name,
-                    message: err.message,
-                    cause: causeMessage,
                     statusCode,
                     path,
                     method,
@@ -419,8 +484,6 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
         {
             logError(err, {
                 type: err.name || 'Error',
-                message: err.message,
-                cause: causeMessage,
                 statusCode,
                 path,
                 method,
@@ -435,24 +498,6 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
                 .catch(e => errorLogger.warn('onError callback failed', e as Error));
         }
 
-        // Standard (non-SerializableError) errors are uncaught/internal — their
-        // message and cause may contain raw SQL or driver text (e.g. an uncaught
-        // Drizzle error), so only expose them in development.
-        const response: StandardErrorResponse = {
-            __type: 'Error',
-            message: includeStack ? (err.message || 'Internal Server Error') : 'Internal Server Error',
-        };
-
-        if (causeMessage && includeStack)
-        {
-            response.cause = causeMessage;
-        }
-
-        if (includeStack && err.stack)
-        {
-            response.stack = err.stack;
-        }
-
-        return respond(c, response, statusCode);
+        return respond(c, standardErrorResponse(err, includeStack), statusCode);
     };
 }

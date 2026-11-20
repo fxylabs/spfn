@@ -189,7 +189,7 @@ export async function initCache(): Promise<{
         {
             cacheLogger.error(
                 'Cache connection failed - running in disabled mode',
-                error instanceof Error ? error : new Error(String(error)),
+                error,
                 { mode: 'disabled' },
             );
 

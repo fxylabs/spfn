@@ -18,87 +18,9 @@
 import { createMiddleware } from 'hono/factory';
 import { SerializableError } from '@spfn/core/errors';
 import { fromPostgresError } from '../postgres-errors';
-import { POSTGRES_JS_CONNECTION_CODES, reportDatabaseError } from '../manager/reconnect-trigger';
+import { reportDatabaseError } from '../manager/reconnect-trigger';
+import { isDriverError } from '../../logger/error-description';
 import { runInTransaction } from './runner';
-
-/**
- * A SQLSTATE is exactly five characters, digits and uppercase letters only —
- * `23505`, `08P01`, `40P01`.
- */
-const SQLSTATE_PATTERN = /^[0-9A-Z]{5}$/;
-
-/**
- * Whether an error came from the database driver — either relayed from the
- * PostgreSQL server or raised by the driver itself. Those are the shapes
- * `fromPostgresError` is written to read.
- *
- * It has to be certain rather than merely plausible, because the cost of a
- * false positive is total: `fromPostgresError` falls back to `QueryError 500`
- * for any code it does not recognise, so an application error routed into it
- * loses its status and its serialized envelope and reaches the client as a
- * bare 500. Two shapes qualify, and nothing else does.
- *
- * **One of the driver's own connection codes.** The errors postgres.js raises
- * itself instead of relaying — a socket that died mid-transaction, a connect
- * that timed out — are built by `Errors.connection` / `Errors.generic` (see
- * `postgres/src/errors.js`), which set `code` to a name of the driver's own
- * invention (`CONNECTION_CLOSED`, `CONNECT_TIMEOUT`, …) and no severity at all.
- * The name is the proof of origin, so it stands alone here;
- * `POSTGRES_JS_CONNECTION_CODES` is the very list the reconnect trigger
- * classifies on, which keeps the two readings of "the connection died" in step.
- *
- * **Or a SQLSTATE-shaped code together with a severity field.** For an error
- * relayed from the server, neither half suffices alone. A `code` says nothing
- * about who raised the error — Stripe sends `resource_missing`, jose sends
- * `ERR_JOSE_GENERIC`, the AWS SDK sends `ThrottlingException`, Node sends
- * `ECONNRESET`, and an application's own error class is free to carry one too.
- * The severity is what only a driver puts there: postgres.js copies the
- * server's ErrorResponse message field-for-field onto the error, mapping `S` to
- * `severity_local` and `V` to `severity` (see `errorFields` in
- * `postgres/src/connection.js`). Either field satisfies the gate: `V` exists
- * only from PostgreSQL 9.6, while `S` is in every ErrorResponse the protocol
- * has ever defined. node-postgres names the `S` field `severity`, so the same
- * gate holds if the driver is ever swapped.
- *
- * Deliberately NOT `routine` / `file` / `line`, the other fields postgres.js
- * sets: the protocol lists them as optional, and a connection pooler that
- * synthesizes its own ErrorResponse rather than relaying one — PgBouncer and
- * friends, which SPFN supports explicitly (see `isTransactionPooler` in
- * `manager/connection.ts`) — sends severity, code and message without them.
- * Those are the `08*` and `53300` errors that most need converting.
- *
- * The trade: an object that fakes both a SQLSTATE and a severity — or that
- * borrows one of the driver's connection-code names — is still converted. That
- * is the right way round. A hand-rolled `{ code: '23505' }` now passes through
- * as itself, which costs nothing real, and in exchange no application error is
- * ever mangled into a 500.
- */
-function isDriverOriginError(error: unknown): boolean
-{
-    if (!error || typeof error !== 'object')
-    {
-        return false;
-    }
-
-    const candidate = error as { code?: unknown; severity?: unknown; severity_local?: unknown };
-
-    if (typeof candidate.code !== 'string')
-    {
-        return false;
-    }
-
-    if (POSTGRES_JS_CONNECTION_CODES.has(candidate.code))
-    {
-        return true;
-    }
-
-    if (!SQLSTATE_PATTERN.test(candidate.code))
-    {
-        return false;
-    }
-
-    return typeof candidate.severity === 'string' || typeof candidate.severity_local === 'string';
-}
 
 /**
  * Transaction middleware options
@@ -260,7 +182,7 @@ export function Transactional(options: TransactionalOptions = {})
             }
 
             // 진짜 드라이버가 올린 PostgreSQL 에러만 변환
-            if (isDriverOriginError(error))
+            if (isDriverError(error))
             {
                 throw fromPostgresError(error);
             }

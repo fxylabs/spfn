@@ -253,9 +253,7 @@ function getCallerInfo(): string | undefined
     catch (error: unknown)
     {
         // Stack trace parsing failed - log for debugging
-        dbLogger.debug('Failed to extract caller info from stack trace', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        dbLogger.debug('Failed to extract caller info from stack trace', error);
     }
 
     return undefined;

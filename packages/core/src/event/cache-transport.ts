@@ -423,7 +423,7 @@ export function createRedisPubSubCache(
                 // downstream JSON.stringify may re-throw, but better than dropping).
                 transportLogger.warn('Pub/sub payload serialization failed — local delivery only', {
                     channel,
-                    error: err instanceof Error ? err.message : String(err),
+                    error: err,
                 });
                 deliverLocal(channel, message ?? null);
 
@@ -877,7 +877,7 @@ export async function wireEventRouterCache(
             degraded++;
             transportLogger.warn('Event cache wiring failed — staying in-process for this event', {
                 event: event.name,
-                error: err instanceof Error ? err.message : String(err),
+                error: err,
             });
         }
     }

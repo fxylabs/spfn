@@ -147,8 +147,9 @@ describe('Logger Context Detection', () =>
                     expect.objectContaining({
                         message: 'Error occurred',
                         error: expect.objectContaining({
+                            kind: 'error',
                             message: 'Test error',
-                            stack: expect.stringContaining('Error: Test error'),
+                            stack: expect.stringContaining('at '),
                         }),
                     }),
                 );
