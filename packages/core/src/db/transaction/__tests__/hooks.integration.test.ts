@@ -107,9 +107,9 @@ describe('Transaction Hooks (Integration)', () =>
 
     describe('Commit path', () =>
     {
-        it('runs beforeCommit inside the transaction, then commits, then afterCommit; afterRollback never runs', async () =>
+        it('runs beforeCommit inside the transaction, then commits, then afterCommit; afterRollback never runs', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             let txInsideBeforeCommit: unknown = 'never ran';
@@ -141,9 +141,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(warn).not.toHaveBeenCalled();
         });
 
-        it('runs a snapshot of the beforeCommit queue, so a self-registering callback terminates', async () =>
+        it('runs a snapshot of the beforeCommit queue, so a self-registering callback terminates', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const ran: string[] = [];
             let registrations = 0;
@@ -173,9 +173,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(ran).toEqual(['self-registering', 'second']);
         });
 
-        it('commits rows written by a beforeCommit callback as part of the same transaction', async () =>
+        it('commits rows written by a beforeCommit callback as part of the same transaction', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await runInTransaction(async () =>
             {
@@ -190,9 +190,9 @@ describe('Transaction Hooks (Integration)', () =>
 
     describe('Rollback path', () =>
     {
-        it('rolls back when a beforeCommit callback throws, skips afterCommit, and fires afterRollback', async () =>
+        it('rolls back when a beforeCommit callback throws, skips afterCommit, and fires afterRollback', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -216,9 +216,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['afterRollback']);
         });
 
-        it('fires afterRollback outside the transaction context and propagates the handler error unchanged', async () =>
+        it('fires afterRollback outside the transaction context and propagates the handler error unchanged', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const handlerError = new Error('handler failed');
             let txInsideAfterRollback: unknown = 'never ran';
@@ -240,9 +240,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual([]);
         });
 
-        it('logs a failing afterRollback callback and still propagates the original error', async () =>
+        it('logs a failing afterRollback callback and still propagates the original error', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const handlerError = new Error('handler failed');
             const logged = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
@@ -268,9 +268,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['second']);
         });
 
-        it('propagates the original error even when logging an afterRollback failure throws', async () =>
+        it('propagates the original error even when logging an afterRollback failure throws', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const handlerError = new Error('handler failed');
 
@@ -290,9 +290,9 @@ describe('Transaction Hooks (Integration)', () =>
             }, quiet)).rejects.toBe(handlerError);
         });
 
-        it('still runs afterRollback and propagates the original error when rollback-status logging throws', async () =>
+        it('still runs afterRollback and propagates the original error when rollback-status logging throws', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const handlerError = new Error('handler failed');
             const fired: string[] = [];
@@ -318,9 +318,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['afterRollback']);
         });
 
-        it('runs beforeCommit callbacks in registration order and skips the rest once one throws', async () =>
+        it('runs beforeCommit callbacks in registration order and skips the rest once one throws', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const ran: string[] = [];
 
@@ -342,9 +342,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual([]);
         });
 
-        it('fires afterRollback when a statement timeout rolls the transaction back', async () =>
+        it('fires afterRollback when a statement timeout rolls the transaction back', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -361,9 +361,9 @@ describe('Transaction Hooks (Integration)', () =>
 
     describe('Nested transactions', () =>
     {
-        it('fires hooks registered in a nested transaction once, at the root boundary', async () =>
+        it('fires hooks registered in a nested transaction once, at the root boundary', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -386,9 +386,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['beforeCommit', 'afterCommit']);
         });
 
-        it('fires afterRollback exactly once when a beforeCommit callback registered nested throws', async () =>
+        it('fires afterRollback exactly once when a beforeCommit callback registered nested throws', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -411,9 +411,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['root', 'nested']);
         });
 
-        it('fires the nested afterRollback at the savepoint, and not the root\'s, when a nested transaction fails but the root commits', async () =>
+        it('fires the nested afterRollback at the savepoint, and not the root\'s, when a nested transaction fails but the root commits', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -457,9 +457,9 @@ describe('Transaction Hooks (Integration)', () =>
             }, quiet)).rejects.toBe(nestedFailure);
         };
 
-        it('D1 runs an afterCommit of a resolved savepoint once after the root commit, between the root\'s own', async () =>
+        it('D1 runs an afterCommit of a resolved savepoint once after the root commit, between the root\'s own', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -481,9 +481,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['root-before', 'nested', 'root-after']);
         });
 
-        it('D2 never runs an afterCommit of a savepoint that rolled back, though the root commits', async () =>
+        it('D2 never runs an afterCommit of a savepoint that rolled back, though the root commits', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -499,9 +499,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['root afterCommit']);
         });
 
-        it('D3 never runs an afterCommit of a resolved savepoint when the root throws', async () =>
+        it('D3 never runs an afterCommit of a resolved savepoint when the root throws', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const rootError = new Error('root failed');
@@ -523,9 +523,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['root afterRollback']);
         });
 
-        it('D4 never runs a beforeCommit of a savepoint that rolled back, and the root commits', async () =>
+        it('D4 never runs a beforeCommit of a savepoint that rolled back, and the root commits', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -545,9 +545,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual(['root']);
         });
 
-        it('D5 runs a beforeCommit of a resolved savepoint before the root COMMIT, inside the transaction', async () =>
+        it('D5 runs a beforeCommit of a resolved savepoint before the root COMMIT, inside the transaction', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             let levelInsideBeforeCommit = 0;
@@ -575,9 +575,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual(['nested beforeCommit']);
         });
 
-        it('D6 never runs an afterCommit of a resolved savepoint whose parent savepoint rolled back', async () =>
+        it('D6 never runs an afterCommit of a resolved savepoint whose parent savepoint rolled back', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -596,9 +596,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['root afterCommit']);
         });
 
-        it('D7 runs an afterCommit of a savepoint two levels deep once, after the root commit', async () =>
+        it('D7 runs an afterCommit of a savepoint two levels deep once, after the root commit', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -620,9 +620,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['S2 afterCommit']);
         });
 
-        it('D8 runs an afterRollback of a savepoint once, at the savepoint rollback, inside the parent context', async () =>
+        it('D8 runs an afterRollback of a savepoint once, at the savepoint rollback, inside the parent context', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             let levelInsideAfterRollback = 0;
@@ -658,9 +658,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual(['compensation']);
         });
 
-        it('D9 runs an afterRollback of a resolved savepoint once, at the root rollback', async () =>
+        it('D9 runs an afterRollback of a resolved savepoint once, at the root rollback', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const rootError = new Error('root failed');
@@ -680,9 +680,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['nested afterRollback']);
         });
 
-        it('D10 logs a throwing afterRollback of a savepoint and rejects the nested call with the original error', async () =>
+        it('D10 logs a throwing afterRollback of a savepoint and rejects the nested call with the original error', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const logged = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
             const fired: string[] = [];
@@ -706,9 +706,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['second']);
         });
 
-        it('D11 fires the hooks of requiresNew roots inside a failing savepoint on their own outcome', async () =>
+        it('D11 fires the hooks of requiresNew roots inside a failing savepoint on their own outcome', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const innerError = new Error('inner root failed');
@@ -738,9 +738,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['committing root afterCommit', 'failing root afterRollback']);
         });
 
-        it('D12 drops a throwing Transactional() handler\'s commit hooks and runs its afterRollback at the savepoint', async () =>
+        it('D12 drops a throwing Transactional() handler\'s commit hooks and runs its afterRollback at the savepoint', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
             const app = new Hono();
@@ -768,9 +768,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['handler afterRollback', 'root afterCommit']);
         });
 
-        it('D13 does not run a hook registered by a resolved savepoint\'s beforeCommit callback for this commit', async () =>
+        it('D13 does not run a hook registered by a resolved savepoint\'s beforeCommit callback for this commit', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -789,9 +789,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['nested beforeCommit']);
         });
 
-        it('D14 completes a savepoint afterRollback that compensates with runInTransaction', async () =>
+        it('D14 completes a savepoint afterRollback that compensates with runInTransaction', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -822,9 +822,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual(['compensation']);
         });
 
-        it('D15 opens the next sibling savepoint only after a failed sibling\'s afterRollback pass has finished', async () =>
+        it('D15 opens the next sibling savepoint only after a failed sibling\'s afterRollback pass has finished', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
             vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -857,9 +857,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(order).toEqual(['rollback-finished', 'sibling-started']);
         });
 
-        it('D16 appends a resolved savepoint\'s beforeCommit and afterRollback between the root\'s own', async () =>
+        it('D16 appends a resolved savepoint\'s beforeCommit and afterRollback between the root\'s own', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const beforeCommits: string[] = [];
             const afterRollbacks: string[] = [];
@@ -892,9 +892,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(afterRollbacks).toEqual(['root-before', 'nested', 'root-after']);
         });
 
-        it('D17 drops an afterCommit that detached work registers after its savepoint has settled', async () =>
+        it('D17 drops an afterCommit that detached work registers after its savepoint has settled', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const fired: string[] = [];
 
@@ -914,9 +914,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(fired).toEqual(['registered in the call chain']);
         });
 
-        it('D18 rejects the root with the error of a statement that failed in a savepoint\'s afterRollback', async () =>
+        it('D18 rejects the root with the error of a statement that failed in a savepoint\'s afterRollback', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
             const fired: string[] = [];
@@ -938,9 +938,9 @@ describe('Transaction Hooks (Integration)', () =>
             expect(await storedLabels()).toEqual([]);
         });
 
-        it('D18b fails the root\'s next statement with 25P02 after a statement failed in a savepoint\'s afterRollback', async () =>
+        it('D18b fails the root\'s next statement with 25P02 after a statement failed in a savepoint\'s afterRollback', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
             let atNext: unknown = 'none';

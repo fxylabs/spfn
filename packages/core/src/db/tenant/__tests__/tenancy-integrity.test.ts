@@ -37,6 +37,8 @@ describe('tenancy integrity (app role, integration)', () =>
         await db.setup();
     });
 
+    beforeEach((context) => db.skipIfUnavailable(context));
+
     beforeEach(async () =>
     {
         if (!db.isAvailable) return;
@@ -51,8 +53,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I1 a row for a tenant missing from the tenant list is refused by its foreign key', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(authorRepository.create(8, 'Nobody')))
             .toMatch(/violates foreign key constraint "authors_tenant_id_fk"/);
         expect(await rowsOf('authors')).toEqual(['1:7', '2:9', '3:7']);
@@ -60,8 +60,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I2 a tenant 7 note pointing at a tenant 9 author is refused by the composite foreign key', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(noteRepository.create(7, { authorId: 2, title: 'cross' })))
             .toMatch(/violates foreign key constraint "notes_author_fk"/);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
@@ -69,8 +67,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I3 a note pointing at an author of the same tenant is stored', async () =>
     {
-        if (!db.isAvailable) return;
-
         const note = await noteRepository.create(7, { authorId: 3, title: 'same tenant' });
 
         expect(note).toMatchObject({ tenantId: 7, authorId: 3 });
@@ -79,8 +75,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I4 deleting a workspace that still has rows is refused; workspace and rows stay', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(workspaceRepository.remove(7))).toMatch(/violates foreign key constraint "authors_tenant_id_fk"/);
         expect((await db.owner`select id from ${db.owner(TENANCY_SCHEMA)}.workspaces order by id`).map((row) => Number(row.id)))
             .toEqual([7, 9, 11]);
@@ -89,8 +83,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I5 deleting an author deletes the notes that require it, and no other tenant\'s rows', async () =>
     {
-        if (!db.isAvailable) return;
-
         await authorRepository.remove(7, 1);
 
         expect(await rowsOf('authors')).toEqual(['2:9', '3:7']);
@@ -99,8 +91,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I6 an optional reference left null is stored', async () =>
     {
-        if (!db.isAvailable) return;
-
         const note = await noteRepository.create(7, { authorId: 1, reviewerId: null, title: 'unreviewed' });
 
         expect(note.reviewerId).toBeNull();
@@ -108,8 +98,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I7 deleting an author an optional reference points at is refused; author and note stay', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(authorRepository.remove(7, 3))).toMatch(/violates foreign key constraint "notes_reviewer_fk"/);
         expect(await rowsOf('authors')).toEqual(['1:7', '2:9', '3:7']);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
@@ -117,8 +105,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I8 deleting a note a restrict reference points at is refused; note and revision stay', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(noteRepository.remove(9, 3))).toMatch(/violates foreign key constraint "revisions_note_fk"/);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);
         expect(await rowsOf('revisions')).toEqual(['1:9']);
@@ -126,8 +112,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I9 deleting a note no revision points at succeeds; other notes and the revision stay', async () =>
     {
-        if (!db.isAvailable) return;
-
         await noteRepository.remove(7, 1);
 
         expect(await rowsOf('notes')).toEqual(['2:7', '3:9']);
@@ -136,8 +120,6 @@ describe('tenancy integrity (app role, integration)', () =>
 
     it('I10 a cascade that reaches a restrict reference refuses the whole delete; author, note and revision stay', async () =>
     {
-        if (!db.isAvailable) return;
-
         expect(await failureOf(authorRepository.remove(9, 2))).toMatch(/violates foreign key constraint "revisions_note_fk"/);
         expect(await rowsOf('authors')).toEqual(['1:7', '2:9', '3:7']);
         expect(await rowsOf('notes')).toEqual(['1:7', '2:7', '3:9']);

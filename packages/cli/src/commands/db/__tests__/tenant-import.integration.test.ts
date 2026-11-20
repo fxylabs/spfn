@@ -122,6 +122,8 @@ describe('spfn db tenant import (integration)', () =>
             && await requireDatabase(target, 'tenant import integration tests (target)');
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL not available'));
+
     beforeEach(() =>
     {
         output = [];
@@ -159,8 +161,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M1 into a migrated, empty database with workspace 7, every tenant table gets tenant 7\'s rows, counts equal', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
         const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf-8'));
 
@@ -180,8 +180,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M2 tenant 7 already has rows and no --replace: refused, the rows stay', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await createSchema(target, fixtures, appRole);
@@ -193,8 +191,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M3 the same with --replace: tenant 7 becomes the file\'s rows, other tenants\' rows unchanged', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await createSchema(target, fixtures, appRole);
@@ -212,8 +208,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M4 a file row changed to tenant 9, its sha256 recomputed: refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         // memos columns: id, tenant_id, body
@@ -225,8 +219,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M5 a file changed but its sha256 left: refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editFile(directory, 'memos', (text) => text.replace('\tb', '\tB'), false);
@@ -237,8 +229,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M6 a target table with one column more, or one fewer: refused naming the column, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget();
@@ -252,8 +242,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M7 the target has no workspace 7: refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget([9]);
@@ -263,8 +251,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M8 after the import the app inserts rows with fresh ids that collide with none, and no sequence moved backwards', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget();
@@ -288,8 +274,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M9 a foreign key error in a later table: refused, the earlier tables rolled back, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         // writers columns: id, tenant_id, name — drop Cid, whom note 4 names as author
@@ -301,8 +285,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M10 file names sort in another order than the foreign keys: the import follows the plan and succeeds', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
         const files = readdirSync(directory).filter((name) => name.endsWith('.copy')).sort();
         const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf-8'));
@@ -318,8 +300,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M11 a self-referencing table whose child row comes before its parent in the file imports', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource(async () =>
         {
             await source.unsafe(`INSERT INTO ${SCHEMA}.notes (id, tenant_id, author_id, title) VALUES (6, 7, 1, 'parent')`);
@@ -335,8 +315,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M12 the import connects with DATABASE_OWNER_URL when set, else with DATABASE_URL', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget();
@@ -354,8 +332,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M13 the same folder twice without --replace: the second is refused, the first result stays', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget();
@@ -367,8 +343,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M14 export from a point-in-time copy, import --replace into production: tenant 7 is the file, other tenants untouched', async () =>
     {
-        if (!available) return;
-
         // The copy: the seeded source, exported through the command as the app
         await createSchema(source, fixtures, appRole);
         await seed(source, SCHEMA);
@@ -396,8 +370,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M15 a manifest format this spfn does not know: refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editManifest(directory, (manifest) =>
@@ -411,8 +383,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M16 a manifest row count changed, the file and its sha256 untouched: refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editManifest(directory, (manifest) =>
@@ -426,8 +396,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M17 a table outside the plan whose foreign keys cascade or set null into plan tables: --replace refused naming each, nothing deleted anywhere', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
         const bookmarks = async () => (await target.unsafe(
             `SELECT count(*)::int AS rows, md5(string_agg(t::text, '|' ORDER BY t::text)) AS checksum FROM ${SCHEMA}.bookmarks t`,
@@ -455,8 +423,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('C1 --replace over a tenant whose self-reference is onDelete restrict succeeds; other tenants unchanged', async () =>
     {
-        if (!available) return;
-
         const restricted = createTenantFixtures(SCHEMA, { parentOnDelete: 'restrict' });
         const directory = await exportSource();
 
@@ -479,8 +445,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M18 the import prints each sequence it moves, from → to, and nothing for one it leaves', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         await migrateTarget();
@@ -497,8 +461,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M-file-gone a file removed after its sha256 was checked: refused with ENOENT, nothing written, no uncaught error', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
         const prepared = await prepareImport(directory, plan);
 
@@ -510,8 +472,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M-input-tenant-id a manifest tenantId "1 OR 1=1" is refused before a connection, through the command too', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editManifest(directory, (manifest) =>
@@ -528,8 +488,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M-input-file a manifest naming another file than the plan derives ("../x") is refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editManifest(directory, (manifest) =>
@@ -543,8 +501,6 @@ describe('spfn db tenant import (integration)', () =>
 
     it('M-input-table a manifest table or column the app schema does not have is refused, nothing written', async () =>
     {
-        if (!available) return;
-
         const directory = await exportSource();
 
         editManifest(directory, (manifest) =>

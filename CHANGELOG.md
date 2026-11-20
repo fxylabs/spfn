@@ -257,6 +257,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names each row and the folder stamp or hash that would match it: restore that folder, or delete
   the row after confirming its SQL is applied; for the journal layout, run `drizzle-kit up`. Then
   check `spfn db status`. Function package migrations keep #357's rule.
+- **BREAKING: spfn: the Kit's `db-status` gate fails on a migration status it could not read, and
+  `spfn db status --json` answers `"permission-denied"` for a permission error (#405).** The gate
+  passed whenever the status carried no pending names, which an unread status never does: with no
+  `DATABASE_URL` (`not-configured`), an unreachable database, or a role the database refused, it
+  passed without reading anything. It now fails, naming why (`the migration status could not be
+  read: not-configured`). Who meets it: `spfn kit restore` on a checkout with no `DATABASE_URL` — a
+  fresh clone, a CI job — when the release manifest lists `db-status` (`install` and `update`
+  already wait for a database before their gates); configure the database first, or resume once
+  it is. `spfn db status --json` reported a
+  permission error (SQLSTATE 42501, typically the app role without a grant on schema `drizzle`)
+  as `reachable: false, reason: "unreachable"`; it now reports `reason: "permission-denied"` with
+  PostgreSQL's message in `detail`. A reader that branches on `reason` and treated `"unreachable"`
+  as "wait and retry" meets the new value; one that stops on `reachable: false` is unaffected.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
   (#357).** It was the shared "name OR timestamp" filter; function packages now go through
   `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to
@@ -361,6 +374,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server — in a codegen process too, inside the router load, besides the check after it.
 
 ### Fixed
+
+- **spfn: a migration status that could not be read is no longer "nothing pending" (#405).**
+  `spfn kit install`/`update` used to report `migration-applied` when the status read after
+  `spfn db migrate` failed: an unread status carries an empty `pending` list, and the Kit took it
+  for "all applied" (the step, its re-check on resume, and the `db-status` gate). Now:
+  - `spfn db status --json` reports a permission error (SQLSTATE 42501, typically the app role
+    without a grant on schema `drizzle`) as the new `reason: "permission-denied"`, with
+    PostgreSQL's message in `detail`, instead of `"unreachable"`; the human form names the grant.
+  - the Kit's migration step refuses on it before or after migrating —
+    `CLI_MIGRATION_STATUS_UNREADABLE`, exit 4, `evidence.reason: "permission-denied"` — instead of
+    waiting forever on `KIT_WAITING_DATABASE` ("needs a database connection") or reporting
+    success. The remedy is still the hand SQL in the `@spfn/core` db README, "Database roles": no
+    spfn command grants anything yet.
+  - an after-migrate read failing for another reason is `KIT_MIGRATION_FAILED` (resumable); the
+    step's re-check and the `db-status` gate fail on any unread status with the reason
+    (`not-configured` included, which the gate used to pass).
+  - `spfn dev`/`spfn start` print one line when the pre-start check cannot read the status
+    (`Could not check migrations: …`; with the grant on a permission error) and start, where they
+    were silent. They still do not block on it.
+  - a `spfn db status --json` child that printed no report (it crashed, or could not load tsx or
+    an import) is no longer taken for a project without a database: the gate summary, the step's
+    re-check and the `KIT_MIGRATION_FAILED` evidence say `report-unreadable (…)` with the tail of
+    the child's stderr, URLs redacted, where they said `not-configured`.
+- **Tests: a database or two-role row that did not run is reported skipped, with the reason, not
+  passed (#405).** 23 test files in core and spfn returned early (`if (!available) return;`) when
+  PostgreSQL or the second test role was missing, so vitest counted those rows as passed. They
+  now skip through the test context; the two-role harness (`tenancy-db.ts`,
+  `migration-gate-roles.test.ts`) also checks that the app role connects, and fails instead of
+  skipping under CI, whose PostgreSQL has both roles. "CI" means `CI` set to anything but
+  nothing, `false` or `0`, there and in the spfn tenant tests' database check; `CI=false` used to
+  count as CI and turn the skip into a failure.
 
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's

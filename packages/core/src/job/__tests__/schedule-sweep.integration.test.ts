@@ -10,7 +10,7 @@
  * Tests self-skip with a warning if the fixture cannot connect.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { job } from '../job-builder';
 import { defineJobRouter } from '../job-router';
 import { registerJobs, resetOrphanSweepState } from '../register-jobs';
@@ -40,6 +40,8 @@ describe('Orphan Schedule Sweep (Integration)', () =>
         }
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL not available'));
+
     afterAll(async () =>
     {
         resetOrphanSweepState();
@@ -60,8 +62,6 @@ describe('Orphan Schedule Sweep (Integration)', () =>
 
     it('unschedules a schedule left behind by a removed job but keeps its queue', async () =>
     {
-        if (!available) return;
-
         const boss = getBoss()!;
 
         // Plant a legacy schedule as if 'legacy-reaper' was once a cron job

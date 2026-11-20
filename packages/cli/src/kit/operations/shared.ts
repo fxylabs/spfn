@@ -18,7 +18,15 @@ import { expandArchive } from './../expand.js';
 import { createChildEnv, registryNpmrc } from './../child-env.js';
 import { readManifest, assertManifestCliCompatible, type KitReleaseManifestView } from './../manifest.js';
 import { installedGraphMismatches } from './../package-graph.js';
-import { readCatalog, type DatabaseStatus, type KitAdapters, type KitCatalogView } from './../ports.js';
+import {
+    readCatalog,
+    unreadableStatusReason,
+    type DatabaseStatus,
+    type KitAdapters,
+    type KitCatalogView,
+    type MigrationResult,
+} from './../ports.js';
+import type { VerifyResult } from './../runner.js';
 import { verifySignedDocument } from './../signature.js';
 import { readLicenseFile, type KitLicenseFileV1 } from './../installed-state.js';
 import { AGENT_PACK_RECORD_PATH, readAgentPackRecord } from './../agent-pack.js';
@@ -599,24 +607,83 @@ export async function runLocalGates(
 }
 
 /**
- * Refuse a migration step whose project bookkeeping `spfn db migrate` would
- * refuse. Not a wait: the database answered, and nothing changes until the
- * bookkeeping or `src/server/drizzle` is fixed by hand.
+ * Refuse a migration step on a status the database answered but would not
+ * give. Not a wait: nothing changes until a person acts.
+ *
+ * A bookkeeping mismatch is refused by `spfn db migrate` until the bookkeeping
+ * or `src/server/drizzle` is fixed by hand. A permission error is a missing
+ * grant: without this refusal it reads as "no database" before migrating — a
+ * wait no resume ends — and as "nothing pending" after.
  */
-export function assertBookkeepingMatches(status: DatabaseStatus, operationId: string): void
+export function assertStatusReadable(status: DatabaseStatus, operationId: string): void
 {
-    if (status.bookkeepingMismatch === undefined)
+    const next = { command: `spfn kit resume ${operationId} --json`, requiresHumanApproval: false };
+
+    if (status.bookkeepingMismatch !== undefined)
     {
-        return;
+        throw new KitError(
+            'CLI_MIGRATION_BOOKKEEPING_MISMATCH',
+            'The project\'s migration bookkeeping does not match src/server/drizzle, so `spfn db migrate` would '
+            + 'refuse it. Fix what the detail names (`spfn db status` prints the same), then resume.',
+            { evidence: { reason: 'bookkeeping-mismatch', detail: status.bookkeepingMismatch }, next },
+        );
+    }
+    if (status.permissionDenied !== undefined)
+    {
+        throw new KitError(
+            'CLI_MIGRATION_STATUS_UNREADABLE',
+            'The database refused the app role the read of the migration status (schema `drizzle`), so nothing '
+            + 'can tell what is applied. As the database owner, grant the app role USAGE on schema drizzle and '
+            + 'SELECT on its tables — the SQL is in the @spfn/core db README, "Database roles"; spfn does not '
+            + 'grant it yet. Then resume.',
+            { evidence: { reason: 'permission-denied', detail: status.permissionDenied }, next },
+        );
+    }
+}
+
+/**
+ * Stop a migration step that did not end with every migration applied, as far
+ * as a status read afterwards can tell.
+ *
+ * A status that could not be read afterwards is not "nothing pending": it is
+ * refused with the reason when the database refused the read, and otherwise
+ * left resumable, since resuming reads the status again.
+ */
+export function assertMigrationFinished(result: MigrationResult, operationId: string): void
+{
+    const next = { command: `spfn kit resume ${operationId} --json`, requiresHumanApproval: false };
+
+    if (result.unreadableAfter !== undefined)
+    {
+        assertStatusReadable(result.unreadableAfter, operationId);
+
+        throw new KitError(
+            'KIT_MIGRATION_FAILED',
+            'The migrations ran, but the status could not be read afterwards, so nothing confirms they applied.',
+            { evidence: { reason: unreadableStatusReason(result.unreadableAfter) }, next },
+        );
+    }
+    if (!result.ok || result.pending.length > 0)
+    {
+        throw new KitError('KIT_MIGRATION_FAILED', 'A package migration did not finish.', {
+            evidence: { pending: result.pending.length, detail: result.failure ?? null },
+            next,
+        });
+    }
+}
+
+/**
+ * A migration step's `verify`: done only on a status that was read and has
+ * nothing pending. An unread status has an empty pending list too.
+ */
+export function verifyNothingPending(status: DatabaseStatus): VerifyResult
+{
+    if (!status.reachable)
+    {
+        return { ok: false, reason: `database-status-unreadable: ${unreadableStatusReason(status)}` };
     }
 
-    throw new KitError(
-        'CLI_MIGRATION_BOOKKEEPING_MISMATCH',
-        'The project\'s migration bookkeeping does not match src/server/drizzle, so `spfn db migrate` would '
-        + 'refuse it. Fix what the detail names (`spfn db status` prints the same), then resume.',
-        {
-            evidence: { reason: 'bookkeeping-mismatch', detail: status.bookkeepingMismatch },
-            next: { command: `spfn kit resume ${operationId} --json`, requiresHumanApproval: false },
-        },
-    );
+    return status.pending.length === 0
+        ? { ok: true, evidence: { applied: status.applied, pending: 0 } }
+        : { ok: false, reason: 'database-has-pending-migrations' };
 }

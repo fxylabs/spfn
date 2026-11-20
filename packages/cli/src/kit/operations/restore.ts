@@ -165,7 +165,7 @@ export async function runRestore(request: RestoreRequest, adapters: KitAdapters)
 
                 return {
                     kind: 'done',
-                    evidence: { gates, pendingMigrations: status.pending.length },
+                    evidence: { gates, pendingMigrations: status.reachable ? status.pending.length : null },
                 };
             },
         },

@@ -1,7 +1,13 @@
 import chalk from 'chalk';
 
 import { validateDatabasePrerequisites } from './utils/drizzle.js';
-import { bookkeepingMismatchOf, getMigrationStatus, migrationTargets } from '../../utils/migration-status.js';
+import {
+    bookkeepingMismatchOf,
+    getMigrationStatus,
+    migrationTargets,
+    permissionDeniedOf,
+    STATUS_GRANT_REMEDY,
+} from '../../utils/migration-status.js';
 import type { MigrationStatus } from '../../utils/migration-status.js';
 
 /**
@@ -20,14 +26,18 @@ export interface DbStatusReportV1
     /** Whether a connection string is configured for this project at all. */
     configured: boolean;
     /**
-     * Whether the status was read. False when the database did not answer, and
-     * on a bookkeeping mismatch — so a reader that does not know that reason
-     * stops rather than taking the empty pending list as "nothing to do".
+     * Whether the status was read. False when the database did not answer, on
+     * a bookkeeping mismatch and on a permission error — so a reader that does
+     * not know that reason stops rather than taking the empty pending list as
+     * "nothing to do". An unread status is never "nothing pending".
      */
     reachable: boolean;
     /** Why it could not be read, in a word. Absent when it was read. */
     reason?: DbStatusUnreadableReason;
-    /** With `bookkeeping-mismatch` only: what does not match, and the remedy. */
+    /**
+     * With `bookkeeping-mismatch`: what does not match, and the remedy. With
+     * `permission-denied`: PostgreSQL's message, which names what was refused.
+     */
     detail?: string;
     targets: {
         name: string;
@@ -45,8 +55,12 @@ export interface DbStatusReportV1
  * `bookkeeping-mismatch`: the database answered, and the project's bookkeeping
  * does not match `src/server/drizzle` the way `spfn db migrate` matches it, so
  * migrate refuses — waiting for the database will not change it.
+ *
+ * `permission-denied`: the database answered and refused the connecting role
+ * the read (SQLSTATE 42501, typically no grant on schema `drizzle`). Not
+ * "unreachable": waiting changes nothing until someone grants it.
  */
-export type DbStatusUnreadableReason = 'not-configured' | 'unreachable' | 'bookkeeping-mismatch';
+export type DbStatusUnreadableReason = 'not-configured' | 'unreachable' | 'bookkeeping-mismatch' | 'permission-denied';
 
 /**
  * Read a migration status into the report.
@@ -132,21 +146,14 @@ export async function dbStatus(options: { json?: boolean } = {}): Promise<void>
     }
     catch (error)
     {
-        const mismatch = bookkeepingMismatchOf(error);
-
         if (json)
         {
-            printReport(mismatch === undefined
-                ? unreadableStatusReport('unreachable')
-                : unreadableStatusReport('bookkeeping-mismatch', mismatch));
+            printReport(unreadableReportFor(error));
 
             return;
         }
 
-        console.error(chalk.red(mismatch === undefined
-            ? '❌ Failed to read migration status'
-            : '❌ The project\'s migration bookkeeping does not match src/server/drizzle'));
-        console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
+        printReadFailure(error);
         process.exit(1);
     }
 
@@ -191,6 +198,41 @@ export async function dbStatus(options: { json?: boolean } = {}): Promise<void>
     else
     {
         console.log(chalk.yellow(`\n⚠️  ${pendingTotal} pending migration(s) — run: pnpm spfn db migrate\n`));
+    }
+}
+
+/** The report for a status read that threw: why, in the report's own words. */
+function unreadableReportFor(error: unknown): DbStatusReportV1
+{
+    const mismatch = bookkeepingMismatchOf(error);
+
+    if (mismatch !== undefined)
+    {
+        return unreadableStatusReport('bookkeeping-mismatch', mismatch);
+    }
+
+    const denied = permissionDeniedOf(error);
+
+    return denied === undefined
+        ? unreadableStatusReport('unreachable')
+        : unreadableStatusReport('permission-denied', denied);
+}
+
+function printReadFailure(error: unknown): void
+{
+    const mismatch = bookkeepingMismatchOf(error) !== undefined;
+
+    console.error(chalk.red(mismatch
+        ? '❌ The project\'s migration bookkeeping does not match src/server/drizzle'
+        : '❌ Failed to read migration status'));
+    console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
+
+    const denied = permissionDeniedOf(error);
+
+    if (denied !== undefined)
+    {
+        console.error(chalk.red(denied));
+        console.error(chalk.yellow(STATUS_GRANT_REMEDY));
     }
 }
 

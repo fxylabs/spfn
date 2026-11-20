@@ -16,7 +16,7 @@ import { join } from 'path';
 
 import { closeDatabase, collectMigrationStatus, setDatabase, type MigrationStatusDb } from '../../db';
 import { TEST_DATABASE_URL } from '../../db/__tests__/helpers/db-fixture';
-import { appDatabaseUrl } from '../../db/tenant/__tests__/tenancy-db';
+import { appDatabaseUrl, twoRoleUnavailability } from '../../db/tenant/__tests__/tenancy-db';
 import { serverLogger } from '../logger';
 import { PendingMigrationsError, resetMigrationSnapshot, runMigrationBootGate } from '../migration-gate';
 
@@ -62,18 +62,15 @@ describe('migration status through an app role that owns nothing', () =>
     const owner = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => undefined });
     const app = postgres(appUrl, { max: 1, onnotice: () => undefined });
     const appDb = drizzle({ client: app }) as unknown as MigrationStatusDb;
-    let available = false;
+    let unavailable: string | undefined = 'beforeAll has not run';
     let cwd: string;
 
     beforeAll(async () =>
     {
-        available = await owner`select 1`.then(() => app`select 1`).then(() => true, () => false);
-
-        if (!available)
-        {
-            console.log('\n⚠️  PostgreSQL not available - skipping migration role tests\n');
-        }
+        unavailable = await twoRoleUnavailability(owner, app, appRole);
     });
+
+    beforeEach(({ skip }) => skip(unavailable !== undefined, unavailable));
 
     afterAll(async () =>
     {
@@ -86,7 +83,7 @@ describe('migration status through an app role that owns nothing', () =>
         resetMigrationSnapshot();
         delete process.env.SPFN_ALLOW_PENDING_MIGRATIONS;
 
-        if (available)
+        if (unavailable === undefined)
         {
             await owner.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
         }
@@ -99,7 +96,7 @@ describe('migration status through an app role that owns nothing', () =>
         resetMigrationSnapshot();
         vi.restoreAllMocks();
 
-        if (available)
+        if (unavailable === undefined)
         {
             await owner.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
         }
@@ -107,8 +104,6 @@ describe('migration status through an app role that owns nothing', () =>
 
     it('MG1 an app role with no privilege on drizzle is not told the applied migration is pending', async () =>
     {
-        if (!available) return;
-
         await recordAppliedMigration(owner);
 
         await expect(collectMigrationStatus(appDb, cwd)).rejects.toMatchObject({
@@ -118,8 +113,6 @@ describe('migration status through an app role that owns nothing', () =>
 
     it('MG1 the boot gate reports "could not check" and boots, without a connection string in the warning', async () =>
     {
-        if (!available) return;
-
         await recordAppliedMigration(owner);
         setDatabase(appDb as never);
         const warn = vi.spyOn(serverLogger, 'warn').mockImplementation(() => undefined);
@@ -138,8 +131,6 @@ describe('migration status through an app role that owns nothing', () =>
 
     it('MG2 an app role with USAGE and SELECT on drizzle sees what the owner sees', async () =>
     {
-        if (!available) return;
-
         await recordAppliedMigration(owner);
         await owner.unsafe(`GRANT USAGE ON SCHEMA drizzle TO ${appRole}`);
         await owner.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA drizzle TO ${appRole}`);
@@ -153,8 +144,6 @@ describe('migration status through an app role that owns nothing', () =>
 
     it('MG3 a fresh database with no bookkeeping table reports every migration pending', async () =>
     {
-        if (!available) return;
-
         const status = await collectMigrationStatus(appDb, cwd);
 
         expect(status.project).toMatchObject({ total: 2, applied: 0, pending: 2, pendingTags: [APPLIED_TAG, PENDING_TAG] });

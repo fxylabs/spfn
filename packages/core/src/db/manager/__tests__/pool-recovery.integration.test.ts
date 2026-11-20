@@ -32,6 +32,8 @@ describe('Pool Recovery (Integration)', () =>
         await dbFixture.setup();
     });
 
+    beforeEach((context) => dbFixture.skipIfUnavailable(context));
+
     afterAll(async () =>
     {
         await dbFixture.teardown();
@@ -50,8 +52,6 @@ describe('Pool Recovery (Integration)', () =>
     {
         it('performs an atomic swap and the new pool serves queries', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // Sanity: pool works before the rebuild.
             const before = await getDatabase('write').execute('SELECT 1 AS ok');
             expect(before).toBeDefined();
@@ -84,8 +84,6 @@ describe('Pool Recovery (Integration)', () =>
 
         it('coalesces concurrent callers to a single rebuild', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const beforeClient = getWriteClient();
 
             const results = await Promise.all([
@@ -110,8 +108,6 @@ describe('Pool Recovery (Integration)', () =>
 
         it('survives repeated rebuilds without leaking state', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             let previousClient = getWriteClient();
 
             for (let i = 0; i < 3; i++)
@@ -137,8 +133,6 @@ describe('Pool Recovery (Integration)', () =>
     {
         it('crossing the threshold triggers a real pool rebuild', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const beforeClient = getWriteClient();
             expect(beforeClient).toBeDefined();
 
@@ -166,8 +160,6 @@ describe('Pool Recovery (Integration)', () =>
 
         it('does not rebuild for query errors (syntax / constraint)', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             const beforeClient = getWriteClient();
 
             // 10 syntax errors — classifier must reject all of them.
@@ -207,8 +199,6 @@ describe('Pool Recovery (Integration)', () =>
     {
         it('interleaving queries and a rebuild does not crash or hang', async () =>
         {
-            if (!dbFixture.isAvailable) return;
-
             // Fire a handful of queries against the current pool while a
             // rebuild is running. The rebuild's `closeClient` gives the old
             // pool's in-flight queries up to 5s to drain, so anything that

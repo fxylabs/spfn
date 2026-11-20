@@ -9,7 +9,7 @@
  * subquery a caller hands it is checked like any other SQL.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { alias, pgTable, bigint, text } from 'drizzle-orm/pg-core';
@@ -265,6 +265,8 @@ describe('tenant query warning on a live database (integration)', () =>
         }
     });
 
+    beforeEach(({ skip }) => skip(!client, 'PostgreSQL not available'));
+
     afterAll(async () =>
     {
         if (!client) return;
@@ -276,8 +278,6 @@ describe('tenant query warning on a live database (integration)', () =>
 
     it('row 32: TenantRepository methods and _select run silently', async () =>
     {
-        if (!client) return;
-
         await new NoteRepository().exercise(1);
 
         expect(warn.mock.calls).toEqual([]);
@@ -285,8 +285,6 @@ describe('tenant query warning on a live database (integration)', () =>
 
     it('row 28: a hand-written query on this.readDb is warned', async () =>
     {
-        if (!client) return;
-
         await new NoteRepository().handWritten();
         await getDatabase().select().from(notes);
 
@@ -296,8 +294,6 @@ describe('tenant query warning on a live database (integration)', () =>
 
     it('a subquery handed to a TenantRepository method is checked', async () =>
     {
-        if (!client) return;
-
         warn.mockClear();
         await new NoteRepository().withSubquery(1);
 
@@ -307,13 +303,12 @@ describe('tenant query warning on a live database (integration)', () =>
 
     it('row 41: a warn callback that throws does not fail the query', async () =>
     {
-        if (!client) return;
-
         const failingWarn = () =>
         {
             throw new Error('broken warning sink');
         };
-        const db = drizzle({ client, logger: createTenantQueryLogger({ warn: failingWarn }) });
+        // Set: the skip hook above ends the row when beforeAll could not connect.
+        const db = drizzle({ client: client!, logger: createTenantQueryLogger({ warn: failingWarn }) });
         const rows = await db.select().from(notes);
 
         expect(rows.length).toBeGreaterThan(0);

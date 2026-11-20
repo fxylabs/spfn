@@ -170,9 +170,9 @@ describe('tenancy.guard and tenancy.of', () =>
         expect((await response.json()).message).toContain('without tenancy.guard()');
     });
 
-    it('A7 [guard, Transactional()] and [Transactional(), guard] both bind the transaction to tenant 7', async () =>
+    it('A7 [guard, Transactional()] and [Transactional(), guard] both bind the transaction to tenant 7', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
         const respond = async (c: Context) =>
@@ -264,9 +264,9 @@ describe('tenancy.guard and tenancy.of', () =>
     const rename = async (c: Context) =>
         c.json({ renamed: (await workspaceRepository.rename(tenancy.of(c), 'renamed')).map((row) => row.id) });
 
-    it('B1 [guard 7, Transactional()]: the transaction is bound to 7 at BEGIN, so a BaseRepository rename of workspace 7 works', async () =>
+    it('B1 [guard 7, Transactional()]: the transaction is bound to 7 at BEGIN, so a BaseRepository rename of workspace 7 works', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
 
@@ -283,9 +283,9 @@ describe('tenancy.guard and tenancy.of', () =>
         expect(tenantSettings()).toEqual([{ pool: 'write', setting: 'app.tenant_id', value: '7' }]);
     });
 
-    it('B2 [Transactional(), guard 7]: the guard binds the open transaction, so the same rename works', async () =>
+    it('B2 [Transactional(), guard 7]: the guard binds the open transaction, so the same rename works', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
 
@@ -298,9 +298,9 @@ describe('tenancy.guard and tenancy.of', () =>
         expect(tenantSettings()).toEqual([{ pool: 'write', setting: 'app.tenant_id', value: '7' }]);
     });
 
-    it('B3 runInTransaction({ tenant: 9 }) under guard 7 binds 9 as asked; a TenantRepository call for 9 is refused by the guard', async () =>
+    it('B3 runInTransaction({ tenant: 9 }) under guard 7 binds 9 as asked; a TenantRepository call for 9 is refused by the guard', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
 
@@ -321,9 +321,9 @@ describe('tenancy.guard and tenancy.of', () =>
         });
     });
 
-    it('B4 runInTransaction() under guard 7 is bound at BEGIN; _findMany(7, …) inside sets nothing again', async () =>
+    it('B4 runInTransaction() under guard 7 is bound at BEGIN; _findMany(7, …) inside sets nothing again', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
 
@@ -337,9 +337,9 @@ describe('tenancy.guard and tenancy.of', () =>
         expect(tenantSettings()).toEqual([{ pool: 'write', setting: 'app.tenant_id', value: '7' }]);
     });
 
-    it('B5 Transactional() on a route without the guard is not bound until the first TenantRepository call (R3)', async () =>
+    it('B5 Transactional() on a route without the guard is not bound until the first TenantRepository call (R3)', async (context) =>
     {
-        if (!db.isAvailable) return;
+        db.skipIfUnavailable(context);
 
         const app = createApp();
 

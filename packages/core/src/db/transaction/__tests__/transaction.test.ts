@@ -18,9 +18,9 @@ describe('Transaction Timeout Configuration', () =>
 
     describe('SQL Timeout Setting Methods', () =>
     {
-        it('should successfully set timeout using sql.raw() with template literal', async () =>
+        it('should successfully set timeout using sql.raw() with template literal', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -35,9 +35,9 @@ describe('Transaction Timeout Configuration', () =>
             });
         });
 
-        it('should successfully set timeout using sql.raw() with string concatenation', async () =>
+        it('should successfully set timeout using sql.raw() with string concatenation', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -52,9 +52,9 @@ describe('Transaction Timeout Configuration', () =>
             });
         });
 
-        it('should fail when trying to use prepared statement with sql placeholder', async () =>
+        it('should fail when trying to use prepared statement with sql placeholder', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             // Expect the transaction to fail
             await expect(async () =>
@@ -70,9 +70,9 @@ describe('Transaction Timeout Configuration', () =>
             }).rejects.toThrow(); // Should throw syntax error
         });
 
-        it('should verify sql.raw() is safe with validated integer input', async () =>
+        it('should verify sql.raw() is safe with validated integer input', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -99,9 +99,9 @@ describe('Transaction Timeout Configuration', () =>
             });
         });
 
-        it('should demonstrate SQL injection attempt is prevented by validation', async () =>
+        it('should demonstrate SQL injection attempt is prevented by validation', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -148,9 +148,9 @@ describe('Transaction Timeout Configuration', () =>
 
     describe('Timeout Behavior', () =>
     {
-        it('should timeout and cancel query when timeout is exceeded', async () =>
+        it('should timeout and cancel query when timeout is exceeded', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await expect(async () =>
             {
@@ -165,9 +165,9 @@ describe('Transaction Timeout Configuration', () =>
             }).rejects.toThrow(); // Should throw timeout error
         }, 10000); // Test timeout: 10 seconds
 
-        it('should not timeout when query completes within timeout', async () =>
+        it('should not timeout when query completes within timeout', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -180,9 +180,9 @@ describe('Transaction Timeout Configuration', () =>
             });
         });
 
-        it('should disable timeout when set to 0', async () =>
+        it('should disable timeout when set to 0', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -202,9 +202,9 @@ describe('Transaction Timeout Configuration', () =>
 
     describe('Comparison of Methods', () =>
     {
-        it('should compare performance and safety of different methods', async () =>
+        it('should compare performance and safety of different methods', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             const methods = {
                 sqlRawTemplate: async (timeout: number) =>
@@ -237,9 +237,9 @@ describe('Transaction Timeout Configuration', () =>
 
     describe('Edge Cases', () =>
     {
-        it('should handle maximum timeout value', async () =>
+        it('should handle maximum timeout value', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -253,9 +253,9 @@ describe('Transaction Timeout Configuration', () =>
             });
         });
 
-        it('should handle minimum timeout value', async () =>
+        it('should handle minimum timeout value', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await dbFixture.db.transaction(async (tx) =>
             {
@@ -271,9 +271,9 @@ describe('Transaction Timeout Configuration', () =>
 
     describe('Idle-in-transaction backstop', () =>
     {
-        it('sets idle_in_transaction_session_timeout on a root transaction', async () =>
+        it('sets idle_in_transaction_session_timeout on a root transaction', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await runInTransaction(async (tx) =>
             {
@@ -284,9 +284,9 @@ describe('Transaction Timeout Configuration', () =>
             }, { idleTimeout: 7000, timeout: 5000, enableLogging: false });
         });
 
-        it('leaves it disabled when idleTimeout is 0', async () =>
+        it('leaves it disabled when idleTimeout is 0', async (context) =>
         {
-            if (!dbFixture.isAvailable) return;
+            dbFixture.skipIfUnavailable(context);
 
             await runInTransaction(async (tx) =>
             {

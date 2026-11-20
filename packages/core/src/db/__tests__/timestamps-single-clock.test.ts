@@ -92,9 +92,9 @@ describe('timestamps() — one clock writes both columns', () =>
         expect(params.some(p => p instanceof Date)).toBe(false);
     });
 
-    it('gives a new row two equal timestamps', async () =>
+    it('gives a new row two equal timestamps', async (context) =>
     {
-        if (!dbFixture.isAvailable) return;
+        dbFixture.skipIfUnavailable(context);
 
         const [row] = await dbFixture.db
             .insert(clockRows)
@@ -104,9 +104,9 @@ describe('timestamps() — one clock writes both columns', () =>
         expect(row.updatedAt.getTime()).toBe(row.createdAt.getTime());
     });
 
-    it('advances updated_at on update and never before created_at', async () =>
+    it('advances updated_at on update and never before created_at', async (context) =>
     {
-        if (!dbFixture.isAvailable) return;
+        dbFixture.skipIfUnavailable(context);
 
         const [inserted] = await dbFixture.db
             .insert(clockRows)

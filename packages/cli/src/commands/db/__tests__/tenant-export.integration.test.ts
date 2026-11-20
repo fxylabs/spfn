@@ -103,6 +103,8 @@ describe('spfn db tenant export (integration)', () =>
         await createSchema(owner, fixtures, appRole);
     });
 
+    beforeEach(({ skip }) => skip(!available, 'PostgreSQL not available'));
+
     beforeEach(async () =>
     {
         output = [];
@@ -144,8 +146,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('app connection: owns no test table, is neither superuser nor BYPASSRLS', async () =>
     {
-        if (!available) return;
-
         const [role] = await app`select current_user, rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
         const owned = await owner`select tablename from pg_tables where schemaname = ${SCHEMA} and tableowner = ${role.current_user}`;
 
@@ -157,8 +157,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X1 exporting tenant 7 writes a file per tenant table and a manifest whose rows match the database', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x1');
         const manifest = await exportTenant({ tenantId: 7, plan, url: appUrl(), directory });
         const written = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf-8'));
@@ -187,8 +185,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X2 with another tenant\'s rows in every table, the files hold tenant 7\'s rows only — tenancy tables and the tenantKey()-only table', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x2');
 
         await exportTenant({ tenantId: 7, plan, url: appUrl(), directory });
@@ -203,8 +199,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X3 rows another connection adds for tenant 7 between two tables are in no file, and the files\' foreign keys agree', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x3');
         const notesPlan = plan.tables.find((table) => table.name === 'notes')!;
 
@@ -234,8 +228,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X1-large tables of more rows than a COPY stream buffers export one after another without stalling the connection', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x1-large');
 
         await owner.unsafe(`INSERT INTO ${SCHEMA}.writers (id, tenant_id, name) SELECT g, 7, repeat('w', 40) FROM generate_series(1000, 20999) g`);
@@ -249,8 +241,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X5 a tenant without rows exports empty files with 0 rows', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x5');
         const manifest = await exportTenant({ tenantId: 8, plan, url: appUrl(), directory });
 
@@ -264,8 +254,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X7 policy tables, read as the app role inside the export, admit tenant 7\'s rows only', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x7');
         const [{ rls }] = await owner`select bool_and(relrowsecurity) as rls from pg_class
             where oid in (${`${SCHEMA}.writers`}::regclass, ${`${SCHEMA}.notes`}::regclass)`;
@@ -280,8 +268,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X8 with DATABASE_READ_URL set the export connects with it, not DATABASE_URL', async () =>
     {
-        if (!available) return;
-
         process.env.DATABASE_READ_URL = appUrl();
         process.env.DATABASE_URL = UNREACHABLE_URL;
 
@@ -295,8 +281,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X9 an existing output folder fails the export and keeps its files', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x9');
 
         mkdirSync(directory);
@@ -310,8 +294,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X10 the connection URL and its password appear in no output, on success or failure', async () =>
     {
-        if (!available) return;
-
         const url = new URL(appUrl());
         const wrong = new URL(appUrl());
 
@@ -339,8 +321,6 @@ describe('spfn db tenant export (integration)', () =>
     /** A wrong password connects under `trust` auth (CI), so it is a unit row of tenant-connection.test.ts. */
     it('X10b a closed port, an unresolvable host and a role that does not exist each fail naming neither the host, the user nor the password', async () =>
     {
-        if (!available) return;
-
         const real = new URL(appUrl());
         const closedPort = 'postgresql://x10b-user:x10b-secret@localhost:1/nowhere';
         const unresolvable = 'postgresql://x10b-user:x10b-secret@x10b-no-such-host.invalid:5432/nowhere';
@@ -376,8 +356,6 @@ describe('spfn db tenant export (integration)', () =>
 
     it('X12 a write error mid-COPY of 100,000 rows rejects the export with that error within 10 s, and leaves no lock or folder behind', async () =>
     {
-        if (!available) return;
-
         const directory = join(workDir, 'x12');
 
         await owner.unsafe(`INSERT INTO ${SCHEMA}.memos (id, tenant_id, body) OVERRIDING SYSTEM VALUE SELECT g, 7, repeat('m', 40) FROM generate_series(1000, 100999) g`);

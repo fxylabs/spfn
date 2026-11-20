@@ -72,6 +72,51 @@ export function bookkeepingMismatchOf(error: unknown): string | undefined
     return error instanceof MigrationBookkeepingMismatchError ? error.message : undefined;
 }
 
+/** PostgreSQL's SQLSTATE for "insufficient privilege". */
+const INSUFFICIENT_PRIVILEGE = '42501';
+
+/**
+ * What to do about a permission error reading the bookkeeping, in one line.
+ *
+ * spfn grants the app role nothing yet (#405), so the remedy is the hand SQL
+ * the core db README gives under "Database roles".
+ */
+export const STATUS_GRANT_REMEDY = 'As the database owner, grant the app role USAGE on schema drizzle and SELECT '
+    + 'on its tables — the SQL is in the @spfn/core db README, "Database roles"; spfn does not grant it yet.';
+
+/**
+ * PostgreSQL's message when `error` is a permission error, else undefined.
+ *
+ * Not "could not check": the database answered and refused the app role, so
+ * waiting or retrying changes nothing until someone grants the read. drizzle
+ * wraps the driver's error, so the SQLSTATE is looked for along the causes.
+ */
+export function permissionDeniedOf(error: unknown): string | undefined
+{
+    for (let cause = error; cause instanceof Error; cause = cause.cause)
+    {
+        if ((cause as { code?: unknown }).code === INSUFFICIENT_PRIVILEGE)
+        {
+            return cause.message;
+        }
+    }
+
+    return undefined;
+}
+
+/** The innermost message: drizzle's own one is the failed query's text. */
+function readFailureOf(error: unknown): string
+{
+    let cause = error;
+
+    while (cause instanceof Error && cause.cause instanceof Error)
+    {
+        cause = cause.cause;
+    }
+
+    return cause instanceof Error ? cause.message : String(cause);
+}
+
 export type StartupMigrationCheck = {
     /** The caller must stop: migrations are pending and nothing allows it. */
     block: boolean;
@@ -86,10 +131,12 @@ export type StartupMigrationCheck = {
  * refusal is immediate and readable instead of arriving as a child process that
  * died while the CLI waited for a readiness signal.
  *
- * Silent when there is no database to ask: a project without DATABASE_URL, or a
- * database that cannot be reached, is not migration drift and must not be
- * reported as such. A project bookkeeping mismatch blocks whatever the opt-out
- * says, as the server's gate does: migrate refuses that database.
+ * Silent when there is no database to ask: a project without DATABASE_URL is
+ * not migration drift. A status that could not be read is not drift either and
+ * never blocks, but it is said in one line — the boot goes on unchecked, and a
+ * permission error will not go away by itself. A project bookkeeping mismatch
+ * blocks whatever the opt-out says, as the server's gate does: migrate refuses
+ * that database.
  *
  * The environment variable is read through `@spfn/core/config`, the same
  * accessor the server's gate uses, so `1` and `yes` mean here what they mean
@@ -105,6 +152,11 @@ export async function checkPendingMigrationsBeforeStart(
 
     const allowPending = flagAllowsPending || env.SPFN_ALLOW_PENDING_MIGRATIONS === true;
 
+    if (!(databaseUrl ?? env.DATABASE_URL))
+    {
+        return { block: false, allowPending };
+    }
+
     let status: MigrationStatus;
 
     try
@@ -118,6 +170,8 @@ export async function checkPendingMigrationsBeforeStart(
         // "Could not check" is not "checked and pending" — never block on it.
         if (mismatch === undefined)
         {
+            warnUncheckedStart(error);
+
             return { block: false, allowPending };
         }
 
@@ -152,6 +206,15 @@ export async function checkPendingMigrationsBeforeStart(
     console.error(chalk.dim('   To start anyway: --allow-pending-migrations, or SPFN_ALLOW_PENDING_MIGRATIONS=true\n'));
 
     return { block: true, allowPending };
+}
+
+function warnUncheckedStart(error: unknown): void
+{
+    const remedy = permissionDeniedOf(error) === undefined
+        ? 'run `pnpm spfn db status` to check'
+        : STATUS_GRANT_REMEDY;
+
+    console.warn(chalk.yellow(`⚠️  Could not check migrations: ${readFailureOf(error)} — starting anyway; ${remedy}`));
 }
 
 function refuseMismatchedBookkeeping(mismatch: string): void

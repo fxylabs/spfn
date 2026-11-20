@@ -71,12 +71,12 @@ describe('spfn db tenant export and import with a visibleTo table (integration)'
         await owner.end();
     });
 
-    it('C1 exporting tenant 7 writes the members of workspace 7 only, and no workspaces file', async () =>
+    it('C1 exporting tenant 7 writes the members of workspace 7 only, and no workspaces file', async ({ skip }) =>
     {
         expect(plan.tables.map((table) => table.name)).toContain('members');
         expect(plan.tables.map((table) => table.name)).not.toContain('workspaces');
 
-        if (!available) return;
+        skip(!available, 'PostgreSQL not available');
 
         const directory = join(workDir, 'export');
         const manifest = await exportTenant({ tenantId: 7, plan, url: appUrl(), directory });
@@ -85,9 +85,9 @@ describe('spfn db tenant export and import with a visibleTo table (integration)'
         expect(readdirSync(directory).some((file) => file.includes('workspaces'))).toBe(false);
     });
 
-    it('C2 import --replace swaps workspace 7\'s memberships for the file\'s; 9 and 11 keep theirs', async () =>
+    it('C2 import --replace swaps workspace 7\'s memberships for the file\'s; 9 and 11 keep theirs', async ({ skip }) =>
     {
-        if (!available) return;
+        skip(!available, 'PostgreSQL not available');
 
         const directory = join(workDir, 'export');
 

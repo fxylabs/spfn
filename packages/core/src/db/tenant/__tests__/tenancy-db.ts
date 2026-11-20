@@ -6,12 +6,17 @@
  * harness therefore keeps two roles apart:
  *
  * - the owner — `TEST_DATABASE_URL` — creates the schema from the SQL drizzle-kit
- *   generates, seeds it, and grants the app role row privileges, as
- *   `spfn db migrate` does through `DATABASE_OWNER_URL`;
+ *   generates, seeds it, and grants the app role row privileges by hand: the
+ *   grants the core db README asks a deployment to run once, since no spfn
+ *   command grants anything (`spfn db migrate` only creates, as the owner);
  * - the app — `TEST_APP_DATABASE_URL`, or else the same host and database with
  *   whichever of the two non-superuser roles scripts/test-services.sh creates
  *   (`testuser`, `authtest`) is not the owner — is what `initDatabase` serves to
  *   the code under test.
+ *
+ * Where either role cannot connect, every row is reported skipped with the
+ * reason — never passed — and under CI it is a failure: the pipeline's
+ * PostgreSQL has both roles, so a skip there means the rows stopped running.
  *
  * Every statement each app pool sends, BEGIN and COMMIT included, is recorded,
  * so a test can say which pool ran what — and, since a `set_config` names its
@@ -19,9 +24,11 @@
  */
 
 import postgres from 'postgres';
+import type { TestContext } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api-postgres';
 import { closeDatabase, initDatabase } from '../../manager';
+import { runsInCi } from '../../__tests__/helpers/ci';
 import { TEST_DATABASE_URL } from '../../__tests__/helpers/db-fixture';
 import { SEED_ROWS, TENANCY_SCHEMA, TENANCY_TABLES } from './tenancy-fixtures';
 
@@ -54,6 +61,31 @@ export function appDatabaseUrl(ownerUrl: string = TEST_DATABASE_URL): string
     return url.toString();
 }
 
+/**
+ * Why rows needing both roles cannot run here, or undefined when they can.
+ *
+ * Under CI it throws instead: scripts/test-services.sh creates both roles in
+ * the pipeline's PostgreSQL, so an unavailable one there is a broken setup,
+ * not a machine without the service.
+ */
+export async function twoRoleUnavailability(owner: postgres.Sql, app: postgres.Sql, appRole: string): Promise<string | undefined>
+{
+    const reason = await owner`select 1`.then(
+        () => app`select 1`.then(
+            () => undefined,
+            () => `the app role "${appRole}" cannot connect (set TEST_APP_DATABASE_URL, or create ${TEST_ROLES.map((role) => role.user).join('/')})`,
+        ),
+        () => 'PostgreSQL not available at TEST_DATABASE_URL',
+    );
+
+    if (reason !== undefined && runsInCi())
+    {
+        throw new Error(`${reason}, and CI provides both roles — failing instead of skipping`);
+    }
+
+    return reason;
+}
+
 export interface SettingRecord
 {
     readonly pool: 'write' | 'read';
@@ -72,6 +104,8 @@ export interface TenancyDb
     /** Every `set_config` either pool sent: the pool, the setting and the value. */
     readonly settingLog: SettingRecord[];
     readonly appRole: string;
+    /** Skip the row, with the reason, when `setup` found a role missing. */
+    skipIfUnavailable(context: TestContext): void;
     setup(): Promise<void>;
     seed(): Promise<void>;
     teardown(): Promise<void>;
@@ -102,12 +136,12 @@ export function createTenancyDb(): TenancyDb
     const owner = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => undefined });
     const appWrite = postgres(appUrl, { max: 2, onnotice: () => undefined, debug: record('write', writeLog) });
     const appRead = postgres(appUrl, { max: 1, onnotice: () => undefined, debug: record('read', readLog) });
-    let available = false;
+    let unavailable: string | undefined = 'setup() has not run';
 
     return {
         get isAvailable()
         {
-            return available;
+            return unavailable === undefined;
         },
         owner,
         writeLog,
@@ -115,14 +149,17 @@ export function createTenancyDb(): TenancyDb
         settingLog,
         appRole,
 
+        skipIfUnavailable(context)
+        {
+            context.skip(unavailable !== undefined, unavailable);
+        },
+
         async setup()
         {
-            available = await owner`select 1`.then(() => true, () => false);
+            unavailable = await twoRoleUnavailability(owner, appWrite, appRole);
 
-            if (!available)
+            if (unavailable !== undefined)
             {
-                console.log('\n⚠️  PostgreSQL not available - skipping tenancy integration tests\n');
-
                 return;
             }
 
@@ -146,7 +183,7 @@ export function createTenancyDb(): TenancyDb
 
         async teardown()
         {
-            if (available)
+            if (unavailable === undefined)
             {
                 await closeDatabase();
                 await owner.unsafe(`DROP SCHEMA IF EXISTS ${TENANCY_SCHEMA} CASCADE`);

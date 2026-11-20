@@ -19,7 +19,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DatabasePort, GatePort, GateResult } from '../ports.js';
+import { unreadableStatusReason, type DatabasePort, type GatePort, type GateResult } from '../ports.js';
 import type { KitGate } from '../manifest.js';
 import { runCommand, summarize, type CommandRunner } from './process.js';
 import { spfnCommand } from './database.js';
@@ -67,6 +67,11 @@ export class CommandGatePort implements GatePort
         if (gate === 'db-status')
         {
             const status = await this.options.database.status({ cwd: request.cwd });
+
+            if (!status.reachable)
+            {
+                return { ok: false, summary: `the migration status could not be read: ${unreadableStatusReason(status)}` };
+            }
 
             return status.pending.length === 0
                 ? { ok: true }

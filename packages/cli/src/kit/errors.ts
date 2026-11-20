@@ -109,6 +109,15 @@ export const CLI_ONLY_ERROR_EXIT = {
      * person restores the folder or corrects the bookkeeping row.
      */
     CLI_MIGRATION_BOOKKEEPING_MISMATCH: KIT_EXIT.REFUSED,
+    /**
+     * The database refused the app role the read of the migration status.
+     *
+     * Refused rather than waiting: the database answered, and the answer is a
+     * missing grant, which no resume changes until someone grants it. Before
+     * migrating that would otherwise read as "no database"; after, as "nothing
+     * pending" — an install reporting success on a database nobody could read.
+     */
+    CLI_MIGRATION_STATUS_UNREADABLE: KIT_EXIT.REFUSED,
 } as const;
 
 export type CliOnlyErrorCode = keyof typeof CLI_ONLY_ERROR_EXIT;
