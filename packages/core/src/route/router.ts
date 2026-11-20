@@ -84,7 +84,12 @@ export interface Router<TRoutes extends Record<string, RouteDef<any, any, any> |
     /**
      * Register global middlewares
      *
-     * Applied to all routes unless explicitly skipped via .skip()
+     * Applied to every route below this router — nested and package routers
+     * included — unless a route skips it via .skip() or a middleware below
+     * declares its name in `skips`. A middleware here that declares `skips`
+     * removes those names from what this router inherits (the server list and
+     * every enclosing router's `.use()`) for every route below; registration
+     * refuses one on a router that mounts, or encloses a mount of, `.packages()`.
      *
      * @example
      * ```ts

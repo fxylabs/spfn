@@ -6,6 +6,7 @@
  * - defineServerConfig().middlewares() 단독 구성
  * - 두 레벨 공존, 같은 미들웨어의 양쪽 등록, 익명 미들웨어
  * - .skip() 과 패키지 라우터 스코프
+ * - 라우터 레벨 미들웨어의 skips (#165): 상속 체인에서의 제거, 존재 규칙, .packages() 거부
  *
  * 🔗 관련 파일:
  * - src/server/config-builder.ts
@@ -13,11 +14,14 @@
  *
  * Issue #107: router-level middleware ran twice per request, so middleware holding
  * one-shot state (a nonce replay ledger) rejected its own request on the second run.
+ *
+ * spfn/spfn#165: a middleware declaring `skips` in a router's `.use()` was ignored,
+ * so the inherited `auth` still ran in front of the router's own authenticator.
  */
 
 import { describe, it, expect } from 'vitest';
-import type { MiddlewareHandler } from 'hono';
-import { route, defineRouter, defineMiddleware } from '@spfn/core/route';
+import { Hono, type MiddlewareHandler } from 'hono';
+import { route, defineRouter, defineMiddleware, registerRoutes, resolveRouteMiddlewares } from '@spfn/core/route';
 import type { NamedMiddleware } from '@spfn/core/route';
 import { defineServerConfig } from '../config-builder';
 import { createServer } from '../create-server';
@@ -268,5 +272,242 @@ describe('resolveEndpointMiddlewares', () =>
             .build();
 
         expect(resolveEndpointMiddlewares(config).map(mw => mw.name)).toEqual(['auth']);
+    });
+});
+
+// ============================================================================
+// Router-level skips (spfn/spfn#165)
+// ============================================================================
+
+/**
+ * Named middlewares that write their name to one shared log as they run, so a
+ * request shows the chain it ran, in order.
+ */
+function chainRecorder()
+{
+    const log: string[] = [];
+
+    const middleware = (name: string, skips?: string[]) => defineMiddleware(name, async (_c, next) =>
+    {
+        log.push(name);
+        await next();
+    }, skips ? { skips } : undefined);
+
+    /** The chain one request to `path` ran; the route must answer. */
+    const ran = async (app: Hono, path: string) =>
+    {
+        log.length = 0;
+        expect((await app.request(path)).status).toBe(200);
+
+        return [...log];
+    };
+
+    return { middleware, ran };
+}
+
+const get = (path: string) => route.get(path).handler(async () => ({ ok: true }));
+
+describe('router-level skips (#165)', () =>
+{
+    it('R1: the issue\'s tree — machine routes run their authenticator in place of auth, every other route keeps auth', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const auth = middleware('auth');
+        const machineAuth = middleware('machineAuth', ['auth']);
+        const machineLimit = middleware('machineLimit');
+
+        const machine = defineRouter({ machineA: get('/machine/a'), machineB: get('/machine/b') })
+            .use([machineAuth, machineLimit]);
+        const pkg = defineRouter({ pkgSession: get('/pkg/session') });
+        const app = await createServer(
+            baseConfig()
+                .routes(defineRouter({ machine, person: get('/person') }).packages([pkg]).use([auth]))
+                .build(),
+        );
+
+        expect(await ran(app, '/machine/a')).toEqual(['machineAuth', 'machineLimit']);
+        expect(await ran(app, '/machine/b')).toEqual(['machineAuth', 'machineLimit']);
+        expect(await ran(app, '/person')).toEqual(['auth']);
+        expect(await ran(app, '/pkg/session')).toEqual(['auth']);
+    });
+
+    it('R2: a skipper never removes a sibling in the same .use()', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const app = await createServer(
+            baseConfig()
+                .routes(defineRouter({ ping }).use([middleware('auth'), middleware('machineAuth', ['auth'])]))
+                .build(),
+        );
+
+        expect(await ran(app, '/ping')).toEqual(['auth', 'machineAuth']);
+    });
+
+    it('R3: the removal reaches every route below the skipper, however deep', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const deep = defineRouter({ deepRoute: get('/m/sub/deep') });
+        const sub = defineRouter({ subRoute: get('/m/sub'), deep });
+        const machine = defineRouter({ sub }).use([middleware('machineAuth', ['auth'])]);
+        const app = await createServer(
+            baseConfig().routes(defineRouter({ machine }).use([middleware('auth')])).build(),
+        );
+
+        expect(await ran(app, '/m/sub')).toEqual(['machineAuth']);
+        expect(await ran(app, '/m/sub/deep')).toEqual(['machineAuth']);
+    });
+
+    it('R4: an inner router that .use()s the removed middleware again runs it, after the skipper', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const auth = middleware('auth');
+        const both = defineRouter({ bothRoute: get('/m/both') }).use([auth]);
+        const machine = defineRouter({ both }).use([middleware('machineAuth', ['auth'])]);
+        const app = await createServer(baseConfig().routes(defineRouter({ machine }).use([auth])).build());
+
+        expect(await ran(app, '/m/both')).toEqual(['machineAuth', 'auth']);
+    });
+
+    it('R5: a route that .use()s the removed middleware again runs it, after the skipper', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const auth = middleware('auth');
+        const machine = defineRouter({ both: route.get('/m/both').use([auth]).handler(async () => ({ ok: true })) })
+            .use([middleware('machineAuth', ['auth'])]);
+        const app = await createServer(baseConfig().routes(defineRouter({ machine }).use([auth])).build());
+
+        expect(await ran(app, '/m/both')).toEqual(['machineAuth', 'auth']);
+    });
+
+    it('R6: a route that skips the skipper gets the inherited auth back', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const machine = defineRouter({ person: route.get('/m/person').skip(['machineAuth']).handler(async () => ({ ok: true })) })
+            .use([middleware('machineAuth', ['auth'])]);
+        const app = await createServer(baseConfig().routes(defineRouter({ machine }).use([middleware('auth')])).build());
+
+        expect(await ran(app, '/m/person')).toEqual(['auth']);
+    });
+
+    it('R7: .skip(\'*\') drops everything inherited, the skipper and what it skipped alike', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const open = route.get('/m/open').skip('*').use([middleware('own')]).handler(async () => ({ ok: true }));
+        const machine = defineRouter({ open }).use([middleware('machineAuth', ['auth'])]);
+        const app = await createServer(baseConfig().routes(defineRouter({ machine }).use([middleware('auth')])).build());
+
+        expect(await ran(app, '/m/open')).toEqual(['own']);
+    });
+
+    it('R8: a top-router skipper removes the server-level middleware it names', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const app = await createServer(
+            baseConfig()
+                .middlewares([middleware('auth')])
+                .routes(defineRouter({ ping }).use([middleware('machineAuth', ['auth'])]))
+                .build(),
+        );
+
+        expect(await ran(app, '/ping')).toEqual(['machineAuth']);
+    });
+
+    it('R9/R10: the same skipper at two levels runs once, outermost, and its inner declaration still skips', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const skipper = middleware('skipper', ['middle']);
+        const inner = defineRouter({ innerRoute: get('/inner') }).use([skipper]);
+        const mid = defineRouter({ inner }).use([middleware('middle')]);
+        const app = await createServer(baseConfig().routes(defineRouter({ mid }).use([skipper])).build());
+
+        expect(await ran(app, '/inner')).toEqual(['skipper']);
+    });
+
+    it('R11: the chain keeps its order — server, outer router, inner router, route', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const leaf = route.get('/leaf').use([middleware('own')]).handler(async () => ({ ok: true }));
+        const mid = defineRouter({ leaf }).use([middleware('machineAuth', ['auth']), middleware('midLevel')]);
+        const app = await createServer(
+            baseConfig()
+                .middlewares([middleware('auth'), middleware('serverLevel')])
+                .routes(defineRouter({ mid }).use([middleware('topLevel')]))
+                .build(),
+        );
+
+        expect(await ran(app, '/leaf')).toEqual(['serverLevel', 'topLevel', 'machineAuth', 'midLevel', 'own']);
+    });
+
+    it('R13: every route runs exactly the chain the resolver reports for it', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const auth = middleware('auth');
+        const machineAuth = middleware('machineAuth', ['auth']);
+        const machine = defineRouter({
+            plain: get('/m/plain'),
+            reAdded: route.get('/m/re-added').use([auth]).handler(async () => ({ ok: true })),
+            person: route.get('/m/person').skip(['machineAuth']).handler(async () => ({ ok: true })),
+            open: route.get('/m/open').skip('*').handler(async () => ({ ok: true })),
+            nested: defineRouter({ nestedRoute: get('/m/nested') }).use([auth, middleware('nestedLevel')]),
+        }).use([machineAuth, middleware('machineLevel')]);
+        const optional = route.get('/optional').use([middleware('optionalAuth', ['auth'])]).handler(async () => ({ ok: true }));
+        const pkg = defineRouter({ pkgRoute: get('/pkg') }).use([middleware('pkgLevel')]);
+        const tree = defineRouter({ machine, optional, person: get('/person') }).packages([pkg]).use([auth]);
+        const serverList = [middleware('serverLevel')];
+
+        const app = new Hono();
+        const registered = registerRoutes(app, tree, serverList);
+        const resolved = resolveRouteMiddlewares(tree, serverList);
+
+        expect(registered.map(r => r.path)).toEqual(['/m/plain', '/m/re-added', '/m/person', '/m/open', '/m/nested', '/optional', '/person', '/pkg']);
+        expect(resolved.map(r => r.path)).toEqual(registered.map(r => r.path));
+
+        for (const [index, entry] of resolved.entries())
+        {
+            const names = entry.middlewares.map(mw => mw.name);
+            expect(registered[index]!.middlewares, entry.path).toEqual(names);
+            expect(await ran(app, entry.path), entry.path).toEqual(names);
+        }
+    });
+
+    it('R14: refuses a skipper on a router that mounts .packages(), or on any router enclosing the mount', async () =>
+    {
+        const { middleware } = chainRecorder();
+        const machineAuth = middleware('machineAuth', ['auth']);
+        const pkg = defineRouter({ pkgRoute: get('/pkg') });
+        const boot = (routes: ReturnType<typeof defineRouter>) =>
+            createServer(baseConfig().middlewares([middleware('auth')]).routes(routes).build());
+
+        await expect(boot(defineRouter({ ping }).packages([pkg]).use([machineAuth]))).rejects.toThrow(
+            'Router "(top-level)" .use()s "machineAuth", a middleware declaring skips: [\'auth\'], '
+            + 'and "(top-level)" mounts package routers with .packages(). Package routes have no authenticator of their own, '
+            + 'so "machineAuth" would remove the auth they inherit from every one of them. '
+            + 'Put "machineAuth" on a nested router that mounts no packages, or on the routes themselves.',
+        );
+
+        const enclosing = defineRouter({ machine: defineRouter({ inner: defineRouter({ ping }).packages([pkg]) }).use([machineAuth]) });
+        await expect(boot(enclosing)).rejects.toThrow(
+            'Router "machine.inner" sits under "machine", which .use()s "machineAuth"',
+        );
+    });
+
+    it('R15: a route-level skipper still removes the inherited middleware it names', async () =>
+    {
+        const { middleware, ran } = chainRecorder();
+        const feed = route.get('/feed').use([middleware('optionalAuth', ['auth'])]).handler(async () => ({ ok: true }));
+        const app = await createServer(baseConfig().routes(defineRouter({ feed }).use([middleware('auth')])).build());
+
+        expect(await ran(app, '/feed')).toEqual(['optionalAuth']);
+    });
+
+    it('R12: the SSE/WS token endpoint keeps the top router\'s auth beside a top-router skipper', () =>
+    {
+        const { middleware } = chainRecorder();
+        const config = defineServerConfig()
+            .middlewares([middleware('auth')])
+            .routes(defineRouter({ ping }).use([middleware('optionalAuth', ['auth'])]))
+            .build();
+
+        expect(resolveEndpointMiddlewares(config).map(mw => mw.name)).toEqual(['auth', 'optionalAuth']);
     });
 });

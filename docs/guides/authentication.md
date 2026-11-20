@@ -258,6 +258,29 @@ export const createOrder = route.post('/orders')
     });
 ```
 
+#### One Router per Kind of Caller
+
+A route inherits the server-level middleware and the `.use()` of every router it sits in, outer to inner. A middleware that stands in for `authenticate` declares `skips: ['auth']` (`optionalAuth`, `machineAuth`, `signedTokenAuth(...)`, `oneTimeTokenAuth`, …), and that declaration works on a nested router's `.use()` as it does on a route's: every route below the router runs the replacement instead of the inherited `auth`, and no route writes a skip.
+
+```typescript
+import { machineAuth } from '@spfn/auth/server';
+
+const machineRouter = defineRouter({ ingest, report })
+    .use([machineAuth]);   // ← these routes authenticate a machine token, not a session
+
+export const appRouter = defineRouter({
+    machine: machineRouter,
+    getStatus,
+    createOrder,
+})
+.packages([authRouter])
+.use([authenticate]);      // ← every other route still requires sign-in
+```
+
+- A route under `machineRouter` that `.skip(['machineAuth'])`s gets the inherited `auth` back.
+- **`optionalAuth` on a router makes every route in that subtree accept anonymous callers.**
+- Registration refuses a middleware declaring `skips` on a router that mounts `.packages([...])`, or on a router enclosing such a mount: the `/_auth/*` routes rely on the inherited `auth`. Keep `.packages([authRouter])` on a router with no skipper, as above.
+
 ### 6. Configure Next.js Interceptor
 
 The Next.js interceptor handles session cookies, JWT signing, and public key encryption automatically. Without it, login/register/key-rotation will not work.

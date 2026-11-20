@@ -240,9 +240,11 @@ export class RouteBuilder<
     }
 
     /**
-     * Skip server-level named middlewares
+     * Skip inherited named middlewares
      *
-     * Useful for public endpoints that should bypass auth or rate limiting
+     * Removes them from what the route inherits — the server-level list and the
+     * `.use()` of every enclosing router. The route's own `.use()` is never
+     * skipped. Useful for public endpoints that should bypass auth or rate limiting.
      *
      * @param middlewareNames - Array of middleware names to skip, or '*' to skip all
      *

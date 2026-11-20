@@ -124,7 +124,7 @@ route.get('/users/:id')          // method + path fixed here
     .input({ ... })              // optional — TypeBox schemas per input source
     .interceptor({ ... })        // optional — middleware-injected fields (see below)
     .use([mwA, mwB])             // optional — route-level middleware (alias: .middleware)
-    .skip(['auth'])              // optional — skip named server-level middleware
+    .skip(['auth'])              // optional — skip named inherited middleware
     .contract({ ... })           // optional — publish as a versioned promise (see below)
     .handler(async (c) => { ... }); // required — terminal
 ```
@@ -135,7 +135,7 @@ route.get('/users/:id')          // method + path fixed here
 | `.input(schemas)` | Define validated input (`params`/`query`/`body`/`formData`/`headers`/`cookies`). |
 | `.interceptor(schemas)` | Declare fields injected by middleware — typed in handler, excluded from client types. |
 | `.use(mws)` / `.middleware(mws)` | Attach route-level middleware (regular `MiddlewareHandler` or `NamedMiddleware`). Identical. |
-| `.skip(names \| '*')` | Skip server-level named middleware for this route. |
+| `.skip(names \| '*')` | Skip inherited named middleware (server-level or any enclosing router's `.use()`) for this route. |
 | `.contract(contract)` | Publish the route as a versioned promise to separately deployed clients. |
 | `.handler(fn)` | Terminal. Return value type becomes the response type. |
 
@@ -496,9 +496,10 @@ itself unmapped, or those names land in nobody's map and resolve nowhere.
 
 ### `.use([...])` — router-level global middleware
 
-Named middleware applied to **every** route in the router (and package routers), unless a
-route opts out with `.skip(...)`. The router carries them, and route registration merges them
-with server-config middleware — each one attaching **once** per route.
+Named middleware applied to **every** route in the router, its nested routers and its package
+routers, unless a route opts out with `.skip(...)` or a middleware below it declares the name in
+`skips` (see [Skipping & auto-skip](#skipping--auto-skip)). The router carries them, and route
+registration merges them with server-config middleware — each one attaching **once** per route.
 
 ```typescript
 export const appRouter = defineRouter({ getRoot, getStatus })
@@ -565,25 +566,68 @@ route.get('/api').use([rateLimiter(100, 60_000)]).handler(...);
 
 ### Skipping & auto-skip
 
+A route inherits the server-level named middleware and the `.use()` of every router it sits in.
+It removes inherited middleware by name — from **every inherited level**, server and routers
+alike:
+
 ```typescript
-route.get('/status').skip(['auth']).handler(...);   // skip a specific server-level middleware
-route.get('/status').skip('*').handler(...);          // skip ALL server-level middleware
+route.get('/status').skip(['auth']).handler(...);   // skip a specific inherited middleware
+route.get('/status').skip('*').handler(...);          // skip ALL inherited middleware
 ```
 
-`.skip(...)` only affects **server-level named middleware** — middleware added via `.use()`
-on the same route is never skipped. A named middleware can declare auto-skips so callers don't
-need an explicit `.skip`:
+Middleware the route adds with its own `.use()` is never skipped. A named middleware can declare
+auto-skips, so callers don't need an explicit `.skip`:
 
 ```typescript
-// optionalAuth auto-skips the global 'auth' whenever it is used
+// optionalAuth auto-skips the inherited 'auth' whenever it is used
 export const optionalAuth = defineMiddleware('optionalAuth', handler, { skips: ['auth'] });
 route.get('/feed').use([optionalAuth]).handler(...); // 'auth' auto-skipped, no .skip needed
 ```
 
+**A skipper on a router.** The same declaration works in a router's `.use()`: the middleware
+removes the names it lists from what that router **inherits** — the server-level list and the
+`.use()` of every enclosing router — for every route below it, however deep. This is how an API
+with several kinds of caller states each kind's authenticator once, on its router:
+
+```typescript
+// machineTokenAuth = defineMiddleware('machineTokenAuth', handler, { skips: ['auth'] })
+const machineRouter = defineRouter({ a, b, c }).use([machineTokenAuth, rateLimit]);
+
+export const appRouter = defineRouter({ machine: machineRouter, ...personRoutes })
+    .use([authenticate]);   // 'auth' — the safe default for everything else
+
+// machineRouter's routes run: machineTokenAuth → rateLimit → handler
+// every other route runs:     auth → handler
+```
+
+The rules, all resolved per route by `resolveRouteMiddlewares` (below):
+
+- **Order never changes:** server, outer router, inner router, route. A router-level skipper
+  removes only what it inherits from outside its router, never a sibling in the same `.use()`
+  and never what a deeper router or the route adds.
+- **A skipper's `skips` count only while the skipper survives.** Levels are resolved from the
+  innermost outwards in one pass, so a route under `machineRouter` that `.skip(['machineTokenAuth'])`s
+  gets the inherited `auth` back — it is never left with neither. `.skip('*')` drops everything
+  inherited, the skipper included.
+- **Re-adding is allowed.** An inner router or a route that `.use()`s the removed `auth` again
+  runs it, after the skipper.
+- **The same skipper at two levels runs once**, at its outermost surviving place; each
+  declaration's `skips` still applies at its own depth.
+- **Server-level `skips` do nothing:** nothing is outside the server list.
+- **Refused over `.packages()`.** Registration throws when a router whose `.use()` holds a
+  middleware declaring `skips` mounts `.packages([...])`, or encloses a router that does: a
+  package route has no authenticator of its own and relies on what it inherits, which the
+  skipper would remove from every one of them. Put the skipper on a nested router that mounts no
+  packages, or on the routes.
+
+A router-level skipper widens access the way a route-level one does: router-level `optionalAuth`
+under a global `auth` admits anonymous callers to the whole subtree.
+
 ### Effective order at registration
 
 ```
-server-level named middleware (minus skipped / auto-skipped)
+inherited named middleware: server → outer router → … → inner router
+  (minus .skip, minus what a surviving skipper below declares in skips)
   → route-level middleware (.use, deduped against the above)
     → input validation
       → handler
@@ -591,9 +635,23 @@ server-level named middleware (minus skipped / auto-skipped)
 
 Dedup rules: named middleware by `name`; plain middleware by handler reference. A name is
 one middleware however many times it is registered — server-config and router-level `.use()`
-naming the same middleware attach it **once**, which is what lets middleware hold one-shot
-state (a nonce ledger) without rejecting its own request. An entry with no name is never
-collapsed, since unrelated anonymous handlers share the empty name.
+naming the same middleware attach it **once**, at the outermost place, which is what lets
+middleware hold one-shot state (a nonce ledger) without rejecting its own request. An entry
+with no name is never collapsed, since unrelated anonymous handlers share the empty name.
+
+### `resolveRouteMiddlewares(router, serverMiddlewares?)`
+
+The one computation `registerRoutes` registers from. It returns, per route in registration
+order, `{ name, method, path, middlewares, removed, route }`: `middlewares` is the chain in run
+order (`{ name, source: 'server' | 'router' | 'route', depth, handler }`), `removed` what was
+taken out of the inherited list and by what (`{ name, by, level }` — `by` is the skipping
+middleware's name, or `.skip` / `.skip('*')`). `registerRoutes` returns each route's chain as
+`RegisteredRoute.middlewares` (names). Read it — not the route's own `.use()` — wherever the
+question is whether a route is authenticated.
+
+The SSE and WebSocket token endpoints are not routes: they keep `resolveEndpointMiddlewares`
+(server list, the top router's `.use()`, each package router's `.use()`), where `skips` apply to
+nothing.
 
 ---
 
@@ -611,8 +669,9 @@ collapsed, since unrelated anonymous handlers share the empty name.
   and return the value/void — calling without `return` does nothing useful.
 - **`created`/`accepted`/`paginated` return data, not a `Response`.** Don't `await c.json(...)`
   on their output or wrap them again — just `return` them.
-- **`.skip(...)` does not skip `.use(...)` middleware.** It only filters **server-level named**
-  middleware. To not run a route-level middleware, don't add it.
+- **`.skip(...)` does not skip the route's own `.use(...)` middleware.** It only filters
+  **inherited named** middleware — server-level and every enclosing router's `.use()`. To not
+  run a route-level middleware, don't add it.
 - **`skip`/`skips` match by middleware *name*, not import identity.** Only `defineMiddleware`-
   created middleware has a name; a plain `MiddlewareHandler` can't be targeted by `.skip`.
 - **`body` vs `formData` is decided by `Content-Type`.** A JSON request won't populate

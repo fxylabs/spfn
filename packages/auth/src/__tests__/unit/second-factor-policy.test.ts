@@ -15,7 +15,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono, type Context, type Next } from 'hono';
-import { defineRouter, registerRoutes, route } from '@spfn/core/route';
+import { defineRouter, registerRoutes, resolveRouteMiddlewares, route } from '@spfn/core/route';
 
 import { mainAuthRouter } from '@/server/routes';
 import { ROUTE_CHANNELS, ROUTE_ENROLMENT, ROUTE_SECOND_FACTOR_METHODS } from '@/server/routes/channels';
@@ -227,22 +227,28 @@ describe('second-factor policy (#309)', () =>
         });
     });
 
-    /** A route the global `auth` never runs on, by its own declaration. */
+    /**
+     * What removes the global `auth` from each route, by route key — read from
+     * the chain registration resolves, so a skipper on a router counts as one
+     * on the route does.
+     */
+    const authRemovedBy = new Map(resolveRouteMiddlewares(mainAuthRouter, [{ name: 'auth', handler: async () => undefined }])
+        .map(resolved => [resolved.name, resolved.removed.find(removed => removed.name === 'auth')?.by]));
+
+    /** A route the global `auth` never runs on, by its own `.skip`. */
     function isPublic(key: string): boolean
     {
-        const route = mainAuthRouter.routes[key as keyof typeof mainAuthRouter.routes] as { skipMiddlewares?: string[] | '*' };
+        const by = authRemovedBy.get(key);
 
-        return route.skipMiddlewares === '*' || (route.skipMiddlewares ?? []).includes('auth');
+        return by === '.skip' || by === '.skip(\'*\')';
     }
 
     /** The middleware that authenticates a route in place of the global `auth`, by name, or null. */
     function ownAuthenticator(key: string): string | null
     {
-        const route = mainAuthRouter.routes[key as keyof typeof mainAuthRouter.routes] as {
-            middlewares?: { name?: string; skips?: string[] }[];
-        };
+        const by = authRemovedBy.get(key);
 
-        return route.middlewares?.find(middleware => middleware?.skips?.includes('auth'))?.name ?? null;
+        return by === undefined || isPublic(key) ? null : by;
     }
 
     /**

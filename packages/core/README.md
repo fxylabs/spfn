@@ -738,8 +738,10 @@ export const opsRouter = createOpsRouter({
 }, { auth: opsTokenAuth });
 ```
 
-Note that a group's `.use()` middleware carries its `skips` into every route in the group,
-suppressing that server-level middleware there.
+A group's `.use()` middleware carries its `skips` into every route in the group, suppressing
+the named middleware they inherit there — server-level or from an enclosing router. The surface
+injects group middleware at route level, so this holds inside a surface exactly as it does for a
+skipper on any router's `.use()` (see the route README, "Skipping & auto-skip").
 
 Three things are refused when the surface is defined, rather than discovered in
 production: a route built with `route` instead of `opsRoute` (it would carry no

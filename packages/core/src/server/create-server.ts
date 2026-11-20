@@ -281,8 +281,9 @@ async function applyProxyGuard(app: Hono, config?: ServerConfig): Promise<void>
  *
  * Always publishes the named-policy registry (so `rateLimitPolicy()` tags resolve
  * even when the global default is off). When enabled, prepends a named 'rateLimit'
- * middleware carrying the default policy — routes opt out with `.skip(['rateLimit'])`
- * and policy tags override it via their `skips: ['rateLimit']`. Health, SSE and
+ * middleware carrying the default policy — routes opt out with `.skip(['rateLimit'])`.
+ * A `rateLimitPolicy()` tag has its own name and declares no `skips`, so it layers
+ * on top of the default rather than replacing it. Health, SSE and
  * WebSocket endpoints register outside the named-middleware pipeline, so they are
  * naturally exempt from the global default.
  */
@@ -302,9 +303,9 @@ function applyRateLimit(config?: ServerConfig): void
         return;
     }
 
-    // Guard against a second prepend if createServer runs twice on the same config
-    // (register-routes does not dedup server-level middlewares against each other,
-    // so two 'rateLimit' entries would silently halve the effective limit).
+    // Guard against a second prepend if createServer runs twice on the same config.
+    // Registration runs a name once per route, so a second 'rateLimit' would not
+    // halve the limit; it would only leave config.middlewares growing per call.
     rateLimitApplied.add(config);
 
     const defaultPolicy: RateLimitOptions = {
