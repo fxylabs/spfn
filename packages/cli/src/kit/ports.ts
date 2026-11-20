@@ -224,6 +224,11 @@ export interface DatabaseStatus
     reachable: boolean;
     applied: string[];
     pending: string[];
+    /**
+     * Set when the project's bookkeeping does not match its migrations, which
+     * `spfn db migrate` refuses: what does not match, and the remedy.
+     */
+    bookkeepingMismatch?: string;
 }
 
 export interface MigrationResult

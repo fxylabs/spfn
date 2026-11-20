@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 
 import { validateDatabasePrerequisites } from './utils/drizzle.js';
-import { getMigrationStatus, migrationTargets } from '../../utils/migration-status.js';
+import { bookkeepingMismatchOf, getMigrationStatus, migrationTargets } from '../../utils/migration-status.js';
 import type { MigrationStatus } from '../../utils/migration-status.js';
 
 /**
@@ -19,10 +19,16 @@ export interface DbStatusReportV1
     schemaVersion: 1;
     /** Whether a connection string is configured for this project at all. */
     configured: boolean;
-    /** Whether the configured database answered. False when it did not. */
+    /**
+     * Whether the status was read. False when the database did not answer, and
+     * on a bookkeeping mismatch — so a reader that does not know that reason
+     * stops rather than taking the empty pending list as "nothing to do".
+     */
     reachable: boolean;
     /** Why it could not be read, in a word. Absent when it was read. */
-    reason?: 'not-configured' | 'unreachable';
+    reason?: DbStatusUnreadableReason;
+    /** With `bookkeeping-mismatch` only: what does not match, and the remedy. */
+    detail?: string;
     targets: {
         name: string;
         total: number;
@@ -34,6 +40,13 @@ export interface DbStatusReportV1
     pending: string[];
     pendingCount: number;
 }
+
+/**
+ * `bookkeeping-mismatch`: the database answered, and the project's bookkeeping
+ * does not match `src/server/drizzle` the way `spfn db migrate` matches it, so
+ * migrate refuses — waiting for the database will not change it.
+ */
+export type DbStatusUnreadableReason = 'not-configured' | 'unreachable' | 'bookkeeping-mismatch';
 
 /**
  * Read a migration status into the report.
@@ -64,13 +77,14 @@ export function migrationStatusReport(status: MigrationStatus): DbStatusReportV1
 }
 
 /** The report for a database that could not be read, and why. */
-export function unreadableStatusReport(reason: 'not-configured' | 'unreachable'): DbStatusReportV1
+export function unreadableStatusReport(reason: DbStatusUnreadableReason, detail?: string): DbStatusReportV1
 {
     return {
         schemaVersion: 1,
         configured: reason !== 'not-configured',
         reachable: false,
         reason,
+        ...(detail === undefined ? {} : { detail }),
         targets: [],
         pending: [],
         pendingCount: 0,
@@ -118,14 +132,20 @@ export async function dbStatus(options: { json?: boolean } = {}): Promise<void>
     }
     catch (error)
     {
+        const mismatch = bookkeepingMismatchOf(error);
+
         if (json)
         {
-            printReport(unreadableStatusReport('unreachable'));
+            printReport(mismatch === undefined
+                ? unreadableStatusReport('unreachable')
+                : unreadableStatusReport('bookkeeping-mismatch', mismatch));
 
             return;
         }
 
-        console.error(chalk.red('❌ Failed to read migration status'));
+        console.error(chalk.red(mismatch === undefined
+            ? '❌ Failed to read migration status'
+            : '❌ The project\'s migration bookkeeping does not match src/server/drizzle'));
         console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
         process.exit(1);
     }

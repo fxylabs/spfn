@@ -146,6 +146,9 @@ export function toStatus(report: DbStatusReportV1 | null): DatabaseStatus
     return {
         configured: report.configured,
         reachable: report.reachable,
+        ...(report.reason === 'bookkeeping-mismatch'
+            ? { bookkeepingMismatch: report.detail ?? 'bookkeeping does not match local migrations' }
+            : {}),
         // Counts rather than names: the status contract has no field for how
         // many of a target are done, and the names of applied migrations are
         // not something `spfn db status` knows.

@@ -38,6 +38,7 @@ import { lockFromManifest, writeInstalledLock, writeLicenseFile, readLicenseFile
 import { fileDigest } from './../drift.js';
 import type { KitAdapters } from './../ports.js';
 import {
+    assertBookkeepingMatches,
     assertEmptyTarget,
     assertCommittedStateTracked,
     installFrozenGraph,
@@ -346,6 +347,8 @@ function installSteps(options: StepFactoryOptions): OperationStep[]
             async run(context): Promise<StepOutcome>
             {
                 const status = await adapters.database.status({ cwd: projectDir });
+
+                assertBookkeepingMatches(status, context.journal.operationId);
 
                 if (!status.configured || !status.reachable)
                 {

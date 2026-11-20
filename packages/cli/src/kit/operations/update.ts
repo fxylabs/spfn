@@ -35,6 +35,7 @@ import { lockFromManifest, readLicenseFile, requireInstalledLock, writeInstalled
 import { executeOperation, type OperationStep, type StepOutcome } from './../runner.js';
 import type { KitAdapters } from './../ports.js';
 import {
+    assertBookkeepingMatches,
     assertCommittedStateTracked,
     installFrozenGraph,
     materializeTargets,
@@ -461,6 +462,8 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
             async run(context): Promise<StepOutcome>
             {
                 const status = await adapters.database.status({ cwd: projectDir });
+
+                assertBookkeepingMatches(status, context.journal.operationId);
 
                 if (!status.configured || !status.reachable)
                 {

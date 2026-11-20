@@ -125,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every package has its own rows; when the legacy read is needed and denied, the boot gate starts
   with "Could not verify migration status" and `db status` exits 1. The legacy table has no package
   column, and when the operator may drop it is in the `@spfn/core/db` README.
-- **BREAKING: @spfn/core: project migration status is decided by drizzle-orm's own rule (#370).**
+- **BREAKING: @spfn/core, spfn: project migration status is decided by drizzle-orm's own rule (#370).**
   For `src/server/drizzle`, `spfn db status`, the `spfn dev`/`spfn start` pre-flight, the boot gate
   and detailed health counted a migration as applied when its name was recorded *or* its timestamp
   was not newer than the last applied row; `spfn db migrate` (drizzle-orm 1.0) goes by name alone.
@@ -140,7 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout, migrate refuses, and status now reports the error
   `bookkeeping does not match local migrations` (new `MigrationBookkeepingMismatchError` in
   `@spfn/core/db`) instead of a clean count: `db status` exits 1, `db status --json` reports
-  `reachable: false`, health reports `status: "unknown"` with the reason, and the boot gate refuses
+  `reachable: false` with the new `reason: "bookkeeping-mismatch"` and the text in `detail`
+  (`spfn kit install`/`update` refuse on it with `CLI_MIGRATION_BOOKKEEPING_MISMATCH`, exit 4,
+  where they would otherwise wait for a database forever), `spfn dev`/`spfn start` refuse to
+  spawn the server, health reports `status: "unknown"` with the reason, and the boot gate refuses
   to start whatever `SPFN_ALLOW_PENDING_MIGRATIONS` / `allowPending` say — they mean "start
   although migrations are still to be applied", and migrate refusing the database means nothing
   applied later repairs it; the refusal says so. Restore the missing

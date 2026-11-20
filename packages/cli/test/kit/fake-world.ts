@@ -99,6 +99,8 @@ export interface FakeFaults
     failingGates: Set<KitGate>;
     databaseConfigured: boolean;
     databaseReachable: boolean;
+    /** `spfn db status` reports the project's bookkeeping does not match, with this text. */
+    databaseBookkeepingMismatch: string | undefined;
     databasePending: string[];
     databaseApplied: string[];
     migrationFails: boolean;
@@ -144,6 +146,7 @@ export class FakeKitWorld
         failingGates: new Set<KitGate>(),
         databaseConfigured: true,
         databaseReachable: true,
+        databaseBookkeepingMismatch: undefined,
         databasePending: [],
         databaseApplied: ['0001_init'],
         migrationFails: false,
@@ -761,6 +764,9 @@ export class FakeKitWorld
                         reachable: world.faults.databaseReachable,
                         applied: [...world.faults.databaseApplied],
                         pending: [...world.faults.databasePending],
+                        ...(world.faults.databaseBookkeepingMismatch === undefined
+                            ? {}
+                            : { bookkeepingMismatch: world.faults.databaseBookkeepingMismatch }),
                     };
                 },
                 async migrate()
