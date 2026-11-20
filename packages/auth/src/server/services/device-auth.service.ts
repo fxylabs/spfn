@@ -437,7 +437,7 @@ export async function approveDeviceAuthService(
 
     return await runInTransaction(async () =>
     {
-        await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof);
+        await assertPasskeyProven(await usersRepository.lockAccount(params.userId), proof, 'deviceApprove');
 
         return await approveUnderLock(params);
     }, { context: 'auth:device-approve' });

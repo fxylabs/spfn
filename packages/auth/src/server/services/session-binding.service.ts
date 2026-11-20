@@ -199,7 +199,7 @@ async function bindAccount(params: SessionBindingParams, proof: RenewalProof | n
 {
     const user = await usersRepository.lockAccount(params.userId);
 
-    await spendPasskeyProof(proof, BINDING_ENABLE_PROOF_MESSAGE);
+    await spendPasskeyProof(proof, 'bindingEnable', BINDING_ENABLE_PROOF_MESSAGE);
 
     if (user?.sessionBinding === 'passkey')
     {

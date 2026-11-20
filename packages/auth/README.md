@@ -3374,7 +3374,7 @@ async function addPasskey()
 
     if (!result.ok)
     {
-        // 'unsupported' | 'cancelled' | 'error' — 'cancelled' is not an error to show
+        // 'unsupported' | 'cancelled' | 'no-credential' | 'busy' | 'error' — 'cancelled' is not an error to show
         return result.reason === 'cancelled' ? undefined : showError(result.reason);
     }
 
@@ -3383,6 +3383,32 @@ async function addPasskey()
 ```
 
 `isPasskeySupported()` is what decides whether to render the button at all.
+
+**On an account with [session binding](#session-binding) on, the person sees two prompts.** Adding
+a passkey lets another credential in, so `register/verify` asks a passkey proof made with a passkey
+the account already holds (`passkeyAdd`, see
+[Letting another credential in](#letting-another-credential-in)). `enrollPasskey` reads
+`GET /_auth/session/binding` first; when it answers `mode: 'passkey'` it runs that proof
+(`navigator.credentials.get()`, through `passkey-proof/options`) and only then the registration
+(`navigator.credentials.create()`), and sends the assertion with the attestation as
+`passkeyResponse`. The proof comes first because the authenticator makes the new credential before
+the server is asked about it: a proof dismissed after the registration would leave a passkey in the
+person's password manager that the account never stored. An unbound account sees one prompt, the
+registration's.
+
+If the verify still answers 403 `PASSKEY_PROOF_REQUIRED` — binding was turned on since the read,
+or the session may not read it — `enrollPasskey` runs the proof once and sends the **same**
+attestation again; the refusal did not spend its challenge. A second refusal is a rejected promise.
+An app that ran `provePasskey(api, 'passkeyAdd')` itself passes the assertion as
+`enrollPasskey(api, { passkeyResponse })`: it is sent as given, the binding is not read, and no
+proof prompt is shown.
+
+A session that may only enrol a second factor ([`secondFactorEnrolmentRequired`](#requiring-a-second-factor-secondfactor))
+is refused both `session/binding` and `passkey-proof/options` (403
+`SECOND_FACTOR_ENROLMENT_REQUIRED`). On an unbound account that changes nothing: it enrols with one
+prompt. On a bound account its registration cannot be proved, and the verify's refusal is the
+rejected promise; mark the passkey the account already holds instead (`mfa/step-up`, then
+`mfa/passkey/mark`), or turn binding off first.
 
 The passkey helpers take a client and call through it, so they wait as long as that client
 does — `SPFN_AUTH_GUARD_TIMEOUT` bounds only the guards. To bound them, pass a client created
@@ -3437,8 +3463,9 @@ someone who simply changed their mind.
 |--------|---------|
 | `{ ok: true, ... }` | signed in / enrolled; the rest of the object is the server's answer |
 | `{ ok: false, reason: 'unsupported' }` | this browser has no WebAuthn; nothing was sent to the server |
-| `{ ok: false, reason: 'cancelled' }` | the person dismissed the enrollment prompt |
-| `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it |
+| `{ ok: false, reason: 'cancelled' }` | the person dismissed the enrollment prompt (the registration's `create()`) |
+| `{ ok: false, reason: 'no-credential' }` | sign-in: the authenticator offered nothing, or the person dismissed it. Enrolling: the account has session binding on, and the proof prompt was dismissed or this device offered none of the account's passkeys — nothing was registered. A bound account with no passkey left turns binding off first ([An owner who lost every passkey](#session-binding)) |
+| `{ ok: false, reason: 'busy', error }` | enrolling: `register/verify` answered 503 (`AccountBusyError`) — another change held the account, nothing was written; call `enrollPasskey` again |
 | `{ ok: false, reason: 'error', error }` | anything else, with the original error attached |
 
 #### The recent-authentication gate
@@ -3592,7 +3619,7 @@ Ask for a password, an address, or a social link before, or shortly after, the p
 | `PasskeyNotFoundError` | 404 | — | a passkey the caller does not own, or one already revoked |
 | `PasskeyAlreadyRegisteredError` | 409 | — | that credential is on file for some account, revoked ones included |
 | `RecentAuthenticationRequiredError` | 403 | `RECENT_AUTH_REQUIRED` | the session proved itself too long ago and carried no password |
-| `PasskeyProofRequiredError` | 403 | `PASSKEY_PROOF_REQUIRED` | session binding is on and `register/verify` carried no `passkeyResponse` for `passkeyAdd` — see [Letting another credential in](#letting-another-credential-in) |
+| `PasskeyProofRequiredError` | 403 | `PASSKEY_PROOF_REQUIRED` | session binding is on and `register/verify` carried no `passkeyResponse` for `passkeyAdd` (`details.procedure: 'passkeyAdd'`); `enrollPasskey` proves it itself — see [Letting another credential in](#letting-another-credential-in) |
 | `LastRecoveryCredentialError` | 409 | `LAST_RECOVERY_CREDENTIAL` | revoking it would leave no way back in |
 | `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `mfa/passkey/mark` on a passkey registered without user verification |
 | `PasskeyConfigError` | boot | — | an origin off the rpId or not https, or an unsupported user-verification value |
@@ -4246,7 +4273,10 @@ rather than bound into sessions it could never renew.
 The client asks `POST /_auth/session/passkey-proof/options { procedure }`, runs
 `navigator.credentials.get()`, and sends the assertion as the route's `passkeyResponse` —
 `provePasskey(api, procedure)` from `@spfn/auth/client` does the first two. Without it the
-route answers **403 `PASSKEY_PROOF_REQUIRED`** and writes nothing. Each procedure is its own
+route answers **403 `PASSKEY_PROOF_REQUIRED`** and writes nothing; the refusal names the procedure
+it asks the proof for (`details: { procedure }`, e.g. `{ procedure: 'passkeyAdd' }`), so a client
+holding only the refusal knows which proof to ask. `enrollPasskey` runs its proof itself; the other
+procedures have no helper, and the app calls `provePasskey` and then the route. Each procedure is its own
 challenge kind, stamped with the session that asked: an assertion made to approve a device
 does not issue a link, and only that session can spend it. It is checked before the write and
 spent under the account lock with it; an assertion that does not verify spends its challenge.

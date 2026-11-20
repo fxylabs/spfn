@@ -35,6 +35,7 @@
 import { PasskeyProofRequiredError } from '@spfn/auth/errors';
 
 import type { User } from '../entities/users';
+import type { PasskeyProofProcedure } from '../entities/webauthn-challenges';
 
 /** A passkey assertion that verified, not yet spent (`RenewalProof`). */
 export interface PasskeyProof
@@ -52,6 +53,7 @@ export interface PasskeyProof
 export async function assertPasskeyProven(
     account: Pick<User, 'sessionBinding'> | null,
     proof: PasskeyProof | null,
+    procedure: PasskeyProofProcedure,
 ): Promise<void>
 {
     if (account?.sessionBinding !== 'passkey')
@@ -59,7 +61,7 @@ export async function assertPasskeyProven(
         return;
     }
 
-    await spendPasskeyProof(proof);
+    await spendPasskeyProof(proof, procedure);
 }
 
 /**
@@ -67,12 +69,20 @@ export async function assertPasskeyProven(
  * setting — for turning session binding on, which asks the proof of an account
  * not yet bound (`bindingEnable`).
  *
+ * The refusal names the procedure (`details.procedure`): a client that sent
+ * the request without a proof learns which one to ask
+ * `session/passkey-proof/options` for.
+ *
  * @throws PasskeyProofRequiredError when no proof for this procedure holds
  */
-export async function spendPasskeyProof(proof: PasskeyProof | null, message?: string): Promise<void>
+export async function spendPasskeyProof(
+    proof: PasskeyProof | null,
+    procedure: PasskeyProofProcedure,
+    message?: string,
+): Promise<void>
 {
     if (!proof || !await proof.spend())
     {
-        throw new PasskeyProofRequiredError({ message });
+        throw new PasskeyProofRequiredError({ message, details: { procedure } });
     }
 }

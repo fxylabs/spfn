@@ -546,7 +546,7 @@ describe.skipIf(!dbAvailable)('Battle.net sign-in and OAuth link/unlink (#154)',
             const response = await linkStartRequest(session);
 
             expect(response.status).toBe(403);
-            expect((await response.json()).code).toBe('PASSKEY_PROOF_REQUIRED');
+            expect(await response.json()).toMatchObject({ code: 'PASSKEY_PROOF_REQUIRED', details: { procedure: 'socialLink' } });
         });
 
         it('S6: a session key older than the window with the right password may start', async () =>

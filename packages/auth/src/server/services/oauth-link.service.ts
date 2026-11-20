@@ -170,7 +170,7 @@ async function lockedForLink(params: StartOAuthLinkParams): Promise<User | null>
     return await runInTransaction(async () =>
     {
         const account = await usersRepository.lockAccount(params.userId);
-        await assertPasskeyProven(account, proof);
+        await assertPasskeyProven(account, proof, 'socialLink');
 
         return account;
     }, { context: 'auth:oauth-link-start' });

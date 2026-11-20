@@ -142,6 +142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the value set. A declared check naming a column the table does not have yet is named as
   differing (`it names a column the table does not have yet`); one PostgreSQL cannot read against
   the table for another reason is named as `could not be compared`, with the error.
+- **@spfn/auth: `PASSKEY_PROOF_REQUIRED` names its procedure (#400).** Every route that asks a
+  passkey proof of a bound account (`device/approve`, `device/link/issue`,
+  `passkeys/register/verify`, `PUT /_auth/password`, `oauth/:provider/link`, `oauth2/authorize`,
+  `ops-tokens`, and turning binding on) refuses with `details: { procedure }`, the value to send to
+  `session/passkey-proof/options`. Not breaking: a field added to the refusal.
 
 ### Changed
 
@@ -590,6 +595,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing, `false` or `0`, there and in the spfn tenant tests' database check; `CI=false` used to
   count as CI and turn the skip into a failure.
 
+- **@spfn/auth: `enrollPasskey` adds a passkey to an account with session binding on (#400).**
+  `passkeys/register/verify` asks a bound account for the `passkeyAdd` proof, and the helper never
+  sent one, so it rejected with 403 `PASSKEY_PROOF_REQUIRED` every time. It now reads
+  `GET /_auth/session/binding` and, for a bound account, runs the proof (`provePasskey(api,
+  'passkeyAdd')`) **before** the registration prompt, so a dismissed proof leaves no credential on
+  the authenticator that the account never stored. A bound account sees two prompts, an unbound
+  one still sees one. If the verify still asks for the proof, the proof runs once and the same
+  attestation is sent again; a second refusal rejects. `enrollPasskey(api, { passkeyResponse })`
+  sends an app's own proof as given. New results: a dismissed proof prompt is `no-credential`, and a
+  503 at the verify is `busy`. A dismissed registration prompt is still `cancelled`. Not breaking.
+  A session that may only enrol a second factor cannot ask the proof, so on a bound account it
+  marks an existing passkey instead (README, "Enrolling, from a Next.js client component").
+- **@spfn/auth: `PasskeyProofProcedure` (`@spfn/auth/client`) is read off the route's input
+  (#400).** The hand-written union had left out `opsTokenIssue`, which the server accepts.
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
   own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find

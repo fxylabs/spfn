@@ -649,7 +649,7 @@ async function replaceVerifiedPassword(
 
         if (verifiedHash === null)
         {
-            await assertPasskeyProven(account, passkeyProof);
+            await assertPasskeyProven(account, passkeyProof, 'passwordSet');
         }
 
         await usersRepository.updatePassword(userId, change.newPasswordHash, true);

@@ -10,6 +10,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PasskeyProofRequiredError } from '@spfn/auth/errors';
+
 import {
     enrollPasskey,
     isConditionalMediationAvailable,
@@ -51,10 +53,11 @@ function notAllowed(): Error
     return error;
 }
 
-/** An `authApi` stand-in: only the four passkey operations are reached. */
+/** An `authApi` stand-in: the passkey operations, on an account without session binding. */
 function apiStub(overrides: Record<string, unknown> = {})
 {
     return {
+        getSessionBinding: { call: vi.fn().mockResolvedValue({ mode: 'none' }) },
         passkeyRegisterOptions: { call: vi.fn().mockResolvedValue(REGISTRATION_OPTIONS) },
         passkeyRegisterVerify: {
             call: vi.fn().mockResolvedValue({ passkeyId: '7', label: 'Laptop', createdAt: '2026-09-06T00:00:00.000Z' }),
@@ -183,6 +186,140 @@ describe('browser passkey helpers', () =>
             // The library rewrites the message for the spec's eight error names,
             // and hangs the original off `cause` — which is what a log needs.
             expect((result as { error?: { cause?: Error } }).error?.cause).toBe(failure);
+        });
+    });
+
+    describe('enrollPasskey on an account with session binding on (#400)', () =>
+    {
+        /** Every call the helper makes, server and browser alike, in the order made. */
+        let order: string[];
+
+        function logged<T>(name: string, answer: () => T)
+        {
+            return vi.fn().mockImplementation(() =>
+            {
+                order.push(name);
+
+                return answer();
+            });
+        }
+
+        function boundApi(verify = logged('register/verify', async () => ENROLLED))
+        {
+            return apiStub({
+                getSessionBinding: { call: logged('session/binding', async () => ({ mode: 'passkey' })) },
+                passkeyProofOptions: { call: logged('passkey-proof/options', async () => AUTHENTICATION_OPTIONS) },
+                passkeyRegisterOptions: { call: logged('register/options', async () => REGISTRATION_OPTIONS) },
+                passkeyRegisterVerify: { call: verify },
+            });
+        }
+
+        const ENROLLED = { passkeyId: '8', label: null, createdAt: '2026-11-20T00:00:00.000Z' };
+
+        function verifyBodies(api: AuthApi): Array<Record<string, unknown>>
+        {
+            return (api.passkeyRegisterVerify.call as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => input.body);
+        }
+
+        beforeEach(() =>
+        {
+            order = [];
+            get.mockImplementation(async () =>
+            {
+                order.push('get()');
+
+                return credentialStub({ authenticatorData: new Uint8Array([8]).buffer, signature: new Uint8Array([9]).buffer });
+            });
+            create.mockImplementation(async () =>
+            {
+                order.push('create()');
+
+                return credentialStub({ attestationObject: new Uint8Array([6, 7]).buffer });
+            });
+        });
+
+        it('E1: bound — the proof runs before the registration, and the verify carries it as passkeyResponse', async () =>
+        {
+            const api = boundApi();
+
+            expect(await enrollPasskey(api)).toEqual({ ok: true, ...ENROLLED });
+            expect(order).toEqual([
+                'session/binding', 'passkey-proof/options', 'get()', 'register/options', 'create()', 'register/verify',
+            ]);
+            expect(api.passkeyProofOptions.call).toHaveBeenCalledWith({ body: { procedure: 'passkeyAdd' } });
+            expect(verifyBodies(api)[0].passkeyResponse).toMatchObject({ id: 'Y3JlZA', response: { signature: expect.any(String) } });
+        });
+
+        it('E2: bound, the proof prompt dismissed — no-credential, and no credential is made on the authenticator', async () =>
+        {
+            get.mockRejectedValue(notAllowed());
+            const api = boundApi();
+
+            expect(await enrollPasskey(api)).toMatchObject({ ok: false, reason: 'no-credential' });
+            expect(create).not.toHaveBeenCalled();
+            expect(api.passkeyRegisterVerify.call).not.toHaveBeenCalled();
+        });
+
+        it('E3: unbound — no proof is asked, and no prompt but the registration\'s', async () =>
+        {
+            const api = apiStub({ passkeyProofOptions: { call: vi.fn() } });
+
+            expect(await enrollPasskey(api)).toMatchObject({ ok: true });
+            expect(api.passkeyProofOptions.call).not.toHaveBeenCalled();
+            expect(get).not.toHaveBeenCalled();
+            expect(verifyBodies(api)[0].passkeyResponse).toBeUndefined();
+        });
+
+        it('E4: the verify asks the proof once — one proof, the same attestation sent again; asked again, the refusal is thrown', async () =>
+        {
+            const refused = new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } });
+            const again = new PasskeyProofRequiredError({ details: { procedure: 'passkeyAdd' } });
+            const verify = vi.fn().mockRejectedValueOnce(refused).mockResolvedValueOnce(ENROLLED);
+            const api = apiStub({
+                passkeyProofOptions: { call: vi.fn().mockResolvedValue(AUTHENTICATION_OPTIONS) },
+                passkeyRegisterVerify: { call: verify },
+            });
+
+            expect(await enrollPasskey(api)).toEqual({ ok: true, ...ENROLLED });
+            const [first, second] = verifyBodies(api);
+            expect(second.response).toBe(first.response);
+            expect(first.passkeyResponse).toBeUndefined();
+            expect(second.passkeyResponse).toMatchObject({ id: 'Y3JlZA' });
+            expect(create).toHaveBeenCalledTimes(1);
+
+            verify.mockReset().mockRejectedValueOnce(refused).mockRejectedValueOnce(again).mockResolvedValue(ENROLLED);
+
+            await expect(enrollPasskey(api)).rejects.toBe(again);
+            expect(verify).toHaveBeenCalledTimes(2);
+        });
+
+        it('E5: an app-supplied passkeyResponse is sent as given — the binding is not read and no proof prompt is shown', async () =>
+        {
+            const passkeyResponse = { id: 'app-proof' } as never;
+            const api = boundApi();
+
+            expect(await enrollPasskey(api, { passkeyResponse })).toMatchObject({ ok: true });
+            expect(order).toEqual(['register/options', 'create()', 'register/verify']);
+            expect(verifyBodies(api)[0].passkeyResponse).toBe(passkeyResponse);
+        });
+
+        it('E6: a 503 (AccountBusyError) at the verify is busy, not a thrown refusal', async () =>
+        {
+            const busy = Object.assign(new Error('Another change to this account is in progress. Try again.'), { statusCode: 503 });
+
+            expect(await enrollPasskey(boundApi(vi.fn().mockRejectedValue(busy)))).toEqual({ ok: false, reason: 'busy', error: busy });
+        });
+
+        it('E7: a session that may not read its binding (enrolment-only, #309) still enrols, with no proof prompt', async () =>
+        {
+            const refused = Object.assign(new Error('enrol a second factor first'), { statusCode: 403 });
+            const api = apiStub({
+                getSessionBinding: { call: vi.fn().mockRejectedValue(refused) },
+                passkeyProofOptions: { call: vi.fn() },
+            });
+
+            expect(await enrollPasskey(api)).toMatchObject({ ok: true });
+            expect(api.passkeyProofOptions.call).not.toHaveBeenCalled();
         });
     });
 

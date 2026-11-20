@@ -36,7 +36,10 @@ export type { AuthApi };
  *
  * - `unsupported`: this browser has no WebAuthn at all
  * - `cancelled`: the person dismissed the prompt
- * - `no-credential`: the authenticator had nothing for this relying party
+ * - `no-credential`: the authenticator had nothing for this relying party.
+ *   From `enrollPasskey`: the account has session binding on, and the proof
+ *   prompt (an assertion with a passkey it already holds) was dismissed or this
+ *   device offered none of its passkeys
  * - `busy`: the server answered 503 — another change to the account held it
  *   (`AccountBusyError`). Retryable: the session is not over, and nothing was
  *   spent; run the same call again shortly (`renewSession` alone answers it)
@@ -87,6 +90,11 @@ export interface EnrollPasskeyOptions
     label?: string;
     /** Sent when the session proved itself longer ago than the recent-auth window. */
     currentPassword?: string;
+    /**
+     * The `passkeyAdd` proof the app already ran (`provePasskey(api, 'passkeyAdd')`),
+     * sent as given: the session binding is not read and no proof prompt is shown.
+     */
+    passkeyResponse?: AuthenticationResponseJSON;
 }
 
 export interface EnrollPasskeyValue
@@ -113,6 +121,22 @@ export interface EnrollPasskeyValue
  * options call means the caller should prompt for the password and try again
  * with `currentPassword`; that is a rejected promise, not a result here, because
  * it is the server declining rather than the ceremony failing.
+ *
+ * An account with session binding on must prove a passkey it already holds to
+ * add one (`passkeyAdd`, 403 `PASSKEY_PROOF_REQUIRED` without it). So the
+ * binding is read first, and a bound account sees two prompts: the proof
+ * (`navigator.credentials.get()`), then the registration (`create()`). The proof
+ * comes first because the registration's credential is made on the
+ * authenticator before the server is asked: a proof dismissed after it would
+ * leave a passkey in the person's password manager that the account never
+ * stored. If the verify still asks the proof — binding turned on since the
+ * read, or a session that may not read it — the proof runs once and the same
+ * attestation is sent again; its challenge was not spent. A second refusal is
+ * thrown.
+ *
+ * A dismissed proof prompt is `no-credential`, a dismissed registration prompt
+ * `cancelled`, and a 503 at the verify `busy` (`AccountBusyError`: nothing was
+ * written; call `enrollPasskey` again).
  */
 export async function enrollPasskey(
     api: AuthApi,
@@ -122,6 +146,15 @@ export async function enrollPasskey(
     if (!isPasskeySupported())
     {
         return { ok: false, reason: 'unsupported' };
+    }
+
+    const proof = options.passkeyResponse === undefined
+        ? await provePasskeyIfBound(api)
+        : { ok: true as const, passkeyResponse: options.passkeyResponse };
+
+    if (!proof.ok)
+    {
+        return proof;
     }
 
     const optionsJSON = await api.passkeyRegisterOptions.call({
@@ -139,11 +172,75 @@ export async function enrollPasskey(
         return { ok: false, reason: failureReason(error, 'cancelled'), error };
     }
 
-    const enrolled = await api.passkeyRegisterVerify.call({
-        body: { response, label: options.label },
-    }) as EnrollPasskeyValue;
+    return await verifyEnrolment(api, { response, label: options.label, passkeyResponse: proof.passkeyResponse }, true);
+}
 
-    return { ok: true, ...enrolled };
+/**
+ * The `passkeyAdd` proof when the account has session binding on; no proof,
+ * and no prompt, when it has not.
+ *
+ * A session that may not read its binding — one that may only enrol a second
+ * factor (#309) is refused `session/binding` — enrols as an unbound one would;
+ * the verify's refusal is the answer for a bound account then.
+ */
+async function provePasskeyIfBound(api: AuthApi): Promise<PasskeyResult<Partial<PasskeyProofValue>>>
+{
+    const binding = await api.getSessionBinding.call().catch(() => null);
+
+    return binding?.mode === 'passkey' ? await provePasskey(api, 'passkeyAdd') : { ok: true };
+}
+
+interface EnrolmentBody
+{
+    response: RegistrationResponseJSON;
+    label?: string;
+    passkeyResponse?: AuthenticationResponseJSON;
+}
+
+/**
+ * `register/verify`, with the proof asked and the same attestation sent once
+ * more when it answers `PASSKEY_PROOF_REQUIRED` and `mayProve`.
+ */
+async function verifyEnrolment(
+    api: AuthApi,
+    body: EnrolmentBody,
+    mayProve: boolean,
+): Promise<PasskeyResult<EnrollPasskeyValue>>
+{
+    return await api.passkeyRegisterVerify.call({ body }).then(
+        (enrolled): PasskeyResult<EnrollPasskeyValue> => ({ ok: true, ...enrolled as EnrollPasskeyValue }),
+        (error: unknown): PasskeyResult<EnrollPasskeyValue> | Promise<PasskeyResult<EnrollPasskeyValue>> =>
+        {
+            if (isServiceUnavailable(error))
+            {
+                return { ok: false, reason: 'busy', error };
+            }
+
+            return mayProve && isPasskeyProofRequired(error) ? proveAndResend(api, body) : Promise.reject(error);
+        },
+    );
+}
+
+async function proveAndResend(api: AuthApi, body: EnrolmentBody): Promise<PasskeyResult<EnrollPasskeyValue>>
+{
+    const proof = await provePasskey(api, 'passkeyAdd');
+
+    return proof.ok
+        ? await verifyEnrolment(api, { ...body, passkeyResponse: proof.passkeyResponse }, false)
+        : proof;
+}
+
+/**
+ * A 403 `PASSKEY_PROOF_REQUIRED`, read by name as `mfa-confirm-flow` reads its
+ * errors: `authApi` restores the class, a client built without the registry
+ * throws an `ApiError` whose `response` is the envelope.
+ */
+function isPasskeyProofRequired(error: unknown): boolean
+{
+    const answered = error as { name?: unknown; code?: unknown; response?: { __type?: unknown } } | null;
+
+    return [answered?.name, answered?.code, answered?.response?.__type]
+        .some(name => name === 'PasskeyProofRequiredError' || name === 'PASSKEY_PROOF_REQUIRED');
 }
 
 export interface SignInWithPasskeyOptions
@@ -365,16 +462,11 @@ export async function disableSessionBinding(
 /**
  * The procedures by which a session lets another credential into an account —
  * each asks a passkey proof when the account has session binding on — and
- * turning binding on, which asks one of every account.
+ * turning binding on, which asks one of every account. Read off the route's
+ * input, so it is the list the server accepts; a refusal names one as
+ * `details.procedure`.
  */
-export type PasskeyProofProcedure =
-    | 'deviceApprove'
-    | 'linkIssue'
-    | 'passkeyAdd'
-    | 'passwordSet'
-    | 'socialLink'
-    | 'oauth2Consent'
-    | 'bindingEnable';
+export type PasskeyProofProcedure = Parameters<AuthApi['passkeyProofOptions']['call']>[0]['body']['procedure'];
 
 /** The assertion to send as that procedure's `passkeyResponse`. */
 export interface PasskeyProofValue
