@@ -95,6 +95,7 @@ describe('trackError', () =>
         expect(notifyErrorToSlack).toHaveBeenCalledWith(
             mockGroup,
             mockEvent,
+            expect.objectContaining({ kind: 'error', name: 'Error' }),
             'new',
             'test',
         );
@@ -138,6 +139,7 @@ describe('trackError', () =>
         expect(notifyErrorToSlack).toHaveBeenCalledWith(
             expect.objectContaining({ status: 'active' }),
             mockEvent,
+            expect.objectContaining({ kind: 'error', name: 'Error' }),
             'reopened',
             'test',
         );

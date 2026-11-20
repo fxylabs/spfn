@@ -7,6 +7,7 @@
  */
 
 import crypto from 'node:crypto';
+import { describeError, type DatabaseErrorDescription, type ErrorDescription } from '@spfn/core/logger';
 import { monitorLogger } from '../logger';
 import { errorGroupsRepository } from '../repositories';
 import { errorEventsRepository } from '../repositories';
@@ -14,6 +15,11 @@ import { notifyErrorToSlack } from '../notifiers/slack';
 import type { ErrorGroup, ErrorGroupStatus } from '../entities';
 
 const logger = monitorLogger.errorTracking;
+
+type Description = ErrorDescription | DatabaseErrorDescription;
+
+/** How many of the stack's top frames name where a fault was raised */
+const FAULT_FRAMES = 3;
 
 /**
  * Context from the error handler middleware
@@ -31,17 +37,68 @@ export interface ErrorTrackingContext
 }
 
 /**
- * Generate a deterministic fingerprint for error deduplication
+ * Generate a deterministic fingerprint for error deduplication (#382)
  *
- * SHA-256 of (name:message:path), first 16 hex characters
+ * SHA-256 of what identifies the fault, first 16 hex characters: the route
+ * path, each link of the cause chain by its name, code, constraint and table,
+ * and the top frames of the error's stack without their line and column.
+ * Never the message: a failed statement's message carries its bound values,
+ * so one fault would open a group per value.
  */
-export function generateFingerprint(name: string, message: string, path: string): string
+export function generateFingerprint(description: Description, path: string): string
 {
+    const identity = [path, chainOf(description).map(identityOf), topFrames(description)];
+
     return crypto
         .createHash('sha256')
-        .update(`${name}:${message}:${path}`)
+        .update(JSON.stringify(identity))
         .digest('hex')
         .slice(0, 16);
+}
+
+/**
+ * One line naming the fault — the group's `message` and the Slack text:
+ * each link of the cause chain by its name, code, constraint and table, and
+ * the message its description kept
+ */
+export function summarizeError(description: Description): string
+{
+    return chainOf(description).map(linkSummary).join(' ← ');
+}
+
+function chainOf(description: Description): Description[]
+{
+    return description.kind === 'error' && description.cause
+        ? [description, ...chainOf(description.cause)]
+        : [description];
+}
+
+function identityOf(link: Description): unknown[]
+{
+    return link.kind === 'database'
+        ? [link.name, link.code, link.constraint, link.table]
+        : [link.name, link.code];
+}
+
+function topFrames(description: Description): string[]
+{
+    return (description.stack ?? '')
+        .split('\n')
+        .slice(0, FAULT_FRAMES)
+        .map(frame => frame.trim().replace(/:\d+:\d+(\)?)$/, '$1'));
+}
+
+function linkSummary(link: Description): string
+{
+    const fields = link.kind === 'database'
+        ? { code: link.code, constraint: link.constraint, table: link.table }
+        : { code: link.code };
+    const tags = Object.entries(fields)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => ` [${key}=${value}]`)
+        .join('');
+
+    return `${link.name}${tags}${link.message ? `: ${link.message}` : ''}`;
 }
 
 /**
@@ -58,11 +115,8 @@ export async function trackError(
     metadata?: Record<string, unknown>,
 ): Promise<void>
 {
-    const fingerprint = generateFingerprint(
-        err.name || 'Error',
-        err.message,
-        ctx.path,
-    );
+    const description = describeError(err);
+    const fingerprint = generateFingerprint(description, ctx.path);
 
     const existing = await errorGroupsRepository.findByFingerprint(fingerprint);
     const now = new Date();
@@ -72,8 +126,8 @@ export async function trackError(
         // New error — create group + event + notify
         const group = await errorGroupsRepository.create({
             fingerprint,
-            name: err.name || 'Error',
-            message: err.message,
+            name: description.name,
+            message: summarizeError(description),
             path: ctx.path,
             method: ctx.method,
             statusCode: ctx.statusCode,
@@ -83,14 +137,14 @@ export async function trackError(
             lastSeenAt: now,
         });
 
-        const event = await safeCreateEvent(group.id, err, ctx, metadata);
+        const event = await safeCreateEvent(group.id, description, ctx, metadata);
 
         logger.info('New error group tracked', { fingerprint, groupId: group.id });
 
         if (event)
         {
-            notifyErrorToSlack(group, event, 'new', ctx.environment)
-                .catch(e => logger.warn('Slack notification failed', e as Error));
+            notifyErrorToSlack(group, event, description, 'new', ctx.environment)
+                .catch(error => logger.warn('Slack notification failed', { error }));
         }
 
         return;
@@ -101,7 +155,7 @@ export async function trackError(
         // Reopened — back to active + increment + notify (single UPDATE)
         await errorGroupsRepository.reactivate(existing.id);
 
-        const event = await safeCreateEvent(existing.id, err, ctx, metadata);
+        const event = await safeCreateEvent(existing.id, description, ctx, metadata);
 
         logger.info('Error group reopened', { fingerprint, groupId: existing.id });
 
@@ -110,9 +164,10 @@ export async function trackError(
             notifyErrorToSlack(
                 { ...existing, status: 'active', count: existing.count + 1 },
                 event,
+                description,
                 'reopened',
                 ctx.environment,
-            ).catch(e => logger.warn('Slack notification failed', e as Error));
+            ).catch(error => logger.warn('Slack notification failed', { error }));
         }
 
         return;
@@ -123,7 +178,7 @@ export async function trackError(
     // so fire them together instead of serially.
     await Promise.all([
         errorGroupsRepository.incrementCount(existing.id),
-        safeCreateEvent(existing.id, err, ctx, metadata),
+        safeCreateEvent(existing.id, description, ctx, metadata),
     ]);
 }
 
@@ -158,10 +213,14 @@ export async function updateErrorGroupStatus(
 
 /**
  * Create an error event record (isolated — failure does not break group tracking)
+ *
+ * `stack_trace` holds the error's description as JSON — its frames, its cause
+ * chain, and for a database error the code, constraint, table and SQL text —
+ * never its message, stack header or bound values (#382).
  */
 async function safeCreateEvent(
     groupId: number,
-    err: Error,
+    description: Description,
     ctx: ErrorTrackingContext,
     metadata?: Record<string, unknown>,
 )
@@ -175,7 +234,7 @@ async function safeCreateEvent(
             statusCode: ctx.statusCode,
             headers: ctx.headers,
             query: ctx.query,
-            stackTrace: err.stack,
+            stackTrace: JSON.stringify(description, null, 2),
             metadata,
         });
     }

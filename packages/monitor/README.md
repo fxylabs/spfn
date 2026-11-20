@@ -174,9 +174,27 @@ createMonitorErrorHandler({
 
 ### Fingerprinting
 
-`generateFingerprint(name, message, path)` → `SHA-256(name:message:path)` sliced to the
-first **16 hex chars**. Same name+message+path ⇒ same group. The `path` component means the
-same error from different routes is grouped separately.
+`generateFingerprint(description, path)` takes the error's description (`describeError` from
+`@spfn/core/logger`) and hashes what identifies the fault — `SHA-256` of the route path, each link of
+the cause chain by its name, code, constraint and table, and the top three stack frames without
+their line and column — sliced to the first **16 hex chars**. Never the message: a failed
+statement's message carries its bound values, so one fault would open a group per value. The same
+fault from another route, or raised from another call site, is another group; a deploy that only
+shifts line numbers is not.
+
+What is stored and sent is the description too (#382):
+
+- `error_groups.name` is the description's name; `error_groups.message` one line naming the fault —
+  each link of the cause chain as `Name [code=…] [constraint=…] [table=…]: message`, the message
+  only where the description kept one (a database error's driver message only for SQLSTATE classes
+  that name identifiers only).
+- `error_events.stack_trace` is the whole description as indented JSON: its frames, its cause chain,
+  and for a database error the SQL text with `$n` placeholders and the parameter count — never the
+  values, the driver's `detail`, or the stack header.
+- The Slack message carries the group's line and the description's top three frames.
+
+Groups stored before #382 were fingerprinted on the message; new events of the same fault open a
+new group once. Old rows are not migrated.
 
 ### Manual tracking
 

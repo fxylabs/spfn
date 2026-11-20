@@ -117,9 +117,9 @@ export function createMonitorErrorHandler(options: MonitorErrorHandlerOptions = 
         {
             await trackError(err, trackingCtx, metadata);
         }
-        catch (e)
+        catch (error)
         {
-            logger.warn('Monitor error handler failed', e as Error);
+            logger.warn('Monitor error handler failed', { error });
         }
     };
 }

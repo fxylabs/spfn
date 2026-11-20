@@ -6,6 +6,7 @@
  */
 
 import { sendSlack } from '@spfn/notification/server';
+import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { getSlackWebhookUrl } from '@spfn/monitor/config';
 import { monitorLogger } from '../logger';
 import type { ErrorGroup, ErrorEvent } from '../entities';
@@ -16,10 +17,15 @@ type NotifyReason = 'new' | 'reopened';
 
 /**
  * Send error notification to Slack
+ *
+ * The text is the group's summary and the top frames of the error's
+ * description — never the error's message or stack, which for a failed
+ * statement carry its bound values (#382).
  */
 export async function notifyErrorToSlack(
     group: ErrorGroup,
     event: ErrorEvent,
+    description: ErrorDescription | DatabaseErrorDescription,
     reason: NotifyReason,
     environment?: string,
 ): Promise<void>
@@ -32,7 +38,7 @@ export async function notifyErrorToSlack(
         return;
     }
 
-    const { text, blocks } = formatSlackMessage(group, event, reason, environment);
+    const { text, blocks } = formatSlackMessage(group, event, description.stack, reason, environment);
 
     const result = await sendSlack({ webhookUrl, text, blocks });
     if (!result.success)
@@ -47,6 +53,7 @@ export async function notifyErrorToSlack(
 function formatSlackMessage(
     group: ErrorGroup,
     event: ErrorEvent,
+    frames: string | undefined,
     reason: NotifyReason,
     environment?: string,
 ): { text: string; blocks: unknown[] }
@@ -93,11 +100,11 @@ function formatSlackMessage(
     ];
 
     // Stack trace (abbreviated)
-    if (event.stackTrace)
+    if (frames)
     {
-        const shortStack = event.stackTrace
+        const shortStack = frames
             .split('\n')
-            .slice(1, 4)
+            .slice(0, 3)
             .map(l => l.trim())
             .join('\n');
 
