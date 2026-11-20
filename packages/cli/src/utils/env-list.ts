@@ -20,6 +20,7 @@ import { pathToFileURL } from 'node:url';
 import { loadAppConfig } from '@spfn/core/app-config';
 import { hasDevLoader } from './dev-loader.js';
 import { assertTypeScriptLoadable, tsxApiPath } from './tsx-required.js';
+import { redactUrls } from './redact-urls.js';
 import { loadEnvSchema, resolveFrom, type EnvSchema, type EnvSchemaEntry } from './env-schema.js';
 
 /** One schema and the name it is reported under. */
@@ -200,7 +201,7 @@ async function loadSchemaModule(cwd: string, path: string): Promise<EnvSchema>
 
     const module = await importAppModule(cwd, fullPath).catch((error: unknown) =>
     {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = redactUrls(error instanceof Error ? error.message : String(error));
 
         return Promise.reject(new Error(`spfn.config.js env.schemas: ${path} could not be loaded: ${message}`));
     });

@@ -21,6 +21,7 @@ import { env } from '@spfn/core/config';
 import { getDrizzleConfig, renderDrizzleConfig, discoverFunctionMigrations, packageNameToSchema } from '@spfn/core/db';
 import { loadEnv } from '@spfn/core/server';
 import { assertTypeScriptLoadable } from '../../../utils/tsx-required.js';
+import { redactUrls } from '../../../utils/redact-urls.js';
 
 const TLS_SSL_MODES = new Set(['no-verify', 'prefer', 'require', 'verify-ca', 'verify-full']);
 
@@ -572,11 +573,12 @@ const COMMONJS_GLOBAL = /\b(__dirname|__filename|require|module|exports) is not 
  * (its schemaFilter), so without it they have no scope. Names the file, the
  * load error and the remedy; for a CommonJS-only name, that this process reads
  * the file as ESM — drizzle-kit, which `db generate` hands it to, reads it by
- * its own rule.
+ * its own rule. The load error is the config's own text: a URL's credentials
+ * in it are blanked (`redactUrls`) before it can reach a terminal or a CI log.
  */
 function drizzleConfigError(configPath: string, error: unknown): Error
 {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = redactUrls(error instanceof Error ? error.message : String(error));
     const name = COMMONJS_GLOBAL.exec(message)?.[1];
     const remedy = name === undefined
         ? 'Make it load: it declares what db push and db tenant may touch, so they do not run without it'

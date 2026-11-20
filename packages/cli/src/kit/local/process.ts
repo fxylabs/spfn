@@ -21,6 +21,7 @@
  */
 
 import { execa } from 'execa';
+import { redactUrls } from '../../utils/redact-urls.js';
 import { createChildEnv } from '../child-env.js';
 
 /** How much of a failed child's output may travel into a report. */
@@ -108,26 +109,6 @@ export function summarize(result: RunResult): string
     const tail = lines.slice(-MAX_SUMMARY_LINES).join(' | ');
 
     return redactUrls(tail).slice(0, MAX_SUMMARY_CHARS);
-}
-
-/**
- * Blank the parts of a URL that carry credentials.
- *
- * A tool's own error message is not written with this CLI's rules in mind: a
- * failing migration prints the connection string it tried, and that string has
- * a password in it.
- */
-export function redactUrls(text: string): string
-{
-    return text
-        .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/gi, '$1<redacted>@')
-        // The scheme word is consumed with the value: `Bearer abc` is one
-        // credential in two words, and blanking only the second leaves the
-        // first half of a header that reads as if it had been handled.
-        .replace(
-            /\b(authorization|token|password|secret)(\s*[:=]\s*)(?:bearer|basic|token)?\s*\S+/gi,
-            '$1$2<redacted>',
-        );
 }
 
 function isMissingBinary(error: unknown): boolean

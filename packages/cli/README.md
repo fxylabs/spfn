@@ -318,9 +318,12 @@ server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignor
 >   `__dirname`, `__filename` or `require` there now does: `Could not load <path>: __dirname is not
 >   defined in ES module scope. spfn reads <path> as ESM, as the app's other source (drizzle-kit
 >   reads it by its own rule): use import.meta.dirname, import.meta.filename and import instead of
->   __dirname`. `module.exports = { … }` still loads. `db generate`, `check`,
->   `drop` and `studio` hand the file to `drizzle-kit`, which reads it as before — a CommonJS config
->   works there.
+>   __dirname`. The load error in that message is the config's own text, with the credentials of
+>   any URL in it (`scheme://user:pass@host`) blanked to `<redacted>` — as in `spfn env`'s and the
+>   `provision` runner's load errors; a secret the config prints in another form (a bare password,
+>   its own `console.log`) is the config's own output. `module.exports = { … }` still loads.
+>   `db generate`, `check`, `drop` and `studio` hand the file to `drizzle-kit`, which reads it as
+>   before — a CommonJS config works there.
 >
 > Not a break — dev now matches production: a named import from a CommonJS npm package whose
 > exports Node cannot analyse (`import { red } from 'chalk'` v4, `{ sign } from 'jsonwebtoken'`,

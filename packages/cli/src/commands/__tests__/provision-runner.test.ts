@@ -105,6 +105,17 @@ describe('spfn provision runner', () =>
         expect(status).not.toBe(0);
         expect(stderr).toContain('Refusing a second copy of @spfn/core in this process: @spfn/core/logger was loaded from two installs');
     });
+
+    it('K1 blanks the credentials of a URL in what stops it', () =>
+    {
+        writeCompiledConfig("throw new Error('connection failed for postgres://u:FAKE@h/d');");
+
+        const { status, stderr } = runProvision();
+
+        expect(status).toBe(1);
+        expect(stderr).toContain('connection failed for postgres://<redacted>@h/d');
+        expect(stderr).not.toContain('FAKE');
+    });
 });
 
 describe('spfn provision', () =>

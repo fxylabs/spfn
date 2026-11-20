@@ -6,10 +6,11 @@
  * the user or the whole URL (a failed connect does); what reaches the terminal
  * is the server's message for a statement that failed, a local file error's
  * own message, else only an error code — with the URL and its password cut out
- * whatever the source.
+ * whatever the source, and any other URL's credentials blanked (`redactUrls`).
  */
 
 import postgres from 'postgres';
+import { redactUrls } from '../../../utils/redact-urls.js';
 
 export type TenantSql = postgres.Sql;
 export type TenantTransaction = postgres.TransactionSql;
@@ -22,7 +23,7 @@ export function openConnection(url: string): TenantSql
 /** What to print for `error`: never the connection URL, its user and host, or its password. */
 export function describeError(error: unknown, url: string | undefined): string
 {
-    return redact(rawDescription(error), url);
+    return redactUrls(redact(rawDescription(error), url));
 }
 
 function rawDescription(error: unknown): string
