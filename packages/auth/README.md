@@ -5120,7 +5120,11 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
 | `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written | unchanged |
-| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
+| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement | a typed error's text unchanged; for any other error the fixed `OAuth callback failed` (`OAuth link failed` when the link state could not be read) (#382) |
+
+The `error` text is a typed error's own message — a `SerializableError` meant for the client, not
+one marked `internal` — or a fixed sentence. Any other error's message (a failed statement's carries
+its SQL and every bound value) never reaches the redirect; the server logs the error's description.
 
 A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
 The callback asks the provider first, then does every write in one transaction, and builds the

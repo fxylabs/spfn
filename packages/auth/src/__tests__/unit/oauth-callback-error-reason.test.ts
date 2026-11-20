@@ -365,14 +365,18 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         }
     });
 
-    it('R6: missing code or state, an unverified-email link refusal, a missing role, anything else — failed, the text unchanged', async () =>
+    it('R6: missing code or state, an unverified-email link refusal — failed, the text unchanged; a missing role, anything else — failed, a fixed text (#382)', async () =>
     {
         const missing = await errorRedirect(app, `state=${await stateIssued()}`);
 
         expect([missing.get('reason'), missing.get('error')]).toEqual(['failed', 'Missing authorization code or state']);
 
+        seams.callbackFailure = () => new UnverifiedEmailLinkError();
+        const typed = await pastTheGate(app);
+
+        expect([typed.get('reason'), typed.get('error')]).toEqual(['failed', new UnverifiedEmailLinkError().message]);
+
         for (const failure of [
-            () => new UnverifiedEmailLinkError(),
             () => new Error('Default user role not found. Run initializeAuth() first.'),
             () => new Error('something nobody planned for'),
         ])
@@ -381,7 +385,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
 
             const params = await pastTheGate(app);
 
-            expect([params.get('reason'), params.get('error')]).toEqual(['failed', failure().message]);
+            expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
         }
     });
 });

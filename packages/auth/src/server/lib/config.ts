@@ -856,7 +856,8 @@ export function assertPasskeyConfig(env: PasskeyEnvSource = process.env): void
     {
         authLogger.service.info(
             'Passkeys cannot be served with the configuration derived from the app URL, and no '
-            + `SPFN_AUTH_PASSKEY_* variable is set, so boot continues. ${(error as Error).message}`,
+            + 'SPFN_AUTH_PASSKEY_* variable is set, so boot continues.',
+            { error },
         );
     }
 }

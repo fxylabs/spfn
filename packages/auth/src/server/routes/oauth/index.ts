@@ -37,6 +37,7 @@ import {
     matchOAuthCallbackCsrf,
     matchOAuthLinkCsrf,
     oauthErrorReason,
+    oauthFailureUrl,
     oauthNativeService,
     oauthUnlinkNotifyService,
     buildOAuthErrorUrl,
@@ -91,7 +92,9 @@ interface CallbackQuery
  * Where a provider's redirect back sends the browser — both callback routes.
  *
  * Every failure goes to the error URL with a `reason` code beside the text
- * (#126), classified by the error's type.
+ * (#126), classified by the error's type. The text is a typed error's own
+ * message, and a fixed sentence for any other error, whose message may carry
+ * a failed statement's values (#382).
  */
 async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query: CallbackQuery): Promise<string>
 {
@@ -108,7 +111,7 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
     }
     catch (err)
     {
-        return buildOAuthErrorUrl(err instanceof Error ? err.message : 'OAuth link failed', oauthErrorReason(err));
+        return oauthFailureUrl(err, 'OAuth link failed');
     }
 
     // provider에서 에러가 반환된 경우
@@ -129,9 +132,7 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
     }
     catch (err)
     {
-        const message = err instanceof Error ? err.message : 'OAuth callback failed';
-
-        return buildOAuthErrorUrl(message, oauthErrorReason(err));
+        return oauthFailureUrl(err, 'OAuth callback failed');
     }
 }
 

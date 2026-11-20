@@ -352,6 +352,7 @@ export {
     matchOAuthLinkCsrf,
     buildOAuthErrorUrl,
     oauthErrorReason,
+    oauthFailureUrl,
     isOAuthProviderEnabled,
     requireEnabledProvider,
     requireSignInProvider,

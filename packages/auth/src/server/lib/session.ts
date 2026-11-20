@@ -252,7 +252,7 @@ export async function getSessionInfo(jwt: string): Promise<{
         // Log error for debugging but return null for graceful handling
         if (coreEnv.NODE_ENV !== 'production')
         {
-            authLogger.session.warn('Failed to get session info:', err instanceof Error ? err.message : 'Unknown error');
+            authLogger.session.warn('Failed to get session info', { error: err });
         }
 
         return null;

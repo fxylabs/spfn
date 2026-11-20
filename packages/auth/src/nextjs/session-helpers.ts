@@ -207,9 +207,7 @@ export async function getSession(): Promise<PublicSession | null>
     {
         // Unreadable or expired. A Server Component cannot delete cookies; the
         // proxy clears an unreadable one on the next request that reaches it.
-        logger.debug('Session validation failed', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        logger.debug('Session validation failed', { error });
 
         return null;
     }
@@ -442,9 +440,7 @@ export async function pendingSessionIn(jar: CookieJar, keyId?: string): Promise<
     }
     catch (error)
     {
-        logger.debug('Pending session validation failed', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        logger.debug('Pending session validation failed', { error });
 
         return null;
     }

@@ -8,7 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { ValidationError } from '@spfn/core/errors';
+import { SerializableError, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
@@ -702,9 +702,7 @@ export async function fromProvider<T>(call: () => Promise<T>): Promise<T>
         .then(call)
         .catch((cause: unknown) =>
         {
-            authLogger.service.warn('OAuth provider call failed', {
-                error: cause instanceof Error ? cause.message : String(cause),
-            });
+            authLogger.service.warn('OAuth provider call failed', { error: cause });
 
             return Promise.reject(new OAuthProviderError());
         });
@@ -1119,6 +1117,22 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
 export function oauthErrorReason(error: unknown): OAuthErrorReason
 {
     return REASON_BY_ERROR.find(([type]) => error instanceof type)?.[1] ?? 'failed';
+}
+
+/**
+ * The error redirect for a caught error: its text and its reason code (#382).
+ *
+ * A typed error meant for the client — a `SerializableError` not marked
+ * `internal` — keeps its message, as core's error handler answers it. Any
+ * other error's message may carry a failed statement's SQL and bound values,
+ * so the redirect carries `fallback` instead. The reason is the error's type
+ * either way.
+ */
+export function oauthFailureUrl(error: unknown, fallback: string): string
+{
+    const forClient = error instanceof SerializableError && (error as { internal?: boolean }).internal !== true;
+
+    return buildOAuthErrorUrl(forClient ? error.message : fallback, oauthErrorReason(error));
 }
 
 /**
