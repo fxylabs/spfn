@@ -275,6 +275,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `context.error` as a description instead of a string (cache factory, cache transport, rate
     limit, state event, client debug logs). The console prints a described context value on its
     own lines after the message.
+  - 14 more core lines that logged a copy of the caught value (`const err = error as Error`,
+    `new Error(String(error))`) or of its text carry the description under `context.error`:
+    server initialization and both graceful-shutdown lines; the database write connect, replica
+    fallback, connection close, health check and its reconnect attempts, forced reconnect and the
+    error reporter's own failure; the RPC proxy's fetch and proxy errors (no separate `stack`
+    field); the client's network error (no `errorName`) and inbound-request read (no `message` /
+    `name`). Two lines move the error's text from the message to `context.error`: the tenancy
+    check's "Could not check the database role…" and a lazily validated environment variable's
+    "… validation failed" (a sensitive key's line still carries no error). The codegen watchers'
+    two "Cannot watch …" lines keep the errno code in the message, print `no code` instead of the
+    error's text when it has none, and carry the error under `context.error`. Database connection creation and provider close keep the error
+    as their second argument — the caught value itself, not an Error made from its text.
   - A failed job's `output`: see its entry above.
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
   worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
@@ -523,7 +535,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`CircularCause`). A source-scan row keeps a caught error's `.message` / `.stack` /
   `String(err)` / `.toString()` / `JSON.stringify(err)` out of every package's logger calls
   (including `log.…` and `logger[level](…)`) and persisted writes, with an exact, counted list of
-  the auth and monitor sites left for the follow-up.
+  the auth, cms and monitor sites left for the follow-up. It follows a `const`/`let` copy of the
+  caught value (directly, through `as`, `!` or `satisfies`, or as a ternary branch) and of its
+  text (including an Error made from it, `new Error(String(err))`); it does not follow
+  destructuring, a value passed to a function and returned, one read back out of an object, or
+  a reassignment. In core, a caught value or such a copy never reaches a logger as the lone
+  second argument.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app

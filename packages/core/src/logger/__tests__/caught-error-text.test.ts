@@ -14,29 +14,45 @@
  * Its text is `x.message`, `x.stack`, `String(x)`, `${x}`, `x.toString()` or
  * `JSON.stringify(x)`.
  *
+ * Aliases, followed in the block that declares them and the blocks inside
+ * it: a `const`/`let` initialised from a caught value — directly, through
+ * `as`, `!`, `satisfies` or parentheses, or as either branch of a ternary
+ * (`x instanceof Error ? x : new Error(String(x))`) — is the caught value
+ * too; one initialised from its text — a text form, a ternary branch, a
+ * template or `+` / `??` / `||` operand, or the argument of `new` (an Error
+ * made from the text) — is that text, wherever the name is read. An alias of
+ * an alias is followed.
+ *
  * Where it may not go: the arguments of a logger call — `<receiver>.debug|info|
  * warn|error|fatal|log(…)` or `<receiver>[level](…)`, where the receiver is
  * named like a logger, is `log` or is `console` — or a persisted write —
  * pg-boss's `fail`, a repository's `create|insert|update|upsert`, drizzle's
  * `insert(…).values` / `update(…).set`.
  *
- * Not seen, by design (each would flag legitimate code to catch): text copied
- * into a local first (`const message = err.message`, then logged), an error
- * received under another name, a receiver named otherwise (`this.output.
- * error(…)` — matching every `.error(…)` call would flag result objects and
- * event emitters), and a raw error object handed to a sink that serialises it
- * (pg-boss `fail(…, error)` — boss-workers row R8 pins that one).
+ * Not followed (each needs reading the code, or would flag legitimate code):
+ * destructuring (`const { message } = err`), a value or text passed to
+ * another function and returned (`summarize(err)`, `hash(err.message)`),
+ * one stored in an object or array and read back (`{ error }` then
+ * `result.error`), a reassignment after the declaration (`x = err`), an error
+ * received under another parameter name, a receiver named otherwise
+ * (`this.output.error(…)` — matching every `.error(…)` call would flag result
+ * objects and event emitters), and a raw error object handed to a sink that
+ * serialises it (pg-boss `fail(…, error)` — boss-workers row R8 pins that one).
  *
- * R13b: in core, a caught value never reaches a logger as the lone second
- * argument. `logger.error(message, value)` reads an object that is not an
- * Error as the context and walks it — a thrown `{ code, params }` printed its
- * params — so a catch site passes `{ error }` or `(message, error, context)`,
- * which describe the value whatever its shape.
+ * R13b: in core, a caught value — or an alias of one — never reaches a logger
+ * as the lone second argument. `logger.error(message, value)` reads an object
+ * that is not an Error as the context and walks it — a thrown `{ code, params }`
+ * printed its params — so a catch site passes `{ error }` or
+ * `(message, error, context)`, which describe the value whatever its shape.
+ *
+ * R13c runs both scans on a fixture: the aliased offenders are found, and
+ * destructuring and a call's result are not — the limits above, pinned.
  *
  * | #    | goes unnoticed without the row                                       |
  * | ---- | -------------------------------------------------------------------- |
  * | R13  | a new log or persist site reintroducing the cause of #382            |
  * | R13b | a core catch site whose non-Error value is walked as the context     |
+ * | R13c | the scan losing a caught value copied into a local (H1)              |
  */
 
 import { describe, it, expect } from 'vitest';
@@ -77,10 +93,20 @@ const PENDING_OUTSIDE_CORE = new Map<string, number>([
     ['auth/src/server/services/account-deletion.service.ts String(error)', 2],
     ['auth/src/server/services/oauth.service.ts cause.message', 1],
     ['auth/src/server/services/oauth.service.ts String(cause)', 1],
+    // cms — an Error made from a thrown non-Error's text, then logged
+    ['cms/src/server/generators/label-sync-generator.ts err (String(error))', 4],
     // monitor — error_groups.message, error_events.stack_trace
     ['monitor/src/server/services/error-tracking.service.ts err.message', 1],
     ['monitor/src/server/services/error-tracking.service.ts err.stack', 1],
 ]);
+
+const TEXT_OPERATORS: ReadonlySet<ts.SyntaxKind> = new Set([
+    ts.SyntaxKind.PlusToken,
+    ts.SyntaxKind.QuestionQuestionToken,
+    ts.SyntaxKind.BarBarToken,
+]);
+
+const EMPTY_SCOPE: Scope = { values: new Set(), texts: new Map() };
 
 interface Offence
 {
@@ -161,7 +187,8 @@ function unwrap(expression: ts.Expression): ts.Expression
 {
     let current = expression;
 
-    while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current))
+    while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current)
+        || ts.isSatisfiesExpression(current) || ts.isTypeAssertionExpression(current))
     {
         current = current.expression;
     }
@@ -170,16 +197,130 @@ function unwrap(expression: ts.Expression): ts.Expression
 }
 
 /**
+ * What a subtree knows as caught: the names bound to a caught value, and the
+ * names bound to a caught value's text (`const message = err.message`, or an
+ * Error made from it, `new Error(String(err))`) → that text
+ */
+interface Scope
+{
+    values: ReadonlySet<string>;
+    texts: ReadonlyMap<string, string>;
+}
+
+/**
+ * The scope under a node: the caught names it binds (a catch clause, a
+ * callback's parameter) and, if it holds statements (a block, a case, the
+ * file), the `const`/`let` declarations among them that copy a caught value
+ * or its text — in order, so an alias of an alias is one too
+ */
+function scopeUnder(node: ts.Node, outer: Scope): Scope
+{
+    const values = new Set([...outer.values, ...caughtNames(node)]);
+    const texts = new Map(outer.texts);
+    const statements: readonly ts.Statement[] = (node as { statements?: ts.NodeArray<ts.Statement> }).statements ?? [];
+
+    const declarations = statements
+        .filter((statement): statement is ts.VariableStatement => ts.isVariableStatement(statement))
+        .flatMap(statement => [...statement.declarationList.declarations]);
+
+    for (const declaration of declarations)
+    {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer)
+        {
+            continue;
+        }
+
+        const scope = { values, texts };
+        const text = carriedText(declaration.initializer, scope);
+
+        if (isCaughtValue(declaration.initializer, scope))
+        {
+            values.add(declaration.name.text);
+        }
+
+        if (text !== undefined)
+        {
+            texts.set(declaration.name.text, `${declaration.name.text} (${text})`);
+        }
+    }
+
+    return { values, texts };
+}
+
+/**
+ * Whether the expression is the caught value: its name, through `as`, `!`,
+ * `satisfies` or parentheses, or either branch of a ternary (`err instanceof
+ * Error ? err : new Error(String(err))`)
+ */
+function isCaughtValue(expression: ts.Expression, scope: Scope): boolean
+{
+    const inner = unwrap(expression);
+
+    if (ts.isConditionalExpression(inner))
+    {
+        return isCaughtValue(inner.whenTrue, scope) || isCaughtValue(inner.whenFalse, scope);
+    }
+
+    return ts.isIdentifier(inner) && scope.values.has(inner.text);
+}
+
+/**
+ * The caught text the expression is, or is made of: a text form, a text
+ * alias, a ternary branch, a template or `+` / `??` / `||` operand, or the
+ * argument of `new` (an Error made from it). A call's result is not
+ * followed: `hash(err.message)` is not the text.
+ */
+function carriedText(expression: ts.Expression, scope: Scope): string | undefined
+{
+    const inner = unwrap(expression);
+
+    if (ts.isConditionalExpression(inner))
+    {
+        return carriedText(inner.whenTrue, scope) ?? carriedText(inner.whenFalse, scope);
+    }
+
+    if (ts.isBinaryExpression(inner) && TEXT_OPERATORS.has(inner.operatorToken.kind))
+    {
+        return carriedText(inner.left, scope) ?? carriedText(inner.right, scope);
+    }
+
+    const parts = ts.isTemplateExpression(inner) ? inner.templateSpans.map(span => span.expression)
+        : ts.isNewExpression(inner) ? [...inner.arguments ?? []] : [];
+
+    return errorText(inner, scope) ?? firstDefined(parts, part => carriedText(part, scope));
+}
+
+function firstDefined<T, R>(items: T[], map: (item: T) => R | undefined): R | undefined
+{
+    for (const item of items)
+    {
+        const result = map(item);
+
+        if (result !== undefined)
+        {
+            return result;
+        }
+    }
+
+    return undefined;
+}
+
+/**
  * The text a caught error's name is turned into here, if this node does that
  */
-function errorText(node: ts.Node, names: ReadonlySet<string>): string | undefined
+function errorText(node: ts.Node, scope: Scope): string | undefined
 {
     const isCaught = (expression: ts.Expression): boolean =>
     {
         const inner = unwrap(expression);
 
-        return ts.isIdentifier(inner) && names.has(inner.text);
+        return ts.isIdentifier(inner) && scope.values.has(inner.text);
     };
+
+    if (ts.isIdentifier(node) && scope.texts.has(node.text) && isReference(node))
+    {
+        return scope.texts.get(node.text);
+    }
 
     if (ts.isPropertyAccessExpression(node) && ['message', 'stack'].includes(node.name.text) && isCaught(node.expression))
     {
@@ -210,6 +351,18 @@ function errorText(node: ts.Node, names: ReadonlySet<string>): string | undefine
     }
 
     return undefined;
+}
+
+/**
+ * Whether an identifier reads a variable: not a property name, an object
+ * literal's key or a declaration's own name
+ */
+function isReference(node: ts.Identifier): boolean
+{
+    const parent = node.parent;
+
+    return !((ts.isPropertyAccessExpression(parent) || ts.isPropertyAssignment(parent) || ts.isVariableDeclaration(parent)
+        || ts.isBindingElement(parent) || ts.isParameter(parent)) && parent.name === node);
 }
 
 /**
@@ -273,15 +426,15 @@ function isSink(callee: ts.Expression): boolean
         || (['values', 'set'].includes(method) && /\.(insert|update)\(/.test(receiver));
 }
 
-function offencesIn(file: string): Offence[]
+function offencesIn(file: string, text = readFileSync(file, 'utf-8')): Offence[]
 {
-    const source = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
     const offences: Offence[] = [];
 
-    const visit = (node: ts.Node, names: ReadonlySet<string>): void =>
+    const visit = (node: ts.Node, outer: Scope): void =>
     {
-        const bound = new Set([...names, ...caughtNames(node)]);
-        const text = bound.size > 0 ? errorText(node, bound) : undefined;
+        const scope = scopeUnder(node, outer);
+        const text = scope.values.size + scope.texts.size > 0 ? errorText(node, scope) : undefined;
         const sink = text === undefined ? undefined : enclosingSink(node);
 
         if (text !== undefined && sink !== undefined)
@@ -290,10 +443,10 @@ function offencesIn(file: string): Offence[]
             offences.push({ file: relative(packagesRoot, file), line, text, sink });
         }
 
-        ts.forEachChild(node, child => visit(child, bound));
+        ts.forEachChild(node, child => visit(child, scope));
     };
 
-    visit(source, new Set());
+    visit(source, EMPTY_SCOPE);
 
     return offences;
 }
@@ -301,30 +454,26 @@ function offencesIn(file: string): Offence[]
 /**
  * Logger calls in the file whose only argument after the message is a caught value
  */
-function loneCaughtArguments(file: string): Offence[]
+function loneCaughtArguments(file: string, text = readFileSync(file, 'utf-8')): Offence[]
 {
-    const source = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
     const offences: Offence[] = [];
 
-    const visit = (node: ts.Node, names: ReadonlySet<string>): void =>
+    const visit = (node: ts.Node, outer: Scope): void =>
     {
-        const bound = new Set([...names, ...caughtNames(node)]);
+        const scope = scopeUnder(node, outer);
 
-        if (ts.isCallExpression(node) && node.arguments.length === 2 && isLogCall(node.expression))
+        if (ts.isCallExpression(node) && node.arguments.length === 2 && isLogCall(node.expression)
+            && isCaughtValue(node.arguments[1], scope))
         {
-            const argument = unwrap(node.arguments[1]);
-
-            if (ts.isIdentifier(argument) && bound.has(argument.text))
-            {
-                const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-                offences.push({ file: relative(packagesRoot, file), line, text: argument.text, sink: node.expression.getText() });
-            }
+            const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+            offences.push({ file: relative(packagesRoot, file), line, text: node.arguments[1].getText(), sink: node.expression.getText() });
         }
 
-        ts.forEachChild(node, child => visit(child, bound));
+        ts.forEachChild(node, child => visit(child, scope));
     };
 
-    visit(source, new Set());
+    visit(source, EMPTY_SCOPE);
 
     return offences;
 }
@@ -333,7 +482,7 @@ describe('caught error text', () =>
 {
     it('R13: no production source logs or persists a caught error\'s message, stack or string form (#382)', () =>
     {
-        const offences = productionSources().flatMap(offencesIn);
+        const offences = productionSources().flatMap(file => offencesIn(file));
         const counts = new Map<string, number>();
 
         for (const offence of offences)
@@ -357,9 +506,39 @@ describe('caught error text', () =>
     {
         const offences = productionSources()
             .filter(file => relative(packagesRoot, file).startsWith('core/src/'))
-            .flatMap(loneCaughtArguments)
+            .flatMap(file => loneCaughtArguments(file))
             .map(offence => `${offence.file}:${offence.line} ${offence.sink}(…, ${offence.text})`);
 
         expect(offences, 'pass { error } or (message, error, context): either describes the value whatever its shape').toEqual([]);
+    });
+
+    it('R13c: the scan follows a caught value through a const or let, and its text too; not through destructuring or a call', () =>
+    {
+        const fixture = [
+            'try { work(); }',
+            'catch (error)',
+            '{',
+            '    const err = error as Error;',
+            "    logger.error('cast', err);",
+            '    const again = err!;',
+            "    logger.error('alias of an alias', again);",
+            '    const made = error instanceof Error ? error : new Error(String(error));',
+            "    logger.error('made', made, {});",
+            "    logger.error('made, alone', made);",
+            '    let message = err.message;',
+            "    logger.warn('text', { error: message });",
+            '    const { message: destructured } = error as Error;',
+            "    logger.warn('destructured', { error: destructured });",
+            "    logger.warn('call', { error: summarize(error) }, {});",
+            '}',
+        ].join('\n');
+        const found = (offences: Offence[]): string[] => offences.map(offence => `${offence.line} ${offence.text}`);
+
+        expect(found(offencesIn(join(packagesRoot, 'core/src/fixture.ts'), fixture))).toEqual([
+            '9 made (String(error))',
+            '10 made (String(error))',
+            '12 message (err.message)',
+        ]);
+        expect(found(loneCaughtArguments(join(packagesRoot, 'core/src/fixture.ts'), fixture))).toEqual(['5 err', '7 again', '10 made']);
     });
 });

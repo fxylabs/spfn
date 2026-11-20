@@ -151,14 +151,9 @@ function transportError(
         return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, site.url);
     }
 
-    const errorMessage = error instanceof Error ? error.message : 'Network error';
-    apiLogger.error('Network error', {
-        ...site,
-        error: errorMessage,
-        errorName: error instanceof Error ? error.name : 'unknown',
-    });
+    apiLogger.error('Network error', { ...site, error });
 
-    return transportOutcome('network', errorMessage, 0, site.url);
+    return transportOutcome('network', error instanceof Error ? error.message : 'Network error', 0, site.url);
 }
 
 /**

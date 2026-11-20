@@ -143,13 +143,14 @@ export class InputWatcher
             return;
         }
 
-        const code = (error as NodeJS.ErrnoException | null)?.code ?? String(error);
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? 'no code';
         const inputs = this.paths.filter(path => existingDirectory(path) === directory).map(path => this.named(path));
 
         this.warned.add(directory);
         inputWatcherLogger.warn(
             `Cannot watch ${this.named(directory)} for ${inputs.join(', ')} (${code}): a change there is not noticed `
             + 'until another change regenerates.',
+            { error },
         );
     }
 

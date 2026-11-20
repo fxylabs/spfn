@@ -269,17 +269,15 @@ export function reportDatabaseError(error: unknown): void
             windowMs: ERROR_WINDOW_MS,
         });
 
-        triggerForceReconnect('query_error_threshold').catch((err: unknown) =>
+        triggerForceReconnect('query_error_threshold').catch((error: unknown) =>
         {
-            const message = err instanceof Error ? err.message : String(err);
-            dbLogger.error('Forced reconnect after error threshold failed', { error: message });
+            dbLogger.error('Forced reconnect after error threshold failed', { error });
         });
     }
     catch (err: unknown)
     {
         // Reporter must never throw — swallow so the original error path
         // (caller's catch block) continues unchanged.
-        const message = err instanceof Error ? err.message : String(err);
-        dbLogger.debug('reportDatabaseError itself threw, ignoring', { error: message });
+        dbLogger.debug('reportDatabaseError itself threw, ignoring', { error: err });
     }
 }

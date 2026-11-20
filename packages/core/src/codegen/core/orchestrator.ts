@@ -811,12 +811,13 @@ export class CodegenOrchestrator
             return;
         }
 
-        const code = (error as NodeJS.ErrnoException | null)?.code ?? String(error);
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? 'no code';
 
         this.warnedUnwatchable = true;
         orchestratorLogger.warn(
             `Cannot watch ${watchDirs.map(dir => relative(this.cwd, dir) || '.').join(', ')} for the generators' watchPatterns `
             + `(${code}): a file created or changed there may not regenerate until spfn dev restarts.`,
+            { error },
         );
     }
 

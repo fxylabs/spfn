@@ -217,8 +217,7 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
     }
     catch (error)
     {
-        const err = error as Error;
-        serverLogger.error('Server initialization failed', err);
+        serverLogger.error('Server initialization failed', { error });
 
         await cleanupOnFailure(finalConfig);
 
@@ -832,15 +831,14 @@ function createGracefulShutdown(
         catch (error)
         {
             if (timeoutId) clearTimeout(timeoutId);
-            const err = error as Error;
 
-            if (err.message && err.message.includes('timeout'))
+            if (error instanceof Error && error.message.includes('timeout'))
             {
-                serverLogger.error('Graceful shutdown timeout, forcing exit', err);
+                serverLogger.error('Graceful shutdown timeout, forcing exit', { error });
             }
             else
             {
-                serverLogger.error('Error during graceful shutdown', err);
+                serverLogger.error('Error during graceful shutdown', { error });
             }
 
             process.exit(1);

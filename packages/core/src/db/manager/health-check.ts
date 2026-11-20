@@ -274,8 +274,7 @@ export function startHealthCheck(
         }
         catch (error: unknown)
         {
-            const message = error instanceof Error ? error.message : 'Unknown error';
-            dbLogger.error('Database health check failed', { error: message });
+            dbLogger.error('Database health check failed', { error });
 
             // Attempt reconnection if enabled
             if (config.reconnect)
@@ -412,9 +411,8 @@ async function attemptReconnection(
             }
             catch (error: unknown)
             {
-                const message = error instanceof Error ? error.message : 'Unknown error';
                 dbLogger.error(`Reconnection attempt ${attempt} failed`, {
-                    error: message,
+                    error,
                     attempt,
                     maxRetries: config.maxRetries,
                 });
