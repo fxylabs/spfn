@@ -65,8 +65,12 @@ is answered npm here while yarn 1 still treats it as a member. Override with `--
 (`create`, `init`). When `create` makes a member of a pnpm workspace, it installs from the
 workspace root.
 
-"Dependencies installed" is printed only once every package the step declared resolves from
-the app directory; otherwise the command exits 1 naming the missing ones.
+"Dependencies installed" is printed only once every package in the app's `dependencies` and
+`devDependencies` resolves from the app directory (optional and peer dependencies are not
+checked); otherwise the command exits 1 naming the missing ones.
+Node answers, in a child process started in the app directory without the CLI's
+`NODE_PATH` or `NODE_OPTIONS`, through the app's `.pnp.cjs` under Plug'n'Play; a package
+resolves when Node finds its `package.json`, since an entry point is optional.
 
 ---
 

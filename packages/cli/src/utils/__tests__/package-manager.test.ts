@@ -15,6 +15,7 @@ import { readFileSync } from 'fs';
 
 import {
     detectPackageManager,
+    findUnresolvedPackages,
     findWorkspace,
     getRunScriptArgs,
 } from '../package-manager.js';
@@ -237,5 +238,67 @@ describe('detectPackageManager', () =>
 
         expect(findWorkspace(join(root, 'apps/web'))).toEqual({ root, packageManager: 'pnpm' });
         expect(findWorkspace(join(root, 'tools/cli'))).toBeNull();
+    });
+});
+
+describe('findUnresolvedPackages', () =>
+{
+    const savedNodePath = process.env.NODE_PATH;
+
+    afterEach(() =>
+    {
+        process.env.NODE_PATH = savedNodePath;
+    });
+
+    function app(dependencies: Record<string, string>, extra: Record<string, unknown> = {}): string
+    {
+        return JSON.stringify({ name: 'app', dependencies, ...extra });
+    }
+
+    it('reports a package that resolves only through the CLI process\'s NODE_PATH as missing', () =>
+    {
+        const root = makeRepository({
+            'app/package.json': app({ 'only-on-node-path': '1' }),
+            'store/only-on-node-path/package.json': '{"name":"only-on-node-path"}',
+        });
+        process.env.NODE_PATH = join(root, 'store');
+
+        expect(findUnresolvedPackages(join(root, 'app'))).toEqual(['only-on-node-path']);
+    });
+
+    it('checks every dependency and devDependency, not optional or peer ones', () =>
+    {
+        const root = makeRepository({
+            'app/package.json': app({ 'present': '1', 'absent': '1' }, {
+                devDependencies: { 'absent-dev': '1' },
+                optionalDependencies: { 'absent-optional': '1' },
+                peerDependencies: { 'absent-peer': '1' },
+            }),
+            'app/node_modules/present/package.json': '{}',
+        });
+
+        expect(findUnresolvedPackages(join(root, 'app'))).toEqual(['absent', 'absent-dev']);
+    });
+
+    it('finds a package hoisted to an ancestor\'s node_modules, as a workspace install leaves it', () =>
+    {
+        const root = makeRepository({
+            'apps/web/package.json': app({ hoisted: '1' }),
+            'node_modules/hoisted/package.json': '{}',
+        });
+
+        expect(findUnresolvedPackages(join(root, 'apps/web'))).toEqual([]);
+    });
+
+    it('finds a package by its package.json: with no entry point, or with exports that do not list it', () =>
+    {
+        const root = makeRepository({
+            'app/package.json': app({ 'types-only': '1', 'exports-only': '1', 'no-manifest': '1' }),
+            'app/node_modules/types-only/package.json': '{"name":"types-only","types":"index.d.ts"}',
+            'app/node_modules/exports-only/package.json': '{"name":"exports-only","exports":{".":{"import":"./index.mjs"}}}',
+            'app/node_modules/no-manifest/index.js': '',
+        });
+
+        expect(findUnresolvedPackages(join(root, 'app'))).toEqual(['no-manifest']);
     });
 });

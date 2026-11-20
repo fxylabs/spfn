@@ -104,8 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list — a no-op for the app that exited 0 — and printed `✔ Dependencies installed` with
   `@spfn/core`, `spfn` and `drizzle-orm` missing. `create` now hands its manager to `init`, and
   `init` and `create`'s workspace-root install print `Dependencies installed` only once every
-  package they declared resolves from the app directory; otherwise they exit 1 naming the missing
-  packages.
+  package in the app's `dependencies` and `devDependencies` resolves from the app directory, as
+  Node resolves it there (Plug'n'Play included, the CLI's own `NODE_PATH` not); otherwise they exit
+  1 naming the missing packages.
 - **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
   whose project schema had no pending change applied the function package migrations (and created
   their bookkeeping tables) instead of previewing them; with a pending project change it said

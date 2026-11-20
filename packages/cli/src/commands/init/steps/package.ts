@@ -2,7 +2,7 @@ import ora, { type Ora } from 'ora';
 import { execa } from 'execa';
 import fse from 'fs-extra';
 import { logger } from '../../../utils/logger.js';
-import { findUnresolvedPackages } from '../../../utils/package-manager.js';
+import { findUnresolvedPackages, type PackageManager } from '../../../utils/package-manager.js';
 import { getSpfnTag } from '../../../utils/version.js';
 import type { PackageJson } from './validate.js';
 import type { ScaffoldMode } from '../mode.js';
@@ -18,7 +18,7 @@ export async function setupPackageJson(
     cwd: string,
     packageJsonPath: string,
     packageJson: PackageJson,
-    packageManager: string,
+    packageManager: PackageManager,
     mode: ScaffoldMode,
 ): Promise<void>
 {
@@ -117,21 +117,13 @@ export async function setupPackageJson(
 
     spinner.succeed('package.json updated');
 
-    await installDependencies(spinner, cwd, packageManager, [
-        ...Object.keys(dependencies),
-        ...Object.keys(devDependencies),
-    ]);
+    await installDependencies(spinner, cwd, packageManager);
 }
 
 /**
- * Install all dependencies at once, then confirm the declared ones are there.
+ * Install all dependencies at once, then confirm the app's packages are there.
  */
-async function installDependencies(
-    spinner: Ora,
-    cwd: string,
-    packageManager: string,
-    declared: string[],
-): Promise<void>
+async function installDependencies(spinner: Ora, cwd: string, packageManager: PackageManager): Promise<void>
 {
     spinner.start('Installing dependencies...');
 
@@ -150,20 +142,21 @@ async function installDependencies(
         process.exit(1);
     }
 
-    confirmInstalled(spinner, cwd, packageManager, declared);
+    confirmInstalled(spinner, cwd, packageManager);
 }
 
 /**
- * Report "Dependencies installed" only when every declared package resolves from
- * `appDir`; otherwise fail the command naming the missing ones.
+ * Report "Dependencies installed" only when every package the app declares
+ * (`findUnresolvedPackages`) resolves from `appDir`; otherwise fail the command
+ * naming the missing ones.
  *
  * An exit code proves nothing here: pnpm run in a directory that is not a member
  * of the workspace above it installs that workspace and exits 0, leaving the app
  * without a single one of its packages.
  */
-export function confirmInstalled(spinner: Ora, appDir: string, packageManager: string, declared: string[]): void
+export function confirmInstalled(spinner: Ora, appDir: string, packageManager: PackageManager): void
 {
-    const missing = findUnresolvedPackages(appDir, declared);
+    const missing = findUnresolvedPackages(appDir);
 
     if (missing.length > 0)
     {

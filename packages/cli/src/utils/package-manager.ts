@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, posix, relative, sep } from 'path';
 import { parse } from 'yaml';
@@ -64,17 +65,70 @@ export function findWorkspace(dir: string): Workspace | null
 }
 
 /**
- * The packages of `names` that cannot be found from `appDir` — the lookup an
- * `import` in the app does: `node_modules` in `appDir` and each ancestor.
- * `NODE_PATH` and the global folders are left out on purpose: ESM ignores them,
- * and a package manager running the CLI sets `NODE_PATH` to its own store.
+ * The packages the app in `appDir` declares — every name in its `package.json`
+ * `dependencies` and `devDependencies` — that do not resolve from it.
+ *
+ * Optional and peer dependencies are left out: an optional one may fail to
+ * install by design, and a peer is the app's to declare in those two lists.
+ * Node itself answers, in a child process started in `appDir`, so that the
+ * CLI's own resolution (a `NODE_PATH` its package manager set, preload flags)
+ * plays no part: see `RESOLVE_SCRIPT`.
  */
-export function findUnresolvedPackages(appDir: string, names: string[]): string[]
+export function findUnresolvedPackages(appDir: string): string[]
 {
-    const lookupDirs = ancestorsOf(appDir).map(dir => join(dir, 'node_modules'));
+    const { dependencies, devDependencies } = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8').replace(/^\uFEFF/, ''));
+    const names = [...Object.keys(dependencies ?? {}), ...Object.keys(devDependencies ?? {})];
+    const pnpRuntime = ancestorsOf(appDir).map(dir => join(dir, '.pnp.cjs')).find(existsSync);
+    const { NODE_PATH, NODE_OPTIONS, NODE_PRESERVE_SYMLINKS, ...env } = process.env;
 
-    return names.filter(name => !lookupDirs.some(dir => existsSync(join(dir, name, 'package.json'))));
+    const child = spawnSync(
+        process.execPath,
+        [...(pnpRuntime ? ['--require', pnpRuntime] : []), '--input-type=module', '--eval', RESOLVE_SCRIPT, JSON.stringify(names)],
+        { cwd: appDir, env, encoding: 'utf-8' },
+    );
+
+    if (child.status !== 0)
+    {
+        throw new Error(`Could not ask Node what resolves from ${appDir}: ${child.stderr || child.error}`);
+    }
+
+    return JSON.parse(child.stdout);
 }
+
+/**
+ * Prints the names in `argv[1]` whose package does not resolve from the
+ * working directory. A package resolves when Node finds its `package.json`:
+ * every package has one and Node's lookup is defined by it, while an entry
+ * point is optional (`@types/node` has none). `ERR_PACKAGE_PATH_NOT_EXPORTED`
+ * counts as found, since Node raises it only after reading the package's
+ * `package.json`, whose `exports` do not list that file. Plain installs go
+ * through the ESM resolver, which ignores `NODE_PATH` and the global folders as
+ * an `import` in the app does; it locates a package by its directory alone, so
+ * the file's existence is checked. Under Plug'n'Play (`process.versions.pnp`,
+ * set by the preloaded `.pnp.cjs`) PnP's `require.resolve` answers.
+ */
+const RESOLVE_SCRIPT = `
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(process.cwd() + '/package.json');
+const locate = process.versions.pnp ? require.resolve : specifier => fileURLToPath(import.meta.resolve(specifier));
+
+function resolves(name)
+{
+    try
+    {
+        return existsSync(locate(name + '/package.json'));
+    }
+    catch (error)
+    {
+        return error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+    }
+}
+
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).filter(name => !resolves(name))));
+`;
 
 function ancestorsOf(dir: string): string[]
 {

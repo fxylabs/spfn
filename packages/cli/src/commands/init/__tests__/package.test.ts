@@ -224,4 +224,26 @@ describe('setupPackageJson', () =>
         expect(mocks.spinner.fail).toHaveBeenCalledWith(expect.stringMatching(/do not resolve from .*: @spfn\/core, tsx$/));
         expect(mocks.spinner.succeed).not.toHaveBeenCalledWith('Dependencies installed');
     });
+
+    it('fails naming a dependency the app already declared that the install left unresolvable', async () =>
+    {
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-init-package-existing-'));
+        const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) =>
+        {
+            throw new Error(`process.exit(${code})`);
+        }) as never);
+        mocks.execa.mockImplementation((_pm: string, _args: string[], { cwd }: { cwd: string }) =>
+            fakeInstall(cwd, ['left-pad']));
+
+        await expect(setupPackageJson(
+            testDirectory,
+            join(testDirectory, 'package.json'),
+            { name: 'existing-app', dependencies: { 'left-pad': '^1.3.0' }, devDependencies: {}, scripts: {} },
+            'npm',
+            'bare',
+        )).rejects.toThrow('process.exit(1)');
+
+        exit.mockRestore();
+        expect(mocks.spinner.fail).toHaveBeenCalledWith(expect.stringMatching(/do not resolve from .*: left-pad$/));
+    });
 });

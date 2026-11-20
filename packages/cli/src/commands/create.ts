@@ -1,5 +1,5 @@
 import { Command, Option } from 'commander';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import prompts from 'prompts';
 import ora from 'ora';
@@ -20,16 +20,6 @@ interface CreateOptions
     shadcn?: boolean;
     yes?: boolean;
     mode?: ScaffoldMode;
-}
-
-/**
- * The packages the app's package.json declares (dependencies and devDependencies).
- */
-function declaredDependencies(projectPath: string): string[]
-{
-    const { dependencies, devDependencies } = JSON.parse(readFileSync(join(projectPath, 'package.json'), 'utf-8'));
-
-    return [...Object.keys(dependencies ?? {}), ...Object.keys(devDependencies ?? {})];
 }
 
 /**
@@ -61,7 +51,7 @@ async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: stri
         return;
     }
 
-    confirmInstalled(installSpinner, projectPath, 'pnpm', declaredDependencies(projectPath));
+    confirmInstalled(installSpinner, projectPath, 'pnpm');
 }
 
 /**
