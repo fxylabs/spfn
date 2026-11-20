@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in flight; the server's Phase 2 passes its own budget (a `jobFetch` phase, see below) (#359).
 - **@spfn/auth: a sign-in guard — `createAuthLifecycle({ signIn: { admit, settled } })` (#361).**
   The app can refuse a sign-in and is told how every attempt ended. Not breaking: an app that leaves
-  the option out sees no change in answers, and no extra query, lock or transaction on any sign-in.
-  An app that sets it newly sees:
+  the option out sees no change in answers, and no extra query, lock or transaction on any sign-in
+  (what did change for it, `/login` and `deletion/cancel` without a route transaction, is under
+  Changed). An app that sets it newly sees:
   - `admit` asked on every sign-in channel (password, passkey, web and native OAuth, password reset,
     register, signup link, invitation, device code, device link), under the account lock where the
     key is written, and at `mfa/verify`; on password sign-in, `deletion/cancel` and `mfa/verify` also
@@ -25,14 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `signup/password`, `invitations/accept`, `password/reset/complete`, `passkeys/login/verify`,
     `oauth/:provider/native`, `device/poll`, `device/link/poll`, `mfa/verify` and `deletion/cancel`;
     the web OAuth error redirect with the new `reason=sign_in_refused` (`OAUTH_ERROR_REASONS` gains it).
+    `details.code` is 1 to 64 letters, digits, `_`, `-` or `.`; any other answer from `admit` is a
+    500 with no session.
     A refused account is answered the refusal whatever the password was, after a comparison against
     the dummy hash. Mobile contract **0.14.7** lists the code (a patch; the supported range does not
     move).
   - `settled` told `challenged` at a 202, `succeeded` once a session exists, and `failed` with a
     `reason` (`credential`, `secondFactor`, `refused`, `accountDisabled`, `pendingDeletion`,
-    `secondFactorLocked`). A failure is committed in a transaction of its own under the account lock
-    before the answer; a `settled` that throws on a success rolls the session back (500, no
-    `auth.login`), on a failure answers 500.
+    `secondFactorLocked`) for every attempt that names an account or a credential, on every channel,
+    refusals included. A failure is committed in a transaction of its own under the account lock
+    before the answer — a refusal decided inside the session's transaction once that transaction has
+    rolled back. A `settled` that throws on a success rolls the session back (500, no `auth.login`);
+    on a wrong credential answers 500, the second-factor budget's count and lock committed whatever
+    it does; on a refusal is logged, the refusal answered.
   - `loginService` and `cancelAccountDeletionService` throw when called inside a caller's transaction
     — a recorded failure would roll back with the refusal — as `checkSecondFactorProof` does.
   - A second `createAuthLifecycle()` stating other `signIn` functions refuses boot.
@@ -99,11 +105,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spfn db status --json` sees fewer pending migrations there than in earlier versions.
 - **@spfn/auth: `POST /_auth/login` and `POST /_auth/deletion/cancel` no longer run under a route-wide
   `Transactional()` (#361).** Their services open their own transactions — the session's, and with a
-  sign-in guard one per recorded failure — so a failure the app records survives the 401. A failed
-  sign-in no longer opens a transaction at all; a successful one sends the same statements as before.
-  Both read the account on the primary, as they did inside the route's transaction
-  (`usersRepository.findByEmailOrPhoneOnPrimary`). `POST /_auth/mfa/verify` now reads its own
-  request's address and user agent (`deviceProvenance`) for the guard.
+  sign-in guard one per recorded failure — so a failure the app records survives the 401. For an app
+  that leaves the `signIn` option out, two things changed and nothing else: a failed `/login` or
+  `deletion/cancel` (wrong password, unknown identifier) no longer opens a transaction at all, where
+  on main it ran inside the route's (begin … rollback); and both look the account up on the primary
+  (`usersRepository.findByEmailOrPhoneOnPrimary`), as they did inside the route's transaction on main
+  — not on a replica. A successful sign-in sends the same statements as before.
+  `POST /_auth/mfa/verify` now reads its own request's address and user agent (`deviceProvenance`)
+  for the guard.
 - **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
   reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
   so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
