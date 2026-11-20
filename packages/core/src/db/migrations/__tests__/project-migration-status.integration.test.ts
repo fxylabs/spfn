@@ -121,6 +121,12 @@ const CASES: Case[] = [
         expected: { pending: [] },
     },
     {
+        title: 'version 0: folders sharing the row\'s second, none with its hash, are refused (no hash fallback)',
+        folders: { '20260101000000_a1': sqlOf('x1'), '20260101000000_a2': sqlOf('x2'), [C]: sqlOf('orig') },
+        bookkeeping: { version: 0, rows: [{ createdAt: String(stampOf(A) + 7), sql: sqlOf('orig') }] },
+        expected: { refused: true },
+    },
+    {
         title: 'version 0: a row that matches no folder is refused',
         folders: foldersOf(A, B),
         bookkeeping: appliedBeforeV1(A, D),
