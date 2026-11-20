@@ -27,7 +27,8 @@
  * | R4 | `spfn db generate`, an entity importing a second     | the db mark not set: the second copy loads unrefused    |
  * |    | install of @spfn/core/logger                         |                                                         |
  * | R5 | `spfn env list` started as `node --import tsx`, an   | the bin taking a tsx it did not start for the hook: the |
- * |    | env schema with top-level `await`                    | schema loads as CommonJS and fails                      |
+ * |    | env schema with top-level `await` importing          | schema loads as CommonJS and fails; the schema loaded   |
+ * |    | @spfn/core/env                                       | by tsx's `tsImport`: a second @spfn/core/env            |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
@@ -166,11 +167,13 @@ it('R4 spfn db generate refuses a second install of @spfn/core', () =>
 it('R5 spfn env list started under node --import tsx loads an env schema with top-level await', () =>
 {
     write('spfn.config.js', 'export default { env: { schemas: [\'src/env.schema.ts\'] } };\n');
-    write('src/env.schema.ts', 'await Promise.resolve();\n'
+    write('src/env.schema.ts', 'import \'@spfn/core/env\';\nawait Promise.resolve();\n'
         + 'export const envSchema = { R5_KEY: { key: \'R5_KEY\', type: \'string\', description: \'r5\' } };\n');
 
     const { status, output } = spfn(['env', 'list'], ['--import', pathToFileURL(createRequire(bin).resolve('tsx')).href]);
 
     expect(status, output).toBe(0);
     expect(output).toContain('R5_KEY');
+    // tsx's tsImport would evaluate what the schema imports again, in a namespace of its own
+    expect(Object.entries(dump().core).filter(([, copies]) => copies.join() !== 'esm×1')).toEqual([]);
 });

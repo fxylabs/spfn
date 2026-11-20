@@ -65,10 +65,28 @@ const TSX_VIRTUAL_QUERY = 'tsx-commonjs-virtual-query=';
 /** The query parameters tsx marks a file it took for CommonJS with. */
 const TSX_COMMONJS_PARAMETERS = ['tsx-commonjs-export-preparse=', TSX_VIRTUAL_QUERY];
 
-/** Whether `part` (`name=value` of a query) is one of tsx's own parameters. */
+/** The query parameter a file loaded through tsx's `tsImport`/`require` API carries: its loader's namespace. */
+const TSX_NAMESPACE = 'tsx-namespace=';
+
+/** Whether `part` (`name=value` of a query) is one of tsx's CommonJS parameters. */
 function isTsxParameter(part: string): boolean
 {
     return TSX_COMMONJS_PARAMETERS.some(parameter => part.startsWith(parameter));
+}
+
+/**
+ * The query of a virtual path's copy as the app wrote it, followed by the
+ * namespace parameter `searchParts` carries. tsx appends the namespace to the
+ * copy as `namespace=<n>` and keeps `tsx-namespace=<n>` in the search; the
+ * scoped loader of `tsImport` claims a file by the latter, so it is kept, and
+ * its copy dropped.
+ */
+function virtualPathQuery(copy: string, searchParts: string[]): string[]
+{
+    const namespaces = searchParts.filter(part => part.startsWith(TSX_NAMESPACE));
+    const copies = new Set(namespaces.map(part => part.slice('tsx-'.length)));
+
+    return [...copy.split('&').filter(part => !copies.has(part)), ...namespaces];
 }
 
 /**
@@ -79,8 +97,9 @@ function isTsxParameter(part: string): boolean
  * `tsx-commonjs-virtual-query`, and re-serialises the search (`?raw` becomes
  * `?raw=`). As tsx's own inverse (`getFilePathFromVirtualQuery`) reads it, the
  * file is the path up to its last `%3F`; the app's query is taken from the
- * path's copy, which is as the app wrote it, without tsx's parameters. A URL
- * with none of tsx's parameters is returned untouched.
+ * path's copy, which is as the app wrote it, without tsx's parameters, and a
+ * `tsImport` namespace stays — the URL tsx gives the same import as ESM. A URL
+ * with none of tsx's CommonJS parameters is returned untouched.
  */
 function withoutCommonJsQuery(url: string): string
 {
@@ -95,7 +114,9 @@ function withoutCommonJsQuery(url: string): string
     const virtualPathEnd = searchParts.some(part => part.startsWith(TSX_VIRTUAL_QUERY))
         ? plain.pathname.toLowerCase().lastIndexOf('%3f')
         : -1;
-    const queryParts = virtualPathEnd === -1 ? searchParts : plain.pathname.slice(virtualPathEnd + '%3F'.length).split('&');
+    const queryParts = virtualPathEnd === -1
+        ? searchParts
+        : virtualPathQuery(plain.pathname.slice(virtualPathEnd + '%3F'.length), searchParts);
 
     if (virtualPathEnd !== -1)
     {

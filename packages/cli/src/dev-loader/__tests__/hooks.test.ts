@@ -28,6 +28,8 @@
  * |    |                                                                       | 4.23)                           |
  * | H1 | an app under a directory named `node_modules`: `.ts` with top-level   | ESM                             |
  * |    | await                                                                 |                                 |
+ * | H2 | type-less package: `.ts` with TypeScript syntax, through tsx's        | ESM, transformed (tsx's scoped  |
+ * |    | `tsImport` (as `spfn env` loads a schema), bare and with `?v=3`       | loader keeps its namespace)     |
  *
  * Runs against `dist/dev-loader/register.js`: build first
  * (`pnpm --filter spfn build`). Each tsx minor encodes the URL of a file it
@@ -46,6 +48,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const packageRoot = join(__dirname, '../../..');
 const register = join(packageRoot, 'dist/dev-loader/register.js');
 const tsxCli = process.env.SPFN_DEV_HOOK_TSX_CLI ?? createRequire(join(packageRoot, 'package.json')).resolve('tsx/cli');
+const tsxApi = pathToFileURL(join(dirname(tsxCli), 'esm/api/index.mjs')).href;
 
 /** The statement a fixture records its format with, under its row name. */
 function records(row: string): string
@@ -231,6 +234,24 @@ describe('spfn dev resolve hook', () =>
 
         expect(runProject(root, ['./probe.ts'])).toEqual({
             '.ts with top-level await': 'module',
+            'default import of ESM-syntax .js': 'undefined',
+        });
+    });
+
+    it('H2 lets tsx\'s tsImport transform a .ts file it loads as ESM', () =>
+    {
+        const root = join(tmp, 'ts-import');
+
+        write(root, 'package.json', '{ "name": "app" }');
+        write(root, 'typed.ts', `const typed = 1 as number;\nvoid typed;\n${records('tsImport: .ts with TypeScript syntax')}`);
+        write(root, 'typed-query.ts', `const typed = 1 as number;\nvoid typed;\n${records('tsImport: .ts with TypeScript syntax ?v=3')}`);
+        write(root, 'tsimporter.ts', `const { tsImport } = await import(${JSON.stringify(tsxApi)});\n`
+            + 'await tsImport(new URL(\'./typed.ts\', import.meta.url).href, import.meta.url);\n'
+            + 'await tsImport(new URL(\'./typed-query.ts?v=3\', import.meta.url).href, import.meta.url);\n');
+
+        expect(runProject(root, ['./tsimporter.ts'])).toEqual({
+            'tsImport: .ts with TypeScript syntax': 'module',
+            'tsImport: .ts with TypeScript syntax ?v=3': 'module',
             'default import of ESM-syntax .js': 'undefined',
         });
     });

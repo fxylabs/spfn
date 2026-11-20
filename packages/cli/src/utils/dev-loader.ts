@@ -50,13 +50,3 @@ export function tsxCommand(pm: string, cwd: string, entry: string): { command: s
         ? { command: 'npx', args: tsxArgs }
         : { command: pm, args: ['exec', ...tsxArgs] };
 }
-
-/**
- * Whether this process was started with the hook registered for the
- * application rooted at `cwd` — by `bin/spfn.js`, whose tsx then loads the
- * app's files as a plain `import()` does.
- */
-export function runsUnderDevLoader(cwd: string): boolean
-{
-    return process.execArgv.includes(devLoaderImport(cwd));
-}
