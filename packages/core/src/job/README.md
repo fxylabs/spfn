@@ -51,9 +51,17 @@ From `@spfn/core/job`:
   `expireInSeconds` (at least 1s); a single job completed with the handler's result, a batch
   without one; a throw (or a failed completion) fails the batch with the error, which pg-boss
   serialises into the output and retries per the job's retry options; a failed poll emitted as the
-  instance's `error` event with `queue` and `worker`. What it drops: those workers do not appear in
-  pg-boss's `getWipData()` or its `wip` events. A `PgBoss` the app constructs itself keeps pg-boss's
-  own workers, which a shutdown neither stops nor fails
+  instance's `error` event with `queue` and `worker`. `stop(options)` and `start()` on that instance
+  are core's too, so pg-boss's lifecycle covers those workers: `stop()` is the path `stopBoss()`
+  takes — with `graceful` (default) it waits up to `timeout` (default 30000, at least 1000) for a
+  fetch in flight and the running handlers, then fails the jobs of handlers still running (`"pg-boss
+  shut down while active"`), then runs pg-boss's stop with `close`; with `graceful: false` it fails
+  them at once; `wait: false` resolves at once. No worker fetches once `stop()` began, `work()`
+  after it rejects with pg-boss's `Workers are disabled. pg-boss is stopped`, and `start()` lets it
+  start workers again; the `stopped` event is pg-boss's own. Unlike pg-boss's stop, cron and queue
+  supervision end after the wait, not before it. What it drops: those workers do not appear in
+  pg-boss's `wip` events (`getWipData()` is not on the 11.1.2 instance). A `PgBoss` the app
+  constructs itself keeps pg-boss's own workers, which a shutdown neither stops nor fails
 - Registration: `registerJobs(router)` — **takes a `JobRouter`, not an array**
 - Types: `JobDef`, `JobRouter`, `JobRouterEntry`, `JobOptions`, `JobQueuePolicy`,
   `JobSendOptions`, `JobHandler`, `CompensateHandler`, `InferJobInput`, `InferJobOutput`,

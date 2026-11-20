@@ -10,6 +10,12 @@
  * which keeps what pg-boss's worker does (see `runLoop`) and holds its
  * current fetch as a promise `stopWorkers` awaits.
  *
+ * pg-boss's `stop()` acts only on the workers pg-boss itself runs, so the
+ * instance's `stop` and `start` are replaced too: `stop(options)` is
+ * `stopInstance`, the path `stopBoss()` takes, and `start()` after it lets
+ * `work()` start workers again, as pg-boss's does. pg-boss's own worker for
+ * its internal send-it queue (cron) stays pg-boss's, and its stop handles it.
+ *
  * Every worker started on the instance `getBoss()` returns — by registerJobs()
  * or by the app — is a core loop, and core knows the jobs each one runs. A
  * PgBoss the app constructs itself is not touched: its workers are pg-boss's
@@ -34,6 +40,10 @@ const SHORTEST_PAUSE = 100;
 
 /** What pg-boss's stop writes as the output of a job it fails; core writes the same */
 const STOPPED_WHILE_ACTIVE = 'pg-boss shut down while active';
+
+/** pg-boss's stop(): its defaults, and the shortest graceful wait it floors `timeout` to (index.js) */
+const DEFAULT_STOP_TIMEOUT = 30000;
+export const MIN_GRACEFUL_WAIT = 1000;
 
 type Handler = (jobs: PgBoss.Job[]) => unknown;
 
@@ -69,10 +79,19 @@ interface Loop
     wake: (() => void) | null;
 }
 
+/**
+ * `fetching` until stopWorkers() runs, `fetchStopped` from then until a stop
+ * begins; `work` is refused in every state but `fetching`
+ */
+type InstanceState = 'fetching' | 'fetchStopped' | 'stopping' | 'stopped';
+
 interface BossWorkers
 {
-    /** false once stopWorkers() ran: a `work` call is refused from then on */
-    fetching: boolean;
+    state: InstanceState;
+
+    /** pg-boss's own stop and start, which the instance's replacements end in */
+    stopPgBoss: (options: PgBoss.StopOptions) => Promise<void>;
+    startPgBoss: () => Promise<PgBoss>;
 
     /** Worker id → its loop, until the loop has ended */
     loops: Map<string, Loop>;
@@ -100,14 +119,22 @@ export interface StoppedWorkers
 }
 
 /**
- * Make `boss` run its workers on core's fetch loop
+ * Make `boss` run its workers on core's fetch loop, and its `stop()` stop them
  *
  * After `stopWorkers(boss)`, `boss.work()` rejects: the instance is shutting
- * down and must not fetch again.
+ * down and must not fetch again. After `boss.stop()` it rejects as pg-boss's
+ * does, until `boss.start()`.
  */
 export function recordWorkers(boss: PgBoss): void
 {
-    const record: BossWorkers = { fetching: true, loops: new Map(), running: new Map(), batches: new Set() };
+    const record: BossWorkers = {
+        state: 'fetching',
+        stopPgBoss: boss.stop.bind(boss),
+        startPgBoss: boss.start.bind(boss),
+        loops: new Map(),
+        running: new Map(),
+        batches: new Set(),
+    };
     const notifyWorker = boss.notifyWorker.bind(boss);
 
     (boss as any)[WORKERS_KEY] = record;
@@ -115,6 +142,81 @@ export function recordWorkers(boss: PgBoss): void
     (boss as any).offWork = async (value: string | { id: string }) => stopLoops(record, value);
     (boss as any).notifyWorker = (id: string) =>
         record.loops.has(id) ? notify(record.loops.get(id)!) : notifyWorker(id);
+    (boss as any).stop = async (options?: PgBoss.StopOptions) =>
+    {
+        await stopInstance(boss, options);
+    };
+    (boss as any).start = async () => restart(record);
+}
+
+/**
+ * pg-boss's `stop(options)` for an instance whose workers core runs — what
+ * the instance's own `stop()` and `stopBoss()` both do
+ *
+ * Within the wait — `timeout` (at least 1000 ms, as pg-boss floors it) when
+ * `graceful`, none otherwise — core's workers stop, a fetch still in flight
+ * settles and the running handlers finish. Then the jobs of handlers still
+ * running are failed with pg-boss's output, and pg-boss's own stop runs
+ * without a wait, with `close`. A stop while one is under way, or after it,
+ * does nothing; with `graceful` and `wait: false` it resolves at once, and a
+ * failure is emitted as an `error` event, as pg-boss's does.
+ *
+ * pg-boss's own stop ends its cron and supervision before its wait; here they
+ * end after it, when pg-boss's stop runs.
+ *
+ * @returns the jobs failed because their handler still ran
+ */
+export async function stopInstance(boss: PgBoss, options: PgBoss.StopOptions = {}): Promise<RunningJob[]>
+{
+    const record = recordOf(boss);
+    if (record.state === 'stopping' || record.state === 'stopped')
+    {
+        return [];
+    }
+
+    const { close = true, graceful = true, timeout = DEFAULT_STOP_TIMEOUT, wait = true } = options;
+    record.state = 'stopping';
+    const stopping = settleAndStop(boss, record, graceful ? Math.max(timeout, MIN_GRACEFUL_WAIT) : 0, close);
+
+    if (graceful && !wait)
+    {
+        stopping.catch((error) => boss.emit('error', error));
+
+        return [];
+    }
+
+    return stopping;
+}
+
+/**
+ * Within `wait` ms, let a fetch still in flight settle and the running
+ * handlers finish; fail the jobs of those still running, since pg-boss's
+ * stop fails only the jobs its own workers hold; then stop pg-boss
+ */
+async function settleAndStop(boss: PgBoss, record: BossWorkers, wait: number, close: boolean): Promise<RunningJob[]>
+{
+    const deadline = Date.now() + wait;
+
+    await stopWorkers(boss, wait);
+    await waitForHandlers(boss, deadline - Date.now());
+    const failed = await failRunningJobs(boss);
+    await record.stopPgBoss({ graceful: false, close });
+    record.state = 'stopped';
+
+    return failed;
+}
+
+/** pg-boss's `start()`; after a completed stop, `work()` starts workers again */
+async function restart(record: BossWorkers): Promise<PgBoss>
+{
+    const boss = await record.startPgBoss();
+
+    if (record.state === 'stopped')
+    {
+        record.state = 'fetching';
+    }
+
+    return boss;
 }
 
 /**
@@ -128,7 +230,10 @@ export function recordWorkers(boss: PgBoss): void
 export async function stopWorkers(boss: PgBoss, fetchWait: number): Promise<StoppedWorkers>
 {
     const record = recordOf(boss);
-    record.fetching = false;
+    if (record.state === 'fetching')
+    {
+        record.state = 'fetchStopped';
+    }
 
     const loops = [...record.loops.values()];
     const stopped = loops.filter((loop) => !loop.stopping).length;
@@ -143,7 +248,7 @@ export async function stopWorkers(boss: PgBoss, fetchWait: number): Promise<Stop
  * Wait up to `wait` ms for the handlers core runs on `boss` — including any a
  * fetch still in flight hands jobs to meanwhile
  */
-export async function waitForHandlers(boss: PgBoss, wait: number): Promise<void>
+async function waitForHandlers(boss: PgBoss, wait: number): Promise<void>
 {
     const record = recordOf(boss);
     const deadline = Date.now() + wait;
@@ -160,7 +265,7 @@ export async function waitForHandlers(boss: PgBoss, wait: number): Promise<void>
  *
  * @returns the jobs failed
  */
-export async function failRunningJobs(boss: PgBoss): Promise<RunningJob[]>
+async function failRunningJobs(boss: PgBoss): Promise<RunningJob[]>
 {
     const jobs = runningJobs(boss);
     const queues = new Set(jobs.map((job) => job.queue));
@@ -195,7 +300,12 @@ function recordOf(boss: PgBoss): BossWorkers
  */
 function startLoop(boss: PgBoss, record: BossWorkers, name: string, args: unknown[]): string
 {
-    if (!record.fetching)
+    if (record.state === 'stopping' || record.state === 'stopped')
+    {
+        throw new Error('Workers are disabled. pg-boss is stopped');
+    }
+
+    if (record.state === 'fetchStopped')
     {
         throw new Error(
             `pg-boss work('${name}') refused: this instance has stopped fetching for a shutdown. ` +

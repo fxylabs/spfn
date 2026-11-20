@@ -33,6 +33,8 @@ function standInBoss(): StandInBoss
         notifyWorker: vi.fn(),
         work: vi.fn(),
         offWork: vi.fn(),
+        stop: vi.fn(async () => undefined),
+        start: vi.fn(async () => undefined),
     });
     recordWorkers(boss as unknown as PgBoss);
 

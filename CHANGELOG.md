@@ -22,13 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING: @spfn/core: workers started on `getBoss()` run core's fetch loop, not pg-boss's
-  worker, so they no longer appear in pg-boss's `getWipData()` or its `wip` events (#359).** Core
-  needs to know when a worker's last fetch has settled, which pg-boss 11 does not expose; the loop
-  runs on pg-boss's public `fetch` / `complete` / `fail` and keeps the worker's options and
-  behaviour (polling interval, `batchSize`, `includeMetadata`, `priority`, the handler bound,
-  completion with the handler's result, failure with its error, `error` events, `offWork`,
-  `notifyWorker`; see the job README). `work()` returns core's worker id, which `offWork({ id })`
-  and `notifyWorker(id)` on that instance take. A `PgBoss` the app constructs itself is unchanged.
+  worker, so they no longer appear in pg-boss's `wip` events (#359).** Core needs to know when a
+  worker's last fetch has settled, which pg-boss 11 does not expose; the loop runs on pg-boss's
+  public `fetch` / `complete` / `fail` and keeps the worker's options and behaviour (polling
+  interval, `batchSize`, `includeMetadata`, `priority`, the handler bound, completion with the
+  handler's result, failure with its error, `error` events, `offWork`, `notifyWorker`; see the job
+  README). `work()` returns core's worker id, which `offWork({ id })` and `notifyWorker(id)` on
+  that instance take. Kept: the instance's own `stop({ graceful, timeout, wait, close })` and
+  `start()` — `stop()` is the path `stopBoss()` takes, so it waits for core's workers within
+  `timeout`, fails the jobs of handlers still running (non-graceful: at once), and stops their
+  polling; `work()` after it rejects as pg-boss's does until `start()`. A `PgBoss` the app
+  constructs itself is unchanged.
+- **BREAKING: @spfn/core: a graceful `getBoss().stop()` ends pg-boss's cron and queue supervision
+  after its wait for handlers, not before it (#359).** pg-boss's own stop ends them first and then
+  waits; core's waits for its workers first and then runs pg-boss's stop, which has no hook between
+  the two. A cron tick during the wait may still insert a job row, which stays for a live instance.
 - **@spfn/core: the shutdown budget has a `jobFetch` phase (#359):** Phase 2's wait for fetches in
   flight, capped at 5s and reserving nothing, inside the half of the work share the HTTP and
   WebSocket closes use, so it cannot shorten the drain.
