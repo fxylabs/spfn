@@ -996,12 +996,24 @@ class — a class-22 message quotes the rejected input:
 | `08` | `Database connection failed` |
 | `22` | `Invalid input value` |
 | `23` | `Integrity constraint violated` (`DuplicateEntryError` builds its own: `<field> already exists`) |
+| `28` | `Database authentication failed` |
 | `40` | `Transaction failed` |
 | `42` | `Invalid query` |
 | `53` | `Insufficient database resources` |
 | `57` | `Database operation interrupted` |
 | a postgres.js connection code (`CONNECTION_CLOSED`, …) | `Database connection lost` |
 | anything else, or no code | `Database query failed` |
+
+`databaseErrorMessage(error)` is that text without the typed error: the driver's message where
+`describeError` keeps it, else the class's text above. The SQLSTATE is read from the description,
+so a drizzle query error over a driver error gets its class's text. Use it where a database error is
+shown to a person — the `spfn` CLI prints a failed statement with it:
+
+```typescript
+import { databaseErrorMessage } from '@spfn/core/db';
+
+databaseErrorMessage(error); // 'Invalid input value' for a 22P02, never the rejected input
+```
 
 ---
 

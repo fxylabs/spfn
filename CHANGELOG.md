@@ -171,6 +171,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `passkeys/register/verify`, `PUT /_auth/password`, `oauth/:provider/link`, `oauth2/authorize`,
   `ops-tokens`, and turning binding on) refuses with `details: { procedure }`, the value to send to
   `session/passkey-proof/options`. Not breaking: a field added to the refusal.
+- **@spfn/core: `databaseErrorMessage(error)`** from `@spfn/core/db` (#378, #382): the text a
+  database error may be shown to a person with — the driver's message where `describeError` keeps
+  it, else the SQLSTATE class's fixed text that `fromPostgresError` gives its typed error, read from
+  the description, so a drizzle query error over a driver error gets its class's text. Class 28
+  (authentication) now has a fixed text of its own, `Database authentication failed`, for this and
+  for `fromPostgresError` (was `Database query failed`).
 
 ### Changed
 

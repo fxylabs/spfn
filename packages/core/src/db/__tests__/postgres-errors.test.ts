@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { fromPostgresError } from '../postgres-errors';
+import { DrizzleQueryError } from 'drizzle-orm';
+import { databaseErrorMessage, fromPostgresError } from '../postgres-errors';
 import { DuplicateEntryError } from '../../errors/database-errors';
 import { expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
 
@@ -504,6 +505,47 @@ describe('PostgreSQL Error Conversion', () =>
                 expect(error).toMatchObject({ name: 'QueryError', statusCode: 500, message: 'duplicate key value violates unique constraint "users_email_key"' });
                 expectNoValues(error.message);
             });
+        });
+    });
+
+    describe('databaseErrorMessage() — the text a database error may be shown with (#378)', () =>
+    {
+        const driverError = (fields: Record<string, string>): Error =>
+            Object.assign(new Error(fields.message), { severity: 'ERROR', severity_local: 'ERROR', ...fields });
+
+        it('M1: class 22 gives the class\'s fixed text, not the rejected input — under drizzle too', () =>
+        {
+            const invalid = driverError({ code: '22P02', message: 'invalid input syntax for type integer: "SECRETVALUE"', routine: 'pg_strtoint32_safe' });
+            const wrapped = new DrizzleQueryError('ALTER TABLE "t" ALTER COLUMN "c" SET DATA TYPE integer USING "c"::integer', [], invalid);
+
+            expect(databaseErrorMessage(invalid)).toBe('Invalid input value');
+            expect(databaseErrorMessage(wrapped)).toBe('Invalid input value');
+        });
+
+        it('M2: a kept class from a known routine keeps the driver\'s message', () =>
+        {
+            expect(databaseErrorMessage(failedInsert())).toBe('duplicate key value violates unique constraint "users_email_key"');
+        });
+
+        it.each([
+            ['42703', 'column "SECRETVALUE" does not exist', 'Invalid query'],
+            ['28P01', 'password authentication failed for user "SECRETVALUE"', 'Database authentication failed'],
+            ['XX000', 'SECRETVALUE', 'Database query failed'],
+        ])('M3: SQLSTATE %s gives its class\'s fixed text', (code, message, text) =>
+        {
+            expect(databaseErrorMessage(driverError({ code, message }))).toBe(text);
+        });
+
+        it('M4: a 23505 the app raised itself (exec_stmt_raise) gives the class text, not its own message', () =>
+        {
+            const raised = driverError({ code: '23505', message: 'SECRETVALUE', routine: 'exec_stmt_raise' });
+
+            expect(databaseErrorMessage(raised)).toBe('Integrity constraint violated');
+        });
+
+        it('M5: one of the driver\'s own connection codes', () =>
+        {
+            expect(databaseErrorMessage(Object.assign(new Error('write CONNECTION_CLOSED db:5432'), { code: 'CONNECTION_CLOSED' }))).toBe('Database connection lost');
         });
     });
 });
