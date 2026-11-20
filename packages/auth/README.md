@@ -3612,9 +3612,13 @@ as "the session is gone", so it would sign the user out instead of asking for a 
 From a browser, `stepUpWithPasskey(api)` from `@spfn/auth/client` runs the passkey step-up —
 options, the ceremony, `mfa/step-up` — and answers the discriminated union the other passkey helpers
 do: a ceremony that did not happen is `{ ok: false, reason }` (`unsupported`; `no-credential` when
-the person dismissed the sheet or had nothing to offer; `error`), and the server declining rejects the promise, as `completeMfaWithPasskey`
-does — 401 `MfaVerificationFailedError` for an unmarked passkey or one used without user
-verification, 429 `SECOND_FACTOR_LOCKED`.
+the person dismissed the sheet or had nothing to offer; `error`), and the server declining rejects
+the promise, as `completeMfaWithPasskey` does — 401 `MfaVerificationFailedError` for an unmarked
+passkey or one used without user verification, 429 `SECOND_FACTOR_LOCKED`. A 503 is neither: the
+account was busy with another change and the assertion's challenge was not spent, so it answers
+`{ ok: false, reason: 'busy' }`, as `renewSession` does — call it again. An app route that takes
+the proof itself gets the assertion from `stepUpAssertion(api)`
+([below](#wrong-proofs-one-budget-per-account)).
 
 ```typescript
 import { stepUpWithPasskey } from '@spfn/auth/client';
@@ -3883,6 +3887,27 @@ await runInTransaction(async () =>
     }
     // ...what the proof authorizes
 });
+```
+
+From a browser, `stepUpAssertion(api)` from `@spfn/auth/client` gets that `response`: it asks
+`mfa/step-up/options` and runs the ceremony, posts nothing, and answers
+`{ ok: true, response }` or the failures `stepUpWithPasskey` has (`unsupported`, `no-credential`
+for a dismissed sheet, `error`). The assertion is spent once, by whichever of `mfa/step-up` or
+the app's `checkSecondFactorProof(userId, { response }, { kind: 'stepUp', credential })` and
+`spend()` runs first; only the session that asked for it can spend it — `credential` is that
+session's, from `getAuth(c)`. It is **not tied to an action**: what it authorizes is the app
+route's to decide, and nothing stops the same session spending it on another route of the app's
+that takes one. Under a policy that does not list passkeys it counts as a wrong proof.
+
+```typescript
+import { stepUpAssertion } from '@spfn/auth/client';
+
+const proof = await stepUpAssertion(authApi);
+
+if (proof.ok)
+{
+    await appApi.exportData.call({ body: { response: proof.response } });   // the route above
+}
 ```
 
 #### What a passkey proves

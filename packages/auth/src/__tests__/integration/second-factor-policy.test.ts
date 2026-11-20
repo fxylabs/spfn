@@ -3,8 +3,9 @@
  *
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
- * RV-D and the recovery-code generation — D2 of #329, and SU1–SU3 of #372
- * (a marking registration records a step-up), named for its row. The boot
+ * RV-D and the recovery-code generation — D2 of #329, SU1–SU3 of #372
+ * (a marking registration records a step-up) and SU4 of #393 (one spend of a
+ * step-up assertion across its two consumers), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -49,7 +50,7 @@ import {
     users,
 } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
-import { mfaEnrolmentRepository } from '@/server/repositories';
+import { mfaEnrolmentRepository, usersRepository } from '@/server/repositories';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authLoginEvent, passkeyRevokedEvent } from '@/server/events';
@@ -72,7 +73,8 @@ const { opsTokenAuth, requireOpsScope } = await import('@/server/middleware/ops-
 const { getAuth, getOptionalAuth } = await import('@/server/helpers/context');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { disableMfaService, resetSecondFactorService } = await import('@/server/services/mfa.service');
+const { checkSecondFactorProof, disableMfaService, resetSecondFactorService } = await import('@/server/services/mfa.service');
+const { runInTransaction } = await import('@spfn/core/db');
 const { NotFoundError } = await import('@spfn/core/errors');
 const { issueOpsTokenService } = await import('@/server/services/ops-token.service');
 const { verifyAccessToken } = await import('@/server/services/oauth2-access-token.service');
@@ -1553,5 +1555,49 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(changed.status, await changed.clone().text()).toBe(204);
         const [row] = await getTestDb().select().from(users).where(eq(users.id, userId));
         expect(row!.passwordChangeRequired).toBe(false);
+    });
+
+    // ========================================================================
+    // #393 — a step-up assertion is spent once, by either consumer
+    // ========================================================================
+
+    /** A step-up assertion for this session, not posted anywhere. */
+    async function stepUpAssertionFor(session: Session, authenticator: FixtureAuthenticator, counter: number)
+    {
+        const options = await post('/_auth/mfa/step-up/options', {}, session.authorization);
+
+        return authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter });
+    }
+
+    /** The app route's way: `checkSecondFactorProof` outside a transaction, `spend()` under the account lock. */
+    async function spendInApp(session: Session, response: unknown): Promise<boolean>
+    {
+        const proof = await checkSecondFactorProof(
+            userId,
+            { response: response as never },
+            { kind: 'stepUp', credential: { kind: 'deviceKey', keyId: session.keyId } },
+        );
+
+        return await runInTransaction(async () =>
+        {
+            await usersRepository.lockAccount(userId);
+
+            return await proof.spend();
+        });
+    }
+
+    it('SU4: one step-up assertion is spent once — by the app\'s checkSecondFactorProof or by mfa/step-up, whichever runs first', async () =>
+    {
+        // Counter 0 throughout, as synced passkeys report: no counter refuses
+        // the replay, so the spent challenge is all that does.
+        const { session, authenticator } = await passkeyEnrolledAccount();
+
+        const appFirst = await stepUpAssertionFor(session, authenticator, 0);
+        expect(await spendInApp(session, appFirst)).toBe(true);
+        expect((await post('/_auth/mfa/step-up', { response: appFirst }, session.authorization)).status).toBe(401);
+
+        const routeFirst = await stepUpAssertionFor(session, authenticator, 0);
+        expect((await post('/_auth/mfa/step-up', { response: routeFirst }, session.authorization)).status).toBe(204);
+        await expect(spendInApp(session, routeFirst)).rejects.toMatchObject({ name: 'MfaVerificationFailedError' });
     });
 });

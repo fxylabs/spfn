@@ -10,7 +10,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { enrollPasskey, isConditionalMediationAvailable, isPasskeySupported, renewSession, signInWithPasskey } from '@/client/passkeys';
+import {
+    enrollPasskey,
+    isConditionalMediationAvailable,
+    isPasskeySupported,
+    renewSession,
+    signInWithPasskey,
+    stepUpAssertion,
+    stepUpWithPasskey,
+} from '@/client/passkeys';
 import type { AuthApi } from '@/client/passkeys';
 
 const REGISTRATION_OPTIONS = {
@@ -340,6 +348,92 @@ describe('browser passkey helpers', () =>
 
             expect(await renewSession(api)).toEqual({ ok: false, reason: 'unsupported' });
             expect(api.sessionRenewOptions.call).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('step-up (#393)', () =>
+    {
+        /** The two step-up calls, `mfa/step-up` answering 204 unless told otherwise. */
+        function stepUpApi(stepUp = vi.fn().mockResolvedValue(undefined))
+        {
+            return apiStub({
+                mfaStepUpOptions: { call: vi.fn().mockResolvedValue(AUTHENTICATION_OPTIONS) },
+                mfaStepUp: { call: stepUp },
+            });
+        }
+
+        function assertionCredential(): void
+        {
+            get.mockResolvedValue(credentialStub({
+                authenticatorData: new Uint8Array([8]).buffer,
+                signature: new Uint8Array([9]).buffer,
+                userHandle: null,
+            }));
+        }
+
+        it('S1: stepUpAssertion asks the options with an empty body and hands the assertion back, never posting it', async () =>
+        {
+            // Posting it would spend the challenge, and the app's own
+            // checkSecondFactorProof would answer 401 — in production only.
+            assertionCredential();
+            const api = stepUpApi();
+
+            const result = await stepUpAssertion(api);
+
+            expect(api.mfaStepUpOptions.call).toHaveBeenCalledWith({ body: {} });
+            expect(result).toMatchObject({ ok: true, response: { id: 'Y3JlZA', type: 'public-key' } });
+            expect(api.mfaStepUp.call).not.toHaveBeenCalled();
+        });
+
+        it('S2: a dismissed prompt is no-credential, not a thrown error', async () =>
+        {
+            get.mockRejectedValue(notAllowed());
+
+            expect(await stepUpAssertion(stepUpApi())).toMatchObject({ ok: false, reason: 'no-credential' });
+        });
+
+        it('S2: a browser with no WebAuthn at all: unsupported, answered before the server is asked', async () =>
+        {
+            stubBrowser({ supported: false });
+            const api = stepUpApi();
+
+            expect(await stepUpAssertion(api)).toEqual({ ok: false, reason: 'unsupported' });
+            expect(api.mfaStepUpOptions.call).not.toHaveBeenCalled();
+        });
+
+        it('S4: stepUpWithPasskey posts the assertion to mfa/step-up and answers ok', async () =>
+        {
+            assertionCredential();
+            const api = stepUpApi();
+
+            expect(await stepUpWithPasskey(api)).toEqual({ ok: true });
+            expect(api.mfaStepUp.call).toHaveBeenCalledTimes(1);
+        });
+
+        it('S4: a 503 (AccountBusyError) from mfa/step-up is busy, not a refusal', async () =>
+        {
+            assertionCredential();
+            const busy = Object.assign(new Error('Another change to this account is in progress. Try again.'), { statusCode: 503 });
+
+            expect(await stepUpWithPasskey(stepUpApi(vi.fn().mockRejectedValue(busy))))
+                .toEqual({ ok: false, reason: 'busy', error: busy });
+        });
+
+        it('S4: any other refusal stays a rejected promise', async () =>
+        {
+            assertionCredential();
+            const refused = Object.assign(new Error('refused'), { statusCode: 401 });
+
+            await expect(stepUpWithPasskey(stepUpApi(vi.fn().mockRejectedValue(refused)))).rejects.toBe(refused);
+        });
+
+        it('S4: a dismissed prompt in stepUpWithPasskey posts nothing', async () =>
+        {
+            get.mockRejectedValue(notAllowed());
+            const api = stepUpApi();
+
+            expect(await stepUpWithPasskey(api)).toMatchObject({ ok: false, reason: 'no-credential' });
+            expect(api.mfaStepUp.call).not.toHaveBeenCalled();
         });
     });
 });

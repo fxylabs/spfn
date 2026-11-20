@@ -1148,7 +1148,10 @@ calling device within `SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10) before changi
 password, signing every device out, or changing the second factor itself. Otherwise the answer
 is **403 `STEP_UP_REQUIRED`** and the remedy is `POST /_auth/mfa/step-up` followed by a retry —
 from a browser with a passkey, `stepUpWithPasskey(api)` from `@spfn/auth/client`, which answers a
-`PasskeyResult` and rejects on a server refusal as `completeMfaWithPasskey` does. An account with
+`PasskeyResult` (`busy` on a 503) and rejects on a server refusal as `completeMfaWithPasskey` does.
+An app route that checks the proof itself (`checkSecondFactorProof`) takes the assertion from
+`stepUpAssertion(api)`, which runs the ceremony and posts nothing; it is spent once, by whichever
+consumer runs first. An account with
 nothing enrolled never sees it. Registering the first passkey factor under a required policy opens
 the window as well; no other registration does.
 
