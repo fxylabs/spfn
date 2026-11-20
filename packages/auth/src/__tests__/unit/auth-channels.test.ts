@@ -7,7 +7,8 @@
  * constructor. The route rows C2–C12 are in integration/auth-channels.test.ts.
  *
  * #381 adds `invitations` and `selfDeletion`: U2 pins which routes they close,
- * B1 the boot refusal beside `deletion.allowSelfImmediate`.
+ * B1 the boot refusal beside `deletion.allowSelfImmediate`, and B2 that refusal
+ * when two `createAuthLifecycle()` calls each state one half, in either order.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -25,7 +26,7 @@ import {
     requireChannel,
     type AuthChannelsOptions,
 } from '@/server/lib/channels-config';
-import { configureDeletion } from '@/server/lib/deletion-config';
+import { __resetDeletionForTests } from '@/server/lib/deletion-config';
 import { createAuthLifecycle } from '@/server/lifecycle';
 import { AUTH_SURFACE_OPERATIONS } from '@/server/client-proof/contract-types';
 
@@ -34,7 +35,7 @@ describe('channels (#308)', () =>
     afterEach(() =>
     {
         __resetChannelsForTests();
-        configureDeletion();
+        __resetDeletionForTests();
     });
 
     it('C13: every key of mainAuthRouter is in the classification table', () =>
@@ -128,6 +129,18 @@ describe('channels (#308)', () =>
         const lifecycle = createAuthLifecycle({ channels: { selfDeletion: false }, deletion: { allowSelfImmediate: true } });
 
         await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/allowSelfImmediate is true, but the selfDeletion channel is off/);
+    });
+
+    it.each([
+        ['deletion first', { deletion: { allowSelfImmediate: true } }, { channels: { selfDeletion: false } }],
+        ['channels first', { channels: { selfDeletion: false } }, { deletion: { allowSelfImmediate: true } }],
+    ] as const)('#381 B2: the two halves stated by two lifecycles refuse boot, %s, from either lifecycle\'s afterInfrastructure', async (_order, first, second) =>
+    {
+        const firstLifecycle = createAuthLifecycle(first);
+        const secondLifecycle = createAuthLifecycle(second);
+
+        await expect(firstLifecycle.afterInfrastructure!()).rejects.toThrow(/allowSelfImmediate is true, but the selfDeletion channel is off/);
+        await expect(secondLifecycle.afterInfrastructure!()).rejects.toThrow(/allowSelfImmediate is true, but the selfDeletion channel is off/);
     });
 
     it('refuses a key that is not a channel, and a value that is not a boolean', () =>
