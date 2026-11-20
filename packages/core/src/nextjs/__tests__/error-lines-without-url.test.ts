@@ -4,11 +4,14 @@
  * A GET call carries its params, query and body in the URL — the client puts
  * the whole input in `?input=`, the proxy forwards the query to the backend —
  * and these lines are written at error level, so a token in the query reached
- * every deployment's log. The debug lines dropped the URL too.
+ * every deployment's log. The debug lines dropped the URL too, and name the
+ * route's pattern rather than its filled path: the proxy cannot know which of
+ * the server's paths are declared redacted.
  *
  * | #   | situation                                                       | goes unnoticed without the row                    |
  * | --- | --------------------------------------------------------------- | ------------------------------------------------- |
  * | T14 | client timeout and network error, proxy timeout and fetch error, with debug on | a query token in an error-level line           |
+ * | T14c | a path param, debug on, an interceptor matching the route      | the filled path in `→ RPC request` or the interceptor-match line |
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -98,6 +101,31 @@ describe('Next.js failure lines without the URL', () =>
             ['Request timeout', 'getImport'],
             ['Fetch error', 'getImport'],
         ]);
+        expect(output()).not.toContain(SECRET);
+    });
+
+    it('T14c: the proxy\'s debug lines name the route pattern, not the path its params fill in', async () =>
+    {
+        const { lines, output } = captureLoggerClass(Logger);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } })));
+
+        const { GET } = createRpcProxy({
+            routeMap: { redeemImport: { method: 'GET', path: '/api/import/:token' } },
+            apiUrl: 'http://backend.test',
+            autoDiscoverInterceptors: false,
+            interceptors: [{ pathPattern: '/api/import/*', method: 'GET', request: async () => undefined }],
+            debug: true,
+        });
+        const input = encodeURIComponent(JSON.stringify({ params: { token: SECRET } }));
+        await GET(new NextRequest(`http://localhost:3000/api/rpc/redeemImport?input=${input}`),
+            { params: Promise.resolve({ routeName: 'redeemImport' }) });
+
+        const debug = lines.filter(line => line.level === 'debug');
+        expect(debug.find(line => line.message === '→ RPC request')?.context).toMatchObject({
+            routeName: 'redeemImport',
+            targetPath: '/api/import/:token',
+        });
+        expect(debug.map(line => line.message)).toContain('Found 1 matching interceptors for GET /api/import/:token');
         expect(output()).not.toContain(SECRET);
     });
 });

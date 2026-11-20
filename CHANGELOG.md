@@ -253,9 +253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body — and the proxy's target URL the forwarded query, and the lines are written at error level.
   The client's `Request timeout` and `Network error` lines drop `url` (they keep `route`, `method`
   and `timeout`); the proxy's `Request timeout` and `Fetch error` lines drop `targetUrl` (they keep
-  `routeName`). The debug lines `→ Request` (client) and `→ RPC request` (proxy) drop them too;
-  the proxy's still names `targetPath`, the path with its params filled in. A log query on those
-  fields needs `route` / `routeName` instead. `ApiError.url` is unchanged.
+  `routeName`). The debug lines `→ Request` (client) and `→ RPC request` (proxy) drop them too. A
+  log query on those fields needs `route` / `routeName` instead. `ApiError.url` is unchanged. The
+  proxy's two debug lines that named the path with its params filled in — `→ RPC request`'s
+  `targetPath` and `Found N matching interceptors for <method> <path>` — name the route's pattern
+  (`/api/import/:token`) and `routeName` instead: the proxy cannot know which of the server's
+  paths `logging.redactPaths` declares, so it writes no param value at any level.
 - **BREAKING: @spfn/core: `RequestLogger`'s `excludePaths` matches the decoded path the router
   serves (spfn/spfn#164).** It matched the undecoded URL path, so `/api/%69mport/x` was served by
   `/api/import/:token` and logged despite `excludePaths: ['/api/import']`. Percent-encoded spellings

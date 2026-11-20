@@ -373,6 +373,10 @@ rate limiting, and the transaction context of `Transactional()`.
 What it does not cover:
 
 - A proxy, load balancer or CDN in front of the server logs the path on its own.
+- The Next.js RPC proxy runs in another process and cannot read this declaration, so none of its
+  lines carries a param value: its debug lines `→ RPC request` (`targetPath`) and
+  `Found N matching interceptors for <method> <path>` name the route's pattern
+  (`/api/import/:token`) and `routeName`, not the path the params fill in.
 - `@spfn/auth`'s log lines (its `API access` line and its warnings) read the path themselves
   until it moves to `loggedPath`.
 - Prefer a request body over a path segment for a token where you can: a body reaches no
