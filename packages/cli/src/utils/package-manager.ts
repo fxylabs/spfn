@@ -384,21 +384,60 @@ export function getRunScriptArgs(pm: PackageManager, script: string, args: strin
         : ['run', script, ...args];
 }
 
-/**
- * Arguments for `npx`, the one runner of a package the CLI launches without
- * installing it (create-next-app, shadcn, `spfn` itself in a hint), whatever
- * the app's manager. yarn 1 has no `dlx` (`yarn dlx` runs a script named
- * `dlx`), and npx ships with the Node the CLI runs on. `--yes` lets npx fetch
- * the package without asking. The app's manager still does the installing:
- * create-next-app takes it as `--use-<pm>`, shadcn reads it from the lockfile.
- */
-export function getOneOffArgs(spec: string, args: string[]): string[]
+/** A command and its arguments, as execa takes them. */
+export interface CommandLine
 {
-    return ['--yes', spec, ...args];
+    command: string;
+    args: string[];
 }
 
-/** The command line `getOneOffArgs` stands for, for a hint to the user. */
-export function getOneOffCommand(spec: string, args: string[]): string
+/** Whether the yarn that answers in `cwd` has `dlx`. */
+export type YarnDlxProbe = (cwd: string) => Promise<boolean>;
+
+/**
+ * How the CLI runs a package without installing it (create-next-app, shadcn)
+ * for an app that installs with `pm`, in `cwd`.
+ *
+ * yarn keeps `yarn dlx` where it exists: with corepack that is Yarn 4 (`dlx`
+ * is one of corepack's transparent commands, so it gets Yarn 4 outside a
+ * project although `yarn --version` there says 1.x), and the app comes out a
+ * Yarn 4 app. yarn 1 has no `dlx` (`yarn dlx` runs a script named `dlx`), so
+ * there, and for every other manager, `npx --yes` runs the package. The app's
+ * manager still installs: create-next-app takes it as `--use-<pm>`, shadcn
+ * reads it from the lockfile.
+ */
+export async function getOneOffCommandLine(
+    pm: PackageManager,
+    cwd: string,
+    spec: string,
+    args: string[],
+    yarnHasDlx: YarnDlxProbe = hasYarnDlx,
+): Promise<CommandLine>
 {
-    return ['npx', ...getOneOffArgs(spec, args)].join(' ');
+    if (pm === 'yarn' && await yarnHasDlx(cwd))
+    {
+        return { command: 'yarn', args: ['dlx', spec, ...args] };
+    }
+
+    return { command: 'npx', args: ['--yes', spec, ...args] };
+}
+
+/**
+ * Asks yarn itself, in `cwd`, through the very `yarn dlx` the CLI would run:
+ * the yarn on PATH, corepack's transparent-command rule, an ancestor's
+ * `packageManager` pin and a `yarnPath` all decide this call as they decide
+ * the real one. Yarn 2+ prints the usage of `dlx` and exits 0; yarn 1 runs a
+ * script named `dlx`, which fails, and no yarn at all fails to spawn.
+ */
+export async function hasYarnDlx(cwd: string): Promise<boolean>
+{
+    const { exitCode, stdout } = await execa('yarn', ['dlx', '--help'], { cwd, reject: false });
+
+    return exitCode === 0 && stdout.includes('yarn dlx');
+}
+
+/** `commandLine` as the user would type it, for a hint. */
+export function formatCommandLine({ command, args }: CommandLine): string
+{
+    return [command, ...args].join(' ');
 }

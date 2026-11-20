@@ -111,9 +111,11 @@ Runs `create-next-app` with SPFN-recommended flags (TypeScript, App Router, `src
 Tailwind, import alias `@/*`, no ESLint), sets up SVGR icons, then runs `init`.
 
 `--pm` picks the manager that installs the app's dependencies. The one-off packages `create`
-launches — `create-next-app`, and `shadcn` with `--shadcn` — always run through `npx --yes`,
-whatever the manager: yarn 1 has no `dlx`, and npx comes with Node. create-next-app is told the
-manager with `--use-<pm>`, and shadcn reads it from the lockfile.
+launches — `create-next-app`, and `shadcn` with `--shadcn` — run through `yarn dlx` when `--pm yarn`
+and the yarn that answers in that directory has `dlx` (yarn 2+, which is what corepack gives
+`yarn dlx`, so the app is a Yarn 4 app as before). yarn 1 has no `dlx`, so there, and for npm, pnpm
+and bun, they run through `npx --yes`. npx comes with Node. create-next-app is told the manager with `--use-<pm>`, and shadcn reads it
+from the lockfile.
 
 Choose `full` for the recommended Prototype-to-Production baseline or `bare` for the
 historical core-only skeleton. Without `--mode`, interactive runs show a mode selector

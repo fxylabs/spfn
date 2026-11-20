@@ -36,14 +36,22 @@ import { NPM_ERESOLVE_DRIZZLE_TYPEBOX } from '../../utils/__tests__/fixtures/npm
 
 const originalCwd = process.cwd();
 let repository: string;
+/** Whether the yarn the fake answers for has `dlx` (yarn 2+) or not (yarn 1). */
+let yarnHasDlx: boolean;
 
 /**
- * Stands in for every process create starts: create-next-app writes the app's
+ * Stands in for every process create starts: yarn answers whether it has
+ * `dlx` as `yarnHasDlx` says; create-next-app writes the app's
  * package.json; an install puts each package `cwd` declares under
  * `cwd/node_modules`, and at the workspace root those of each member too.
  */
-function fakeProcess(_command: string, args: string[], { cwd }: { cwd: string }): void
+function fakeProcess(command: string, args: string[], { cwd }: { cwd: string }): { exitCode: number; stdout: string } | void
 {
+    if (command === 'yarn' && args.join(' ') === 'dlx --help')
+    {
+        return yarnHasDlx ? { exitCode: 0, stdout: '$ yarn dlx <command> ...' } : { exitCode: 1, stdout: 'yarn run v1.22.22' };
+    }
+
     if (args.some(arg => arg.startsWith('create-next-app')))
     {
         mkdirSync(join(cwd, 'app'));
@@ -79,6 +87,7 @@ beforeEach(() =>
     writeFileSync(join(repository, 'pnpm-lock.yaml'), '');
     writeFileSync(join(repository, 'package.json'), '{}');
     mocks.execa.mockImplementation(fakeProcess);
+    yarnHasDlx = false;
 
     // Commander keeps a parse's option values for the next one: `--pm` included.
     Object.keys(createCommand.opts()).forEach(key => createCommand.setOptionValue(key, undefined));
@@ -211,29 +220,48 @@ describe('an npm install that npm refuses over drizzle-typebox (npm 10.9.9 outpu
     });
 });
 
-describe('spfn create launches its one-off packages through npx for every manager', () =>
+describe('spfn create launches its one-off packages with yarn dlx where yarn has it, else with npx', () =>
 {
-    /** The call that started the one-off package `spec`. */
-    function oneOffCall(spec: string): unknown[] | undefined
+    /** The command and arguments that started the one-off package `spec`. */
+    function oneOffCall(spec: string): [string, string[]]
     {
-        return mocks.execa.mock.calls.find(([, args]) => args.includes(spec));
+        return mocks.execa.mock.calls.find(([, args]) => args.includes(spec))!.slice(0, 2) as [string, string[]];
     }
 
-    it.each(['npm', 'pnpm', 'yarn', 'bun'])('runs create-next-app with npx --yes, installing with %s', async pm =>
+    const runners: [string, boolean, string, string[]][] = [
+        ['npm', true, 'npx', ['--yes']],
+        ['pnpm', true, 'npx', ['--yes']],
+        ['bun', true, 'npx', ['--yes']],
+        ['yarn', false, 'npx', ['--yes']],
+        ['yarn', true, 'yarn', ['dlx']],
+    ];
+
+    it.each(runners)('runs create-next-app for %s (yarn has dlx: %s) with %s %s', async (pm, hasDlx, command, runnerArgs) =>
     {
+        yarnHasDlx = hasDlx;
         await createFrom(join(repository, 'scratch'), ['--pm', pm]);
 
-        const [command, args] = oneOffCall('create-next-app@latest')!;
+        const [called, args] = oneOffCall('create-next-app@latest');
 
-        expect(command).toBe('npx');
-        expect((args as string[]).slice(0, 3)).toEqual(['--yes', 'create-next-app@latest', 'app']);
+        expect(called).toBe(command);
+        expect(args.slice(0, runnerArgs.length + 2)).toEqual([...runnerArgs, 'create-next-app@latest', 'app']);
         expect(args).toContain(`--use-${pm}`);
     });
 
-    it.each(['npm', 'pnpm', 'yarn', 'bun'])('runs shadcn with npx --yes when the app installs with %s', async pm =>
+    it.each(runners)('runs shadcn for %s (yarn has dlx: %s) with %s %s', async (pm, hasDlx, command, runnerArgs) =>
     {
+        yarnHasDlx = hasDlx;
         await createFrom(join(repository, 'scratch'), ['--pm', pm, '--shadcn']);
 
-        expect(oneOffCall('shadcn@latest')!.slice(0, 2)).toEqual(['npx', ['--yes', 'shadcn@latest', 'init', '--yes', '--defaults']]);
+        expect(oneOffCall('shadcn@latest')).toEqual([command, [...runnerArgs, 'shadcn@latest', 'init', '--yes', '--defaults']]);
+    });
+
+    it('asks yarn in the directory each one-off package will run in', async () =>
+    {
+        yarnHasDlx = true;
+        const app = await createFrom(join(repository, 'scratch'), ['--pm', 'yarn', '--shadcn']);
+        const probes = mocks.execa.mock.calls.filter(([command, args]) => command === 'yarn' && args[0] === 'dlx' && args[1] === '--help');
+
+        expect(probes.map(([, , options]) => options.cwd)).toEqual([join(repository, 'scratch'), app]);
     });
 });

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,7 +18,9 @@ import {
     findUnresolvedPackages,
     findWorkspace,
     getAddArgs,
+    getOneOffCommandLine,
     getRunScriptArgs,
+    hasYarnDlx,
     pnpmNonMemberReason,
 } from '../package-manager.js';
 
@@ -396,5 +398,82 @@ describe('pnpmNonMemberReason', () =>
         const root = makeRepository({ 'app/pnpm-workspace.yaml': 'onlyBuiltDependencies:\n  - sharp\n' });
 
         expect(pnpmNonMemberReason(join(root, 'app'))).toBeNull();
+    });
+});
+
+describe('getOneOffCommandLine', () =>
+{
+    it.each(['npm', 'pnpm', 'bun'] as const)('runs the package with npx --yes for %s, without asking yarn', async pm =>
+    {
+        const probe = vi.fn(async () => true);
+
+        expect(await getOneOffCommandLine(pm, '/app', 'shadcn@latest', ['init'], probe))
+            .toEqual({ command: 'npx', args: ['--yes', 'shadcn@latest', 'init'] });
+        expect(probe).not.toHaveBeenCalled();
+    });
+
+    it('runs the package with yarn dlx when the yarn in the directory has dlx', async () =>
+    {
+        const probe = vi.fn(async () => true);
+
+        expect(await getOneOffCommandLine('yarn', '/app', 'shadcn@latest', ['init'], probe))
+            .toEqual({ command: 'yarn', args: ['dlx', 'shadcn@latest', 'init'] });
+        expect(probe).toHaveBeenCalledWith('/app');
+    });
+
+    it('runs the package with npx --yes when the yarn in the directory has no dlx (yarn 1)', async () =>
+    {
+        expect(await getOneOffCommandLine('yarn', '/app', 'shadcn@latest', ['init'], async () => false))
+            .toEqual({ command: 'npx', args: ['--yes', 'shadcn@latest', 'init'] });
+    });
+});
+
+describe('hasYarnDlx', () =>
+{
+    const originalPath = process.env.PATH;
+    let bin: string;
+
+    /** Puts on PATH a `yarn` that prints `output` and exits with `code`. */
+    function fakeYarn(output: string, code: number): void
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        writeFileSync(join(bin, 'yarn'), `#!/bin/sh\nprintf '%s\\n' '${output}'\nexit ${code}\n`);
+        chmodSync(join(bin, 'yarn'), 0o755);
+        process.env.PATH = bin;
+    }
+
+    afterEach(() =>
+    {
+        process.env.PATH = originalPath;
+        rmSync(bin, { recursive: true, force: true });
+    });
+
+    it('says yes for yarn 2+, which prints the usage of dlx and exits 0', async () =>
+    {
+        fakeYarn('$ yarn dlx <command> ...', 0);
+
+        expect(await hasYarnDlx(tmpdir())).toBe(true);
+    });
+
+    it('says no for yarn 1, whose `yarn dlx` looks for a dlx script and fails', async () =>
+    {
+        fakeYarn('error Command "dlx" not found.', 1);
+
+        expect(await hasYarnDlx(tmpdir())).toBe(false);
+    });
+
+    it('says no for yarn 1 running a project\'s own `dlx` script that exits 0', async () =>
+    {
+        fakeYarn('yarn run v1.22.22', 0);
+
+        expect(await hasYarnDlx(tmpdir())).toBe(false);
+    });
+
+    it('says no when there is no yarn at all', async () =>
+    {
+        bin = mkdtempSync(join(tmpdir(), 'spfn-yarn-'));
+        process.env.PATH = bin;
+
+        expect(await hasYarnDlx(tmpdir())).toBe(false);
     });
 });
