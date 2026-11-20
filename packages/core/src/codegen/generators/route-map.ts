@@ -839,7 +839,7 @@ export function createRouteMapGenerator(config: RouteMapGeneratorConfig): Genera
                 cwd,
                 reads,
                 baseline: collection,
-                collect: async () => collectRouteMap((await loadRouter({ cwd, absoluteRouterPath, variation: true })).router),
+                collect: async () => collectRouteMap((await loadRouter({ cwd, absoluteRouterPath })).router),
                 render: generateRouteMapContent,
                 describe: describeRouteMapChanges,
                 subject: 'route map',

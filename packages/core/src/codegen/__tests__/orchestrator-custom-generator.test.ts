@@ -70,6 +70,12 @@ describe('Orchestrator - Custom Generator (futureplay scenario)', () =>
                     if (event === 'change') changeHandler = handler;
                     if (event === 'unlink') unlinkHandler = handler;
 
+                    // Watch mode runs its initial generation on chokidar's `ready`.
+                    if (event === 'ready')
+                    {
+                        queueMicrotask(() => handler(''));
+                    }
+
                     return mockWatcher;
                 }),
                 close: vi.fn(),
@@ -159,6 +165,12 @@ describe('Orchestrator - Custom Generator (futureplay scenario)', () =>
                     if (event === 'change')
                     {
                         changeHandler = handler;
+                    }
+
+                    // Watch mode runs its initial generation on chokidar's `ready`.
+                    if (event === 'ready')
+                    {
+                        queueMicrotask(() => handler(''));
                     }
 
                     return mockWatcher;

@@ -1,11 +1,12 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, rmSync, watch } from 'fs';
-import { join, relative, sep } from 'path';
+import { dirname, join, relative, sep } from 'path';
+import { fileURLToPath } from 'url';
 import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
-import { detectPackageManager, getRunScriptArgs } from '../utils/package-manager.js';
+import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 import { loadAppConfig, resolvePorts, resolveHost } from '@spfn/core/app-config';
 
@@ -69,6 +70,7 @@ export function watcherEntrySource(): string
 //     pool: { max: 3 }  // Watcher needs fewer connections than server
 // });
 
+import { constants } from 'node:os';
 import { CodegenOrchestrator, loadCodegenConfig, createGeneratorsFromConfig, markCodegenProcess } from '@spfn/core/codegen';
 
 // Started by the spfn CLI to generate code: a second copy of @spfn/core after a
@@ -96,22 +98,28 @@ const orchestrator = new CodegenOrchestrator({
     debug: true
 });
 
-// Setup graceful shutdown
-const cleanup = async () =>
+// The first signal: close() starts no new generation and resolves once the one
+// running has finished every generator, so the files of one cycle (route map,
+// contract) are never left from two different generations; then exit. A
+// generation cannot be cancelled, so a second signal exits at once: it is the
+// only way to stop one that never settles.
+let stopping = false;
+
+const stop = async (signal) =>
 {
+    if (stopping)
+    {
+        process.exit(128 + constants.signals[signal]);
+    }
+
+    stopping = true;
+    console.log('[SPFN] Codegen watcher stopping once the running generation finishes (signal again to exit now)');
     await orchestrator.close();
+    process.exit(0);
 };
 
-process.on('SIGTERM', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
-process.on('SIGINT', async () =>
-{
-    await cleanup();
-    process.exit(0);
-});
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
 
 // Start watching - this will run indefinitely until the watcher is closed
 try
@@ -142,8 +150,8 @@ function devLoader(cwd: string): string
 }
 
 /**
- * The command that runs a generated entry under the app's tsx, with the dev
- * module hook registered first.
+ * The command that runs the server entry under the app's tsx, through the
+ * package manager, with the dev module hook registered first.
  */
 function tsxCommand(pm: string, cwd: string, entry: string): { command: string; args: string[] }
 {
@@ -152,6 +160,154 @@ function tsxCommand(pm: string, cwd: string, entry: string): { command: string; 
     return pm === 'npm'
         ? { command: 'npx', args: tsxArgs }
         : { command: pm, args: ['exec', ...tsxArgs] };
+}
+
+/**
+ * Start the codegen watcher entry: a tsx CLI run by this Node, never through
+ * the package manager. `spfn dev` forwards its signals to the watcher and waits
+ * for it to exit (`DevChildren`), and neither wrapper lets it: `pnpm exec`
+ * forwards SIGTERM and exits at once, `npx` exits without forwarding it, and
+ * the watcher is orphaned. tsx relays each signal to the entry and exits when
+ * it does. With no tsx to run (`resolveTsxCli`), the watcher is not started:
+ * the session goes on without it, as when the watcher exits with an error.
+ * Returns the watcher process, or null when none was started.
+ */
+function startCodegenWatcher(pm: PackageManager, cwd: string, entry: string, env: NodeJS.ProcessEnv, stopping: () => boolean): ExecaChildProcess | null
+{
+    const tsxCli = resolveTsxCli(cwd);
+
+    if (tsxCli === undefined)
+    {
+        logger.error(`[SPFN] Codegen watcher not started: no tsx is installed for the app or for the spfn CLI. Install it in the app: ${getAddCommand(pm, ['-D', 'tsx'])}`);
+        warnCodegenWatchDisabled();
+
+        return null;
+    }
+
+    const watcher = execa(process.execPath, [tsxCli, '--import', devLoader(cwd), entry], { cwd, stdio: 'inherit', reject: false, env });
+
+    watcher.then((result) =>
+    {
+        if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
+        {
+            logger.error(`Codegen watcher exited with code ${result.exitCode}`);
+            warnCodegenWatchDisabled();
+        }
+    });
+
+    return watcher;
+}
+
+function warnCodegenWatchDisabled(): void
+{
+    logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
+}
+
+/**
+ * The tsx CLI the watcher runs under: the app's, else the one installed for
+ * the spfn CLI itself (the tsx `bin/spfn.js` re-spawns under), else undefined.
+ */
+function resolveTsxCli(cwd: string): string | undefined
+{
+    return tsxCliFrom(cwd) ?? tsxCliFrom(dirname(fileURLToPath(import.meta.url)));
+}
+
+/**
+ * The bin of the tsx in the nearest `node_modules` on the way up from `from`:
+ * Node's lookup of a package without `NODE_PATH`. Package-manager shims (a
+ * pnpm bin script, npx) point `NODE_PATH` at their store, which would hand the
+ * watcher a tsx nothing on that path declares.
+ */
+function tsxCliFrom(from: string): string | undefined
+{
+    let directory = from;
+
+    while (!existsSync(join(directory, 'node_modules/tsx/package.json')))
+    {
+        if (dirname(directory) === directory)
+        {
+            return undefined;
+        }
+
+        directory = dirname(directory);
+    }
+
+    const tsxDir = join(directory, 'node_modules/tsx');
+    const { bin } = JSON.parse(readFileSync(join(tsxDir, 'package.json'), 'utf-8'));
+
+    return join(tsxDir, typeof bin === 'string' ? bin : bin.tsx);
+}
+
+type DevChildName = 'server' | 'Next.js' | 'codegen watcher';
+
+/**
+ * The children `spfn dev` runs, stopped together on SIGINT and SIGTERM. The
+ * codegen watcher is sent every signal this process receives, and this process
+ * exits only once the watcher has: on the first signal the watcher finishes the
+ * generation running, on a second it exits at once (`watcherEntrySource`).
+ * Exiting before it would leave a watcher writing into the project after
+ * `spfn dev` was stopped. The server and Next.js are sent SIGTERM once and not
+ * waited for: the server's shutdown deadline is core's (`SHUTDOWN_TIMEOUT`),
+ * and it ignores a second signal. No child gets execa's default SIGKILL 5 s
+ * after a SIGTERM: for the watcher it would kill tsx mid-generation and orphan
+ * the entry tsx runs, which a SIGKILL is not relayed to. Nothing forwards a
+ * SIGKILL this process gets.
+ */
+class DevChildren
+{
+    private readonly children = new Map<DevChildName, ExecaChildProcess>();
+    private stopping = false;
+
+    constructor()
+    {
+        process.on('SIGINT', signal => this.stop(signal));
+        process.on('SIGTERM', signal => this.stop(signal));
+    }
+
+    /**
+     * The only way `spfn dev` starts a child: `launch` runs and its child is
+     * registered under `name`, replacing the one before (a restarted server).
+     * Once a stop has begun it says so, starts nothing, and returns null: a
+     * child started after the stop signalled the others would never be signalled.
+     */
+    start(name: DevChildName, launch: () => ExecaChildProcess | null): ExecaChildProcess | null
+    {
+        if (this.stopping)
+        {
+            logger.info(`[SPFN] ${name} not started: spfn dev is stopping`);
+
+            return null;
+        }
+
+        const child = launch();
+
+        if (child)
+        {
+            this.children.set(name, child);
+        }
+
+        return child;
+    }
+
+    /** Whether a stop has begun. */
+    readonly isStopping = (): boolean => this.stopping;
+
+    private async stop(signal: NodeJS.Signals): Promise<void>
+    {
+        const watcher = this.children.get('codegen watcher');
+
+        watcher?.kill(signal, { forceKillAfterTimeout: false });
+
+        if (this.stopping)
+        {
+            return;
+        }
+
+        this.stopping = true;
+        this.children.forEach((child, name) => name !== 'codegen watcher' && child.kill('SIGTERM', { forceKillAfterTimeout: false }));
+        await watcher;
+        process.exit(0);
+    }
 }
 
 /**
@@ -351,29 +507,14 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             logger.info(`Starting SPFN Server on http://${serverHost}:${serverPort}${watchMode ? ' (watch mode)' : ''}\n`);
 
             let serverProcess: ExecaChildProcess | null = null;
-            let watcherProcess: ExecaChildProcess | null = null;
             let isRestarting = false;
+            const children = new DevChildren();
+            const stopping = children.isStopping;
 
             // Start codegen watcher
             const startWatcher = () =>
             {
-                const watcher = tsxCommand(pm, cwd, watcherEntry);
-
-                watcherProcess = execa(watcher.command, watcher.args, {
-                    cwd,
-                    stdio: 'inherit',
-                    reject: false,
-                    env: watcherEnv,
-                });
-
-                watcherProcess.then((result) =>
-                {
-                    if (result.exitCode !== 0 && result.exitCode !== 130)
-                    {
-                        logger.error(`Codegen watcher exited with code ${result.exitCode}`);
-                        logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
-                    }
-                });
+                children.start('codegen watcher', () => startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping));
             };
 
             // Start server process
@@ -381,12 +522,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             {
                 const server = tsxCommand(pm, cwd, serverEntry);
 
-                serverProcess = execa(server.command, server.args, {
+                serverProcess = children.start('server', () => execa(server.command, server.args, {
                     cwd,
                     stdio: 'inherit',
                     reject: false,
                     env: serverEnv,
-                });
+                }));
 
                 // Don't await or catch - let it run independently
             };
@@ -394,7 +535,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             // Restart server
             const restartServer = async () =>
             {
-                if (isRestarting) return;
+                if (isRestarting || stopping()) return;
                 isRestarting = true;
 
                 logger.info('[SPFN] File changed, restarting server...');
@@ -416,6 +557,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 }
 
                 startServer();
+
                 isRestarting = false;
             };
 
@@ -451,23 +593,6 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 });
             }
 
-            // Cleanup on exit
-            const cleanup = async () =>
-            {
-                if (serverProcess)
-                {
-                    serverProcess.kill('SIGTERM');
-                }
-                if (watcherProcess)
-                {
-                    watcherProcess.kill('SIGTERM');
-                }
-                process.exit(0);
-            };
-
-            process.on('SIGINT', cleanup);
-            process.on('SIGTERM', cleanup);
-
             // Start both processes
             startWatcher();
             startServer();
@@ -494,30 +619,14 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         logger.info(`Starting SPFN server + Next.js (Turbopack)${watchMode ? ' (watch mode)' : ''}...\n`);
 
         let serverProcess: ExecaChildProcess | null = null;
-        let watcherProcess: ExecaChildProcess | null = null;
-        let nextProcess: ExecaChildProcess | null = null;
         let isRestarting = false;
+        const children = new DevChildren();
+        const stopping = children.isStopping;
 
         // Start codegen watcher
         const startWatcher = () =>
         {
-            const watcher = tsxCommand(pm, cwd, watcherEntry);
-
-            watcherProcess = execa(watcher.command, watcher.args, {
-                cwd,
-                stdio: 'inherit',
-                reject: false,
-                env: watcherEnv,
-            });
-
-            watcherProcess.then((result) =>
-            {
-                if (result.exitCode !== 0 && result.exitCode !== 130)
-                {
-                    logger.error(`Codegen watcher exited with code ${result.exitCode}`);
-                    logger.warn('[SPFN] Codegen watch is disabled for this session — the server keeps running. Run codegen manually after route changes.');
-                }
-            });
+            children.start('codegen watcher', () => startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping));
         };
 
         // Start Next.js
@@ -531,15 +640,13 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             // forward the separator to next, which then reads `--port` as a directory.
             const nextArgs = getRunScriptArgs(pm, 'spfn:next', ['--port', String(nextPort)]);
 
-            nextProcess = execa(nextCmd, nextArgs, {
+            children.start('Next.js', () => execa(nextCmd, nextArgs, {
                 cwd,
                 stdio: 'inherit',
                 reject: false,
-            });
-
-            nextProcess.then((result) =>
+            }))?.then((result) =>
             {
-                if (result.exitCode !== 0 && result.exitCode !== 130)
+                if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
                 {
                     logger.error(`Next.js exited with code ${result.exitCode}`);
                     process.exit(1);
@@ -552,12 +659,12 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         {
             const server = tsxCommand(pm, cwd, serverEntry);
 
-            serverProcess = execa(server.command, server.args, {
+            serverProcess = children.start('server', () => execa(server.command, server.args, {
                 cwd,
                 stdio: 'inherit',
                 reject: false,
                 env: serverEnv,
-            });
+            }));
 
             // Don't await or catch - let it run independently
         };
@@ -565,7 +672,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         // Restart server
         const restartServer = async () =>
         {
-            if (isRestarting) return;
+            if (isRestarting || stopping()) return;
             isRestarting = true;
 
             logger.info('[SPFN] File changed, restarting server...');
@@ -587,6 +694,7 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
             }
 
             startServer();
+
             isRestarting = false;
         };
 
@@ -621,27 +729,6 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
                 restartServer();
             });
         }
-
-        // Cleanup on exit
-        const cleanup = async () =>
-        {
-            if (serverProcess)
-            {
-                serverProcess.kill('SIGTERM');
-            }
-            if (watcherProcess)
-            {
-                watcherProcess.kill('SIGTERM');
-            }
-            if (nextProcess)
-            {
-                nextProcess.kill('SIGTERM');
-            }
-            process.exit(0);
-        };
-
-        process.on('SIGINT', cleanup);
-        process.on('SIGTERM', cleanup);
 
         // Start all processes — server must be ready before Next.js
         startWatcher();

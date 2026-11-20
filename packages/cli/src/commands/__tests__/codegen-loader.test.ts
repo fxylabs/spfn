@@ -39,11 +39,19 @@
  * |    | contract check` and the watcher entry `spfn dev` writes      | the refusal silently a warning there                      |
  * | R33| the watcher entry with a `.spfnrc.ts` that fails to load     | a watcher that exits while the server runs on, saying     |
  * |    |                                                              | nothing of regeneration being off until a restart         |
+ * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
+ * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
+ * | R35| `spfn dev` with the watcher's generator held by a file gate: | a parent that exits before its watcher (orphaned, writing |
+ * |    | one SIGTERM to it, then the gate opened; then two SIGTERMs   | into the project after spfn dev stopped), or that does    |
+ * |    |                                                              | not forward the second signal                             |
+ * | R35b| R35's single SIGTERM with no tsx in the app's node_modules   | a watcher started through `pnpm exec tsx` / `npx tsx`,    |
+ * |    | (the CLI's own tsx runs it)                                  | which exit at once: the watcher orphaned again            |
  * | R22| the bin, and the tsx child it re-spawns, recording their     | the codegen mark set where the CLI starts, inherited by   |
  * |    | environment at exit                                          | the dev server, `next` and `spfn db` (every descendant)   |
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -202,8 +210,9 @@ beforeEach(() =>
     writeApp();
 });
 
-afterEach(() =>
+afterEach(async () =>
 {
+    await Promise.all(watchers.splice(0).map(watcher => watcher.kill()));
     rmSync(appDir, { recursive: true, force: true });
 });
 
@@ -323,6 +332,182 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
             await watcher.stop();
         }
     });
+
+    it('R34 the watcher entry on a signal: finishes the running generation, then exits; on a second, exits at once', async () =>
+    {
+        // Without the first half, the entry exits mid-generation (the outputs of
+        // one cycle from two generations); without the second, a generation that
+        // never settles leaves the watcher ignoring every signal, orphaned once
+        // spfn dev exits.
+        writeGateGenerator();
+        write('.spfn/watcher.mjs', watcherEntrySource());
+
+        const stopping = 'Codegen watcher stopping once the running generation finishes';
+
+        for (const second of [true, false])
+        {
+            rmSync(join(appDir, 'entered'), { force: true });
+
+            const watcher = startWatcher(tsx);
+
+            try
+            {
+                await watcher.until(() => existsSync(join(appDir, 'entered')));
+                watcher.signal('SIGTERM');
+                await watcher.until(() => watcher.output().includes(stopping));
+
+                if (second)
+                {
+                    watcher.signal('SIGTERM');
+
+                    expect(await watcher.exited).toBe(143);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(false);
+                }
+                else
+                {
+                    write('open', '');
+
+                    expect(await watcher.exited).toBe(0);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(true);
+                }
+            }
+            finally
+            {
+                await watcher.kill();
+            }
+        }
+    });
+
+    it('R35 spfn dev on a signal waits for its watcher: forwards the first and the second, and exits after the watcher', async () =>
+    {
+        // Without it, the parent exits at once and the watcher it started runs on,
+        // orphaned, writing into the project: a process manager or a CI runner
+        // sends one SIGTERM to the pid it started. The gate stays shut 6 s past
+        // the signal: execa's kill() SIGKILLs a child 5 s after a SIGTERM by
+        // default, which ends tsx and the parent's wait with the entry still running.
+        writeGateGenerator();
+        installTsx(tsx);
+
+        const stopping = 'Codegen watcher stopping once the running generation finishes';
+
+        for (const second of [false, true])
+        {
+            rmSync(join(appDir, 'entered'), { force: true });
+
+            const dev = startDev(tsx, await freePort());
+
+            try
+            {
+                await dev.until(() => existsSync(join(appDir, 'entered')));
+
+                const watcherPid = Number(readFileSync(join(appDir, 'entered'), 'utf8'));
+
+                dev.signal('SIGTERM');
+                await dev.until(() => dev.output().includes(stopping) || !dev.running());
+
+                expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
+
+                if (second)
+                {
+                    dev.signal('SIGTERM');
+                    await dev.until(() => !dev.running());
+
+                    expect(await dev.exited, dev.output()).toBe(0);
+                    expect(alive(watcherPid), dev.output()).toBe(false);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(false);
+                }
+                else
+                {
+                    await new Promise(settle => setTimeout(settle, 6_000));
+
+                    expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
+
+                    write('open', '');
+
+                    expect(await dev.exited, dev.output()).toBe(0);
+                    expect(alive(watcherPid), dev.output()).toBe(false);
+                    expect(existsSync(join(appDir, 'finished'))).toBe(true);
+                }
+            }
+            finally
+            {
+                await dev.kill();
+                rmSync(join(appDir, 'open'), { force: true });
+                rmSync(join(appDir, 'finished'), { force: true });
+            }
+        }
+    }, 90_000);
+
+    it('R35b with no tsx installed in the app, spfn dev runs its watcher under the CLI\'s own tsx and still waits for it', async () =>
+    {
+        // Without it, the watcher of an app with no tsx of its own runs through
+        // `pnpm exec tsx`, which exits at once on SIGTERM: spfn dev exits with
+        // it, and the watcher runs on, orphaned. The server keeps the app's
+        // `.bin/tsx`, as `pnpm exec tsx` runs it.
+        writeGateGenerator();
+        installTsx(tsx);
+        rmSync(join(appDir, 'node_modules/tsx'));
+
+        const dev = startDev(tsx, await freePort());
+
+        try
+        {
+            await dev.until(() => existsSync(join(appDir, 'entered')));
+
+            const watcherPid = Number(readFileSync(join(appDir, 'entered'), 'utf8'));
+
+            dev.signal('SIGTERM');
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes') || !dev.running());
+
+            expect({ dev: dev.running(), watcher: alive(watcherPid) }, dev.output()).toEqual({ dev: true, watcher: true });
+
+            write('open', '');
+
+            expect(await dev.exited, dev.output()).toBe(0);
+            expect(alive(watcherPid), dev.output()).toBe(false);
+            expect(existsSync(join(appDir, 'finished'))).toBe(true);
+        }
+        finally
+        {
+            await dev.kill();
+        }
+    }, 60_000);
+
+    it('R36 spfn dev stopped before its server is ready starts no Next.js once the server becomes ready, and exits leaving no process', async () =>
+    {
+        // Without it, Next.js is started after the stop signalled the children
+        // that existed: nothing ever signals it, and it runs on, orphaned, once
+        // spfn dev exits with its watcher. The row writes the server's ready
+        // file itself after the signal: the server became ready during the stop.
+        writeGateGenerator();
+        installTsx(tsx);
+        write('package.json', JSON.stringify({ name: 'codegen-loader-fixture', private: true, dependencies: { next: '15.0.0' }, scripts: { 'spfn:next': 'node next-stand-in.mjs' } }));
+        write('next-stand-in.mjs', 'import { writeFileSync } from \'node:fs\';\n'
+            + 'writeFileSync(\'next-started\', \'\');\nsetInterval(() => undefined, 1000);\n');
+
+        const dev = startDev(tsx, await freePort());
+
+        try
+        {
+            await dev.until(() => existsSync(join(appDir, 'entered')));
+
+            expect(dev.output(), 'the server became ready before the signal').not.toContain('Server ready on port');
+
+            dev.signal('SIGTERM');
+            await dev.until(() => dev.output().includes('Codegen watcher stopping once the running generation finishes'));
+            write('.spfn/server-ready', '1');
+            await dev.until(() => dev.output().includes('Next.js not started') || existsSync(join(appDir, 'next-started')));
+            write('open', '');
+
+            expect(await dev.exited, dev.output()).toBe(0);
+            expect({ left: await groupLeft(dev.pid), nextStarted: existsSync(join(appDir, 'next-started')) }, dev.output())
+                .toEqual({ left: false, nextStarted: false });
+        }
+        finally
+        {
+            await dev.kill();
+        }
+    }, 60_000);
 
     it('R33 the watcher entry, given a .spfnrc.ts that fails to load, exits 1 saying to fix it and restart spfn dev', () =>
     {
@@ -535,8 +720,122 @@ function installCoreInApp(): void
     symlinkSync(join(coreRoot, 'node_modules'), join(installed, 'node_modules'), 'dir');
 }
 
-/** The watcher, started as `spfn dev` starts it (tsx, the dev hook, `NODE_ENV=production`), in a process group of its own. */
-function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () => boolean) => Promise<void>; stop: () => Promise<void> }
+/**
+ * A generator held until `open` exists in the app: it writes its process's pid
+ * to `entered` when it starts, and `finished` when it returns.
+ */
+function writeGateGenerator(): void
+{
+    write('gate-generator.mjs', 'import { existsSync, writeFileSync } from \'node:fs\';\n'
+        + 'import { join } from \'node:path\';\n'
+        + 'export default function createGate()\n{\n'
+        + '    return { name: \'gate\', watchPatterns: [\'src/gate/**/*.ts\'], async generate({ cwd })\n    {\n'
+        + '        writeFileSync(join(cwd, \'entered\'), String(process.pid));\n'
+        + '        while (!existsSync(join(cwd, \'open\'))) await new Promise(settle => setTimeout(settle, 20));\n'
+        + '        writeFileSync(join(cwd, \'finished\'), \'\');\n'
+        + '    } };\n}\n');
+    write('.spfnrc.ts', 'import { defineConfig } from \'@spfn/core/codegen\';\n\n'
+        + 'export default defineConfig({ generators: [{ path: \'./gate-generator.mjs\' }] });\n');
+}
+
+/**
+ * `tsx` installed in the app, as `spfn dev` finds it: the watcher's tsx is
+ * resolved from the app, and the server runs through `pnpm exec tsx`.
+ */
+function installTsx(tsx: Tsx): void
+{
+    const dir = dirname(dirname(tsx.cli));
+
+    symlinkSync(dir, join(appDir, 'node_modules/tsx'), 'dir');
+    mkdirSync(join(appDir, 'node_modules/.bin'), { recursive: true });
+    symlinkSync(tsx.cli, join(appDir, 'node_modules/.bin/tsx'));
+    write('pnpm-lock.yaml', '');
+}
+
+function freePort(): Promise<number>
+{
+    return new Promise((settle, fail) =>
+    {
+        const server = createServer().listen(0, '127.0.0.1', () =>
+        {
+            const { port } = server.address() as AddressInfo;
+
+            server.close(() => settle(port));
+        }).on('error', fail);
+    });
+}
+
+/** SIGKILL every process left in the group `pid` leads, if any is. */
+function killGroup(pid: number): void
+{
+    try
+    {
+        process.kill(-pid, 'SIGKILL');
+    }
+    catch
+    {
+        // ESRCH: the group is empty.
+    }
+}
+
+/** Whether any process is still in the group `pid` leads 10 s on: the server, signalled and not waited for, may take a moment. */
+async function groupLeft(pid: number): Promise<boolean>
+{
+    const deadline = Date.now() + 10_000;
+
+    while (alive(-pid) && Date.now() < deadline)
+    {
+        await new Promise(settle => setTimeout(settle, 50));
+    }
+
+    return alive(-pid);
+}
+
+/** Whether a process with `pid` exists. */
+function alive(pid: number): boolean
+{
+    try
+    {
+        process.kill(pid, 0);
+
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+/** A process the row started, in a process group of its own. */
+interface Watcher
+{
+    pid: number;
+    output: () => string;
+    until: (condition: () => boolean) => Promise<void>;
+
+    /** Whether it has not exited yet. */
+    running: () => boolean;
+
+    /**
+     * Send `signal` to the tsx process alone, as `spfn dev` signals its watcher
+     * child; tsx relays it. Not to the group: tsx relays a signal the child also
+     * got unless the child reports it within 30 ms, so one signal can arrive twice.
+     */
+    signal: (signal: NodeJS.Signals) => void;
+
+    /** The exit code, once the watcher has exited. */
+    exited: Promise<number | null>;
+    stop: () => Promise<void>;
+
+    /** SIGKILL the process group, for a watcher a failed row may have left hung, and what it left behind. */
+    kill: () => Promise<void>;
+}
+
+/** Every watcher started, killed after each row if still running: a timed-out row never reaches its `finally`. */
+const watchers: Watcher[] = [];
+
+/** The watcher, started as `spfn dev` starts it (tsx, the dev hook, `NODE_ENV=production`). */
+function startWatcher(tsx: Tsx): Watcher
 {
     const loader = pathToFileURL(devLoader);
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
@@ -545,7 +844,28 @@ function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () =
     delete env.SPFN_APP_URL;
     delete env.NODE_OPTIONS;
 
-    const child = spawn(process.execPath, [tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')], {
+    return track([tsx.cli, '--import', loader.href, join(appDir, '.spfn/watcher.mjs')], env);
+}
+
+/** `spfn dev` as the bin runs it under tsx, its server on `port`: the process a process manager signals. */
+function startDev(tsx: Tsx, port: number): Watcher
+{
+    const env: NodeJS.ProcessEnv = { ...process.env, SPFN_PORT: String(port) };
+
+    delete env.SPFN_APP_URL;
+    delete env.SPFN_CODEGEN_PROCESS;
+    delete env.NODE_OPTIONS;
+    delete env.NODE_PATH;
+    delete env.NODE_ENV;
+    delete env.DATABASE_URL;
+
+    return track(['--import', tsx.loader, bin, 'dev', '--no-agent-files'], env);
+}
+
+/** Run Node with `args` in the app, in a process group of its own, killed after the row if still running. */
+function track(args: string[], env: NodeJS.ProcessEnv): Watcher
+{
+    const child = spawn(process.execPath, args, {
         cwd: appDir,
         env,
         detached: true,
@@ -556,10 +876,13 @@ function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () =
     child.stdout.on('data', chunk => (output += chunk));
     child.stderr.on('data', chunk => (output += chunk));
 
-    const exited = new Promise<void>(settle => child.on('exit', () => settle()));
-
-    return {
+    const exited = new Promise<number | null>(settle => child.on('exit', code => settle(code)));
+    const watcher: Watcher = {
+        pid: child.pid!,
         output: () => plain(output),
+        running: () => child.exitCode === null && child.signalCode === null,
+        signal: signal => process.kill(child.pid!, signal),
+        exited,
         until: async (condition) =>
         {
             const deadline = Date.now() + 20_000;
@@ -582,5 +905,14 @@ function startWatcher(tsx: Tsx): { output: () => string; until: (condition: () =
                 await exited;
             }
         },
+        kill: async () =>
+        {
+            killGroup(child.pid!);
+            await exited;
+        },
     };
+
+    watchers.push(watcher);
+
+    return watcher;
 }

@@ -11,6 +11,7 @@ import { pinNodeEnv } from './node-env';
 import { logger } from '@spfn/core/logger';
 import { projectOrigin } from '../loader/errors';
 import { importPackageModule, importProjectModule, newGeneration, requireProjectModule, resolvePackageModule } from '../loader/register';
+import { reportInputs } from './inputs';
 
 const configLogger = logger.child('@spfn/core:codegen-config');
 
@@ -303,10 +304,13 @@ function capitalize(str: string): string
  * TypeScript and the project's aliases resolve, and what it imports of
  * `@spfn/*` is this process's own. A module that fails to load throws, naming
  * where, as a failing `.spfnrc.ts` does: a configured generator is not skipped.
+ * What it read goes to the inputs collector open around it, if any.
  */
 async function importCustomGenerator(generatorPath: string, cwd: string): Promise<Record<string, unknown>>
 {
     const load = await importProjectModule(generatorPath, cwd, newGeneration());
+
+    reportInputs(load.inputs);
 
     if (!load.ok)
     {

@@ -269,6 +269,12 @@ async generate(options: GeneratorOptions): Promise<void> {
 }
 ```
 
+`changedFile` is set only when exactly one change triggered the run. `spfn dev`'s watcher takes
+every change that arrived while a generation ran into the next one, so a run can be for several:
+`trigger.changedFiles` lists them all (each `{ path, event }`, relative to the project root).
+Neither is set on the initial watch pass, or for `manual`/`build`; fall back to a full
+regeneration then.
+
 ### When to Use Incremental Updates
 
 **Good candidates:**
@@ -600,6 +606,12 @@ watchPatterns: ['src/app/admin/users/nav.config.tsx']  // Only one file
 // Better
 watchPatterns: ['src/app/admin/**/nav.config.tsx']  // All nav.config.tsx files
 ```
+
+What the watcher regenerates for is a file matching `watchPatterns`, or a project file a
+previous run of the generator *imported through the codegen loader* (as the built-in generators
+load the router). A file your generator reads with `fs` is watched only through
+`watchPatterns`; `.env` files, packages under `node_modules` and the codegen config are not
+watched — restart `spfn dev` after changing them. See the codegen README's "Watch mode".
 
 ### Performance Issues
 

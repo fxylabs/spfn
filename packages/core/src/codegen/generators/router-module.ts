@@ -18,6 +18,12 @@
  * evaluation of the project, one record of the environment it read. A load
  * without one is a load of its own.
  *
+ * What a load read is reported to the inputs collector the orchestrator opens
+ * around each generator (`../core/inputs`): the watcher regenerates the
+ * generator when a file it read changes, or one appears where a resolution
+ * looked and found nothing. Every load the generator makes reports — the probe's varied ones
+ * too — and nothing is kept here between loads.
+ *
  * After a load, a second copy of an `@spfn/core` entry in the process is
  * refused when the spfn CLI started it, and warned about otherwise
  * (`module-evaluation.ts`).
@@ -33,6 +39,7 @@ import { logger } from '@spfn/core/logger';
 import { codegenSecondCopy } from '../../module-evaluation';
 import { projectOrigin } from '../loader/errors';
 import { importProjectModule, newGeneration, type ProjectLoad } from '../loader/register';
+import { reportInputs } from '../core/inputs';
 import { observeEnvironmentReads, type EnvironmentRead } from './environment-probe';
 
 const loadLogger = logger.child('@spfn/core:codegen');
@@ -86,13 +93,6 @@ export interface RouterModuleLoad
      * its own.
      */
     generation?: string;
-
-    /**
-     * A load the environment probe makes under a varied environment: the files
-     * it reaches are added to the router's watched files rather than replacing
-     * them.
-     */
-    variation?: boolean;
 }
 
 /** The loaded router module, and the environment keys its project files read while it loaded. */
@@ -111,21 +111,6 @@ interface ObservedLoad
 /** The loads of the current generation, by router path. Only one generation's are kept. */
 let sharedGeneration: string | undefined;
 const sharedLoads = new Map<string, Promise<ObservedLoad>>();
-
-/** The project files each router's latest load reached. */
-const filesByRouter = new Map<string, Set<string>>();
-
-/**
- * The project files the latest load of each router reached, by router path,
- * with the paths an import that resolved nowhere was looked for at: what the
- * watcher has to watch beside its patterns, so an edit to a file the router
- * imports through `@/` regenerates too, and so does creating a file a failed
- * load was missing.
- */
-export function routerFiles(): ReadonlyMap<string, ReadonlySet<string>>
-{
-    return filesByRouter;
-}
 
 async function observedLoad(cwd: string, absoluteRouterPath: string, token: string): Promise<ObservedLoad>
 {
@@ -155,14 +140,6 @@ function sharedLoad(load: RouterModuleLoad): Promise<ObservedLoad>
     }
 
     return sharedLoads.get(absoluteRouterPath)!;
-}
-
-function recordFiles(load: RouterModuleLoad, touched: string[]): void
-{
-    const files = load.variation ? filesByRouter.get(load.absoluteRouterPath) ?? new Set<string>() : new Set<string>();
-
-    touched.forEach(file => files.add(file));
-    filesByRouter.set(load.absoluteRouterPath, files);
 }
 
 const warnedCopies = new Set<string>();
@@ -205,7 +182,7 @@ export async function loadRouterModule(load: RouterModuleLoad): Promise<LoadedRo
 {
     const { load: outcome, reads } = await sharedLoad(load);
 
-    recordFiles(load, outcome.touched);
+    reportInputs(outcome.inputs);
 
     if (!outcome.ok)
     {

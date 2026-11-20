@@ -58,8 +58,8 @@ import { createRouteMapGenerator } from '../generators/route-map';
 import { CodegenOrchestrator } from '../core/orchestrator';
 import { createGeneratorsFromConfig, loadCodegenConfig } from '../core/config-loader';
 import { ConditionalRegistrationError } from '../generators/contract-guard';
-import { routerFiles } from '../generators/router-module';
-import { MissingFiles } from '../core/missing-files';
+import { collectInputs } from '../core/inputs';
+import { InputWatcher } from '../core/input-watcher';
 
 const CORE_PACKAGE = resolve(__dirname, '../../..');
 const OUTPUT_PATH = 'src/generated/route-map.ts';
@@ -250,8 +250,11 @@ describe('codegen loader - JSON', () =>
         write('src/server/segments.json', JSON.stringify({ first: 'uno' }));
 
         expect(pathsOf(await generate())).toEqual(['/uno', '/two/two']);
-        expect([...routerFiles().get(join(appDir, 'src/server/router.ts')) ?? []])
-            .toContain(realpathSync(join(appDir, 'src/server/segments.json')));
+
+        const generator = createRouteMapGenerator({ name: '@spfn/core:route-map', routerPath: './src/server/router.ts', outputPath: `./${OUTPUT_PATH}` });
+        const { inputs } = await collectInputs(() => generator.generate({ cwd: appDir }));
+
+        expect([...inputs.keys()]).toContain(realpathSync(join(appDir, 'src/server/segments.json')));
     });
 
     it('R26 an import attribute other than type: json is refused as Node refuses it, on JSON and on a module', async () =>
@@ -616,7 +619,7 @@ describe('codegen loader - watch mode', () =>
 
             expect(stopped).toBeUndefined();
             expect(warn.mock.calls.map(([message]) => String(message)).join('\n')).toMatch(
-                /Cannot watch src\/server\/locked for .*later.* \(EACCES\): a file created there will not be noticed until another change regenerates/,
+                /Cannot watch src\/server\/locked for .*later.* \(EACCES\): a change there is not noticed until another change regenerates/,
             );
             expect(existsSync(map)).toBe(false);
 
@@ -639,13 +642,13 @@ describe('codegen loader - watch mode', () =>
         {
         });
         const watcher = Object.assign(new EventEmitter(), { close: vi.fn() });
-        const missing = new MissingFiles(appDir, () => undefined);
+        const inputWatcher = new InputWatcher(appDir, () => undefined);
 
         watchOverrides.set(appDir, () => watcher as unknown as FSWatcher);
 
         try
         {
-            missing.sync(['src/later.ts']);
+            inputWatcher.sync([join(appDir, 'src/later.ts')]);
 
             expect(() => watcher.emit('error', Object.assign(new Error('operation not permitted'), { code: 'EPERM' }))).not.toThrow();
             expect(watcher.close).toHaveBeenCalledOnce();
@@ -653,7 +656,7 @@ describe('codegen loader - watch mode', () =>
         }
         finally
         {
-            missing.close();
+            inputWatcher.close();
             warn.mockRestore();
         }
     });

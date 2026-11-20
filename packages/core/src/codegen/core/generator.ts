@@ -16,6 +16,13 @@
  */
 export type GeneratorTrigger = 'watch' | 'manual' | 'build' | 'start';
 
+/** A file whose change triggered a run, relative to the project root. */
+export interface ChangedFile
+{
+    path: string;
+    event: 'add' | 'change' | 'unlink';
+}
+
 export interface GeneratorOptions
 {
     /** Project root directory */
@@ -29,11 +36,23 @@ export interface GeneratorOptions
         /** How the generator was triggered */
         type: GeneratorTrigger;
 
-        /** Changed file information (only for 'watch' trigger) */
-        changedFile?: {
-            path: string;
-            event: 'add' | 'change' | 'unlink';
-        };
+        /**
+         * The change that triggered this run, when exactly one did (only for the
+         * 'watch' trigger, never on its initial pass). Absent when several
+         * changes were taken together: read `changedFiles` then.
+         */
+        changedFile?: ChangedFile;
+
+        /**
+         * Every change that triggered this run (only for the 'watch' trigger,
+         * never on its initial pass): the files matching the generator's
+         * `watchPatterns`, and the files its previous run read, that changed
+         * since. The watcher takes every change queued while a generation ran
+         * into the next one, so a run may be for several. A run again of one
+         * whose inputs changed while it ran also gets that run's changes (the
+         * same trigger, with none, when that run had none).
+         */
+        changedFiles?: ChangedFile[];
     };
 
     /**
@@ -74,8 +93,9 @@ export interface Generator
     /**
      * Generate code
      *
-     * Generator can implement incremental updates by checking `options.trigger.changedFile`.
-     * If incremental update is not possible, do full regeneration.
+     * Generator can implement incremental updates by checking `options.trigger.changedFile`
+     * (or `changedFiles`, when several changes were taken together). If incremental update
+     * is not possible — or neither is set — do full regeneration.
      *
      * @param options - Generator options with trigger context
      *

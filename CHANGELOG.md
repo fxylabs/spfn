@@ -9,7 +9,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **@spfn/core: `GeneratorOptions.trigger.changedFiles`** (and the `ChangedFile` type): every change
+  that triggered a watch run. `changedFile` is now set only when exactly one change did; the
+  watcher takes every change that arrived during a generation into the next one (#353).
+- **@spfn/core: `CodegenOrchestrator.settled()`** resolves once watch mode is idle — no generation
+  running, nothing dirty, no input directory event settling (#353).
+
+### Changed
+
+- **BREAKING: @spfn/core: watch mode's generations, the initial one included, log and do not
+  reject under `throwOnError: true` (#353).** `watch()` ran its initial generation as `generateAll('watch')`,
+  so under `throwOnError` a failing generator rejected `watch()` before any watching began; now
+  the initial generation is a cycle of the watch loop, logged like every other. `watch()` still
+  rejects with the first failure when no generator has `watchPatterns` (it then runs one
+  `generateAll('watch')` and returns), and `generateAll()` still rejects, also while watching.
+- **BREAKING: spfn: the `spfn dev` codegen watcher needs a tsx resolvable from the app or from the
+  CLI (#353).** It ran through the package manager, so an npm app with no tsx installed got one
+  fetched by `npx tsx`; now the watcher is not started there, and `spfn dev` logs the command that
+  installs tsx in the app (`npm install -D tsx`). The server and Next.js still start.
+- **BREAKING: @spfn/core: `CodegenOrchestrator.generateAll()` and `settled()` reject when called
+  while the calling generator's own `generate()`, run by the watch loop, is still running (#353).**
+  Awaited there, they could never finish, since each waits for that generation; they reject whether
+  or not the call is awaited. Call them after `generate()` has returned (from a timer or a promise
+  callback); the loop runs a generator again when a file it read changes.
+
 ### Fixed
+
+- **@spfn/core: the `spfn dev` codegen watcher no longer loses changes (#353).** It decided what
+  changed from file events and its own bookkeeping, so a change arriving while that bookkeeping was
+  not valid was lost: only the first of the changes queued during a generation was regenerated (a
+  queued `notes.md` that matched nothing dropped the route edit behind it); an edit during the
+  initial generation, or before chokidar's first scan, was never seen; a file created or edited
+  between a load's read and the watch armed for it — the missing import of CI 725's failing
+  generation — was never regenerated; a file unlinked and recreated inside its own generation was
+  dropped by chokidar while the watcher believed it watched, so every later edit was lost until a
+  restart. Now every file a load reads — the tsconfig and package.json files it resolves by
+  included — is stamped (a hash of the bytes used; every path a resolution looked at and found
+  nothing, stamped absent) and attributed to the generator that ran; one
+  serialized loop runs, in one generation, every generator a dirty path matches or that read one,
+  then watches the directories of the new inputs and then compares every input with its stamp, so
+  a change that lands during a generation is found by the comparison. Such a change is a late
+  file event: it waits the quiet period input events wait (150 ms with no write in the input's
+  directory) before the next generation starts. After 3 consecutive cycles started that way, one
+  warning names the files and the generators that read them; regeneration continues. Logged: `Changed during generation: + <path>`, and in debug `Queued ~ <path>`; `No generators
+  matched this file` only when nothing matched. A generator's `✓`/`✗` is logged after that
+  comparison, and a run whose inputs changed while it ran says so instead and is run again once
+  they settle, whatever a later comparison finds: a save between two of the environment probe's
+  loads was reported as `ConditionalRegistrationError: The route map depends on the
+  environment`. A failure is held back that way at most once in a row per generator; the next
+  failure is reported, so a real one shows by the second run at the latest, or as the watch loop
+  ends when it ends before that run (`close()`, or an exception that rejects `watch()`).
+- **@spfn/core: `CodegenOrchestrator.close()` stops the watch loop.** A change queued when it was
+  called ran the generators again after it resolved; now nothing new starts, and it resolves once
+  the generation running has finished every generator, so the `spfn dev` watcher's SIGTERM no
+  longer leaves the route map and contract from two different generations. A generation cannot be
+  cancelled, so the watcher entry exits at once on a second signal. An orchestrator is
+  single-use: `watch()` after `close()`, while its loop runs, or after the loop ended by an
+  exception rejects instead of opening watchers nothing closes. When the loop ends by an
+  exception, a `generateAll()` queued or in progress rejects with it as the `cause`. A
+  chokidar error is warned about once, naming the pattern directories.
+- **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
+  SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
+  forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left
+  the watcher running, writing into the project. The watcher now runs under a tsx CLI started by
+  Node directly — the app's, else the one installed beside `spfn` — and never through the package
+  manager: with no tsx found, it is not started, and one error says to install tsx in the app.
+  `spfn dev` forwards every signal to it and exits once it has (a second signal makes it exit at
+  once). The server and Next.js are still sent one SIGTERM and not waited for. Every child is
+  started through one place that refuses once a stop has begun: a stop before the server was
+  ready no longer starts Next.js when it becomes ready, leaving it running after `spfn dev`
+  exited. A SIGKILL of `spfn dev` reaches none of them.
+- **@spfn/core: `CodegenOrchestrator.generateAll()` called while watching** ran the generators
+  beside the cycle running, two generations writing the same outputs at once; it is now queued as
+  a run of the watch loop and settles when that run has finished.
+- **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
+  in a module-wide map, so a second orchestrator in the process watched the first app's files.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom

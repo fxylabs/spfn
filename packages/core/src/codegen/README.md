@@ -46,12 +46,12 @@ Functions:
 Class:
 
 - `CodegenOrchestrator` — `new CodegenOrchestrator(options)`, then `generateAll(trigger?)`,
-  `watch()`, `close()`.
+  `watch()`, `settled()`, `close()`.
 
 Types:
 
 - `CodegenConfig`, `GeneratorConfig`
-- `Generator`, `GeneratorOptions`, `GeneratorTrigger`
+- `Generator`, `GeneratorOptions`, `GeneratorTrigger`, `ChangedFile`
 - `OrchestratorOptions`
 - `RouteMapGeneratorConfig` (config shape for the built-in route-map generator)
 - `ContractGeneratorConfig` (config shape for the built-in contract generator)
@@ -221,13 +221,126 @@ load (`src/codegen/loader/`).
   project modules: measured about 100 KB per reload for a small app, more for a large one,
   once per file change under `spfn dev` (a generation that varies the environment loads up
   to three times). The watcher is not recycled.
-- **The watch set follows the loads.** `spfn dev`'s watcher regenerates for a change to any
-  project file the latest load of a router reached — `src/server/lib/segment.ts` imported
-  through `@/` included — besides the generators' `watchPatterns` (kept for what no load has
-  reached yet: a new route file, the router). A file a load no longer reaches, a deleted one,
-  leaves the set. A load that failed on an import that resolved nowhere (a relative path or a
-  `paths` alias) records every path it looked for under the project root; creating a file at
-  any of them — in a directory that does not exist yet too — regenerates.
+- **The watcher regenerates from what each generation read.** See [Watch mode](#watch-mode):
+  every project file a load reads is stamped, and a change to any of them regenerates — an
+  `@/` import outside `routes/`, and a file a failed import was looked for at, included.
+
+## Watch mode
+
+`spfn dev` runs the generators in watch mode (`orchestrator.watch()`). The model, in order:
+
+- **Every input is stamped.** Each project file a load reads gets a stamp as the loader reads
+  it: a hash of the bytes the load used — no stat field, which an in-place write that keeps
+  the size and restores the modification time (`rsync --inplace -t`, `touch -r`) would fool.
+  The files the loader reads to resolve and transform are inputs too: every `tsconfig.json` it
+  reads (the `paths`, the compiler options, each config of an `extends` chain inside the
+  project) and the `package.json` whose `"type"` decides a `.js`/`.jsx` file's format. A path
+  the loader looked at and found nothing is stamped *absent*: each candidate a relative or
+  `paths` specifier tried before the file it resolved to (an earlier `paths` target, `foo.ts`
+  before `foo/index.ts`), every candidate of one that resolved nowhere, and a `tsconfig.json` or
+  `package.json` looked for in a directory that has none — so a resolution is made again when
+  the one Node would now make is another. The stamps are attributed to the generator whose
+  `generate()` made the load, and replaced by each run of it: a file a load no longer reaches
+  leaves its inputs.
+- **Events are hints.** chokidar watches the base directory of each generator's
+  `watchPatterns` (for what no load has reached yet: a new route file, the router), and a
+  non-recursive `fs.watch` watches the nearest existing directory of every input. An event
+  marks a path dirty or asks for a check; which event arrived, and whether one arrived at
+  all, does not decide what is regenerated.
+- **One loop, one generation per cycle.** The loop takes the whole dirty set at once and runs
+  the union of the generators whose `watchPatterns` match a dirty path or whose inputs hold
+  one, in one generation (one load of each router). Changes that arrive while it runs wait in
+  the dirty set — in debug mode, as `spfn dev` runs, each is logged as `Queued ~ <path>` — and
+  are all taken by the next cycle.
+- **Arm, then check.** After every generation the loop watches the directories of the new
+  inputs, *then* compares every input with its stamp: existence, then the hash of the file's
+  content now (every input is read and hashed on every check). A stale input is logged as
+  `Changed during generation: + src/server/lib/later.ts` and treated as a late file event: it
+  waits the quiet period every input event waits — 150 ms with no write in an input's
+  directory, each write restarting it — and the loop then compares again and runs for what is
+  stale then. So a change found by the check regenerates 150 ms after the generation that
+  missed it ends, at the earliest, and a file written all through every generation never
+  starts the next one at once. `settled()` does not resolve during that wait. Because the watch is armed before the comparison, a change lands either before it
+  (the comparison finds it) or after the watch exists (an event reports it): a file created
+  or edited while a generation ran, or replaced inside one, is not lost.
+- **Reported after the check.** A generation's `✓` and `✗` lines are logged once the check has
+  run. A generator that read a file the check found changed ran on inputs that changed under
+  it, so neither its success nor its failure surely describes the app as it now is (a save
+  between two of the environment probe's loads would read as "depends on the environment").
+  Such a run is marked to run again by name: once the change has settled it runs, whether or
+  not a later check still finds a difference (a file saved and then restored still gets its
+  re-run). Its outcome is held back for `[<generator>] Read files that changed while it ran;
+  running it again once they settle` — but a failure is held back at most once in a row per
+  generator: when a run fails and that generator's previous failure was held back, this one is
+  reported as `✗`, with `(its inputs changed while it ran; running it again once they settle)`
+  added when this run's inputs changed too. A success or a reported failure starts the count
+  again. So a failure caused only by a save in the middle of a run is never shown, and a real
+  one is shown by the second run at the latest — or, when the watch loop ends before that run
+  (`close()`, or an exception that rejects `watch()`), as it ends: `✗` with `(its inputs changed
+  while it ran; no further run follows: the watch loop is ending)`. A success held back is not reported then: nothing went wrong. A file two loads of one generation read with
+  different contents counts as changed even if it is restored before the check. A re-run is
+  told what the torn run was told (`changedFiles`), and what changed since. A generator whose `runOn`
+  excludes `'watch'`, run by a `generateAll()` while watching, is re-run the same way. The loop
+  watches and compares only the inputs of generators it would run for them: those that run on
+  `'watch'`, those owed a re-run, and those of the generation just run, whose check says whether it
+  was torn. So the inputs of a `runOn` without `'watch'` stop being watched once its run is not
+  torn, whether a `generateAll()` ran it while watching or before `watch()` — though they stay
+  armed until the check after that run, so one edit there can wake a single check that runs
+  nothing and then drops the watch.
+- **Start.** chokidar's first scan (`ready`), then the initial generation, then arm and
+  check. `Watch mode started` is logged once changes are seen from then on.
+- **`No generators matched this file`** (debug) is logged only when no generator matched a
+  cycle's changes. A cycle in which every matched generator failed ends with their `✗` lines.
+- **Repeated late changes.** After 3 consecutive cycles that only the check after a generation
+  started, whose inputs changed again, the loop warns once — `Inputs changed during each of
+  the last 3 generations:` — naming the files and the generators that read them, and the two
+  things it may mean: a generator that writes a file it reads, differently on every run (see
+  [Don't watch your own output](#pitfalls--anti-patterns)), or files being saved during every
+  generation. A save during a generation is found by that check whether or not it raised a
+  file event, so the warning says nothing about events. It keeps regenerating, one cycle per quiet
+  period, and does not warn again until a cycle a file event started has run. Nothing is
+  marked handled that no generation read.
+- **`generateAll()` while watching** is a run of the loop, not a second generation beside it:
+  queued, run between two cycles, and resolved (or, under `throwOnError`, rejected) when that
+  run has finished. A call still queued when `close()` is called is rejected; one made after
+  `close()` waits for the last cycle and runs as outside watch mode. Once the loop has ended by
+  an exception (`watch()` rejected), a call still queued is rejected with
+  `generateAll('<trigger>') was not run: the codegen watch loop failed`, and one whose run was in
+  progress with `generateAll('<trigger>') did not finish: the codegen watch loop failed` (the
+  exception is the `cause` of each); a later call rejects with the exception.
+- **`close()`** starts no new generation and resolves once the one running has finished —
+  every generator of it, so the outputs of one cycle never disagree. A generation cannot be
+  cancelled, so a generator that never settles keeps `close()` pending. After a loop that ended
+  by an exception, `close()` still releases the watchers and resolves, however often it is
+  called. An orchestrator is single-use: `watch()` rejects after `close()`, while its loop runs,
+  and after that loop ended by an exception. The `spfn dev` watcher calls `close()` on the
+  first SIGTERM/SIGINT and exits when it resolves; a second signal exits at once. `spfn dev`
+  forwards each signal it gets to the watcher and exits after it.
+- **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
+  directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
+  writes to settle) is not known to it. Once the loop has ended — by `close()` or by an
+  exception — it resolves at once.
+- **Not while the caller's own `generate()` runs.** `generateAll()` and `settled()` may not be
+  called while the calling generator's `generate()`, run by the loop, is still running: awaited
+  there they could never finish, since each waits for that generation. They reject, saying so,
+  whether or not the call is awaited (the guard cannot know). Schedule them to run after
+  `generate()` returns — a timer or promise callback run then calls them as any caller does.
+- **A directory that cannot be watched** (EACCES, ENOSPC at the inotify limit) is warned about
+  once — `Cannot watch src/server/routes for the generators' watchPatterns (ENOSPC)` for a
+  pattern directory, `Cannot watch <dir> for <inputs>` for an input's — and never fails a
+  generation.
+- **State is per orchestrator.** Two orchestrators in one process share no watch state.
+
+**Not watched** — restart `spfn dev` (or save a watched file) after changing:
+
+- Files a route reads with `fs` (or any other way than `import`): they are not inputs.
+- `.env` files and the environment: the environment probe reads them, but they are not
+  inputs.
+- Packages: anything under `node_modules`, and a workspace package's source or rebuilt
+  `dist` — packages are evaluated once per process. A tsconfig `extends` target in a package
+  is one of them.
+- The codegen config (`.spfnrc.ts`, `.spfnrc.json`, the `spfn.codegen` key of `package.json`)
+  and custom generator files: read once when `spfn dev` starts.
 
 ## Built-in: `@spfn/core:route-map`
 
@@ -580,7 +693,7 @@ Provided by the `spfn` CLI (`@spfn/cli`), not by `@spfn/core` itself:
 spfn codegen init     # scaffold a .spfnrc.ts
 spfn codegen list     # list resolved generators + their watch patterns  (alias: ls)
 spfn codegen run      # run all generators once (CodegenOrchestrator.generateAll, trigger 'manual'; a failure exits 1)
-spfn dev              # dev server + codegen in watch mode
+spfn dev              # dev server + codegen in watch mode (see "Watch mode")
 spfn build            # runs codegen once before building (trigger 'build'; a failure exits 1)
 
 spfn contract check      # regenerate the contract, compare against the newest released snapshot
@@ -620,8 +733,10 @@ await orchestrator.generateAll('build');     // what `spfn build` dispatches
 
 // Watch mode: runs an initial 'watch' pass, then returns a promise that stays pending
 // (keeping the process alive) until close() is called.
-await orchestrator.watch();
-// ...later, to shut down: await orchestrator.close();
+void orchestrator.watch();
+await orchestrator.settled();   // the loop is idle, nothing dirty (see "Watch mode")
+// ...later, to shut down: resolves once the running generation has finished.
+await orchestrator.close();
 ```
 
 ### `OrchestratorOptions`
@@ -640,6 +755,10 @@ interface OrchestratorOptions
 run continues, which is what keeps watch mode alive through a half-edited file. `spfn build`
 turns it on: a generator that refuses at build time (a broken route contract, a router that will
 not load) has to reach the exit code, or the refusal scrolls past and the build ships anyway.
+Watch mode's own generations — the initial one included — only log, with it on too. Under it,
+`generateAll()` rejects (also one called while watching), and so does `watch()` when no
+generator has `watchPatterns`: it then runs one `generateAll('watch')` and returns instead of
+watching.
 
 ---
 
@@ -729,14 +848,24 @@ interface GeneratorOptions
     debug?: boolean;
     trigger?: {
         type: GeneratorTrigger;
-        changedFile?: { path: string; event: 'add' | 'change' | 'unlink' };  // watch only
+        changedFile?: ChangedFile;     // watch only: set when exactly one change triggered the run
+        changedFiles?: ChangedFile[];  // watch only: every change that triggered the run
     };
     [key: string]: any;
 }
+
+interface ChangedFile
+{
+    path: string;                      // relative to the project root
+    event: 'add' | 'change' | 'unlink';
+}
 ```
 
-For incremental rebuilds, check `options.trigger?.changedFile` and fall back to full
-regeneration when it's absent (build/manual passes don't set it).
+For incremental rebuilds, check `options.trigger?.changedFile` — or `changedFiles`, when the
+watcher took several changes into one run — and fall back to full regeneration when neither is
+set (the initial watch pass and build/manual passes set neither). A run's changes are the files
+matching the generator's `watchPatterns` and the files its previous run read that changed
+since (see [Watch mode](#watch-mode)).
 
 ---
 
@@ -786,14 +915,18 @@ regeneration when it's absent (build/manual passes don't set it).
   `module.default()` (a zero-arg function) for `{ path }` entries. Exporting the Generator
   object directly, or a factory that needs args, won't load.
 - **Don't watch your own output.** A generator whose `watchPatterns` match its `outputPath`
-  re-triggers itself. Write outputs outside the watched globs (the orchestrator serializes
-  runs and queues one pending re-run, but a self-match still loops).
+  re-triggers itself. Write outputs outside the watched globs. A generator that imports a file
+  it then writes converges when the content it writes is the same each time (the second check
+  finds the same hash); one that writes something different every run (a timestamp) is run
+  again once per quiet period for as long as `spfn dev` watches, with one warning after 3
+  such cycles (see [Watch mode](#watch-mode)). `close()` and a signal still stop it.
 - **`generate()` should not throw to signal "skip".** The orchestrator catches errors per
   generator (one failure doesn't stop the others), but a throw is logged as a failure.
   Return early instead (route-map logs a warning and returns when the router file is
   absent).
 - **`watch()` never resolves on its own.** It returns a promise that stays pending to keep
-  the process alive; call `close()` to resolve it and tear down the chokidar watcher.
+  the process alive; call `close()` to resolve it and tear down the watchers. `close()`
+  waits for the generation running, if any.
 - **Package generators need a `:` in `name`.** `{ name: 'route-map' }` (no colon) is
   rejected as an invalid name — it must be `'@spfn/core:route-map'`.
 

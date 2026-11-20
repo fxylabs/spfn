@@ -13,16 +13,33 @@ import type { Generator, GeneratorOptions } from '../core/generator';
 
 const TEST_DIR = resolve(process.cwd(), '.test-tmp-orchestrator');
 
+/**
+ * A chokidar watcher that hands its handlers to `handlers` and reports `ready`
+ * at once: watch mode runs its initial generation on `ready`.
+ */
+const fakeWatcher = vi.hoisted(() => (handlers: Record<string, (path: string) => void> = {}) =>
+{
+    const watcher = {
+        on: vi.fn((event: string, handler: (path: string) => void) =>
+        {
+            handlers[event] = handler;
+
+            if (event === 'ready')
+            {
+                queueMicrotask(() => handler(''));
+            }
+
+            return watcher;
+        }),
+        close: vi.fn(),
+    };
+
+    return watcher;
+});
+
 // Mock chokidar
 vi.mock('chokidar', () => ({
-    watch: vi.fn(() => ({
-        on: vi.fn((_event, _handler) => ({
-            on: vi.fn((_event2, _handler2) => ({
-                on: vi.fn(),
-            })),
-        })),
-        close: vi.fn(),
-    })),
+    watch: vi.fn(() => fakeWatcher()),
 }));
 
 const mockedChokidarWatch = chokidarWatch as Mock;
@@ -340,21 +357,9 @@ describe('Orchestrator', () =>
             };
 
             // Mock watcher to capture handlers
-            let addHandler: ((path: string) => void) | null = null;
-            const mockWatcher = {
-                on: vi.fn((event: string, handler: (path: string) => void) => 
-                {
-                    if (event === 'add')
-                    {
-                        addHandler = handler;
-                    }
+            const handlers: Record<string, (path: string) => void> = {};
 
-                    return mockWatcher;
-                }),
-                close: vi.fn(),
-            };
-
-            mockedChokidarWatch.mockReturnValue(mockWatcher as any);
+            mockedChokidarWatch.mockReturnValue(fakeWatcher(handlers));
 
             const orchestrator = new CodegenOrchestrator({
                 generators: [mockGen],
@@ -368,10 +373,7 @@ describe('Orchestrator', () =>
             await new Promise(resolve => setTimeout(resolve, 50));
 
             // Simulate file add
-            if (addHandler)
-            {
-                (addHandler as (path: string) => void)(join(TEST_DIR, 'test.ts'));
-            }
+            handlers.add(join(TEST_DIR, 'test.ts'));
 
             await new Promise(resolve => setTimeout(resolve, 50));
 
@@ -393,21 +395,9 @@ describe('Orchestrator', () =>
                 },
             };
 
-            let changeHandler: ((path: string) => void) | null = null;
-            const mockWatcher = {
-                on: vi.fn((event: string, handler: (path: string) => void) => 
-                {
-                    if (event === 'change')
-                    {
-                        changeHandler = handler;
-                    }
+            const handlers: Record<string, (path: string) => void> = {};
 
-                    return mockWatcher;
-                }),
-                close: vi.fn(),
-            };
-
-            mockedChokidarWatch.mockReturnValue(mockWatcher as any);
+            mockedChokidarWatch.mockReturnValue(fakeWatcher(handlers));
 
             const orchestrator = new CodegenOrchestrator({
                 generators: [mockGen],
@@ -424,11 +414,8 @@ describe('Orchestrator', () =>
             receivedTriggers.length = 0;
 
             // Simulate file change
-            if (changeHandler)
-            {
-                await (changeHandler as (path: string) => void)(join(TEST_DIR, 'test.ts'));
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
+            handlers.change(join(TEST_DIR, 'test.ts'));
+            await orchestrator.settled();
 
             // Should have received trigger with changedFile information
             expect(receivedTriggers.length).toBeGreaterThan(0);
@@ -521,21 +508,9 @@ describe('Orchestrator', () =>
                 },
             };
 
-            let addHandler: ((path: string) => void) | null = null;
-            const mockWatcher = {
-                on: vi.fn((event: string, handler: (path: string) => void) => 
-                {
-                    if (event === 'add')
-                    {
-                        addHandler = handler;
-                    }
+            const handlers: Record<string, (path: string) => void> = {};
 
-                    return mockWatcher;
-                }),
-                close: vi.fn(),
-            };
-
-            mockedChokidarWatch.mockReturnValue(mockWatcher as any);
+            mockedChokidarWatch.mockReturnValue(fakeWatcher(handlers));
 
             const orchestrator = new CodegenOrchestrator({
                 generators: [failingGen],
@@ -550,15 +525,9 @@ describe('Orchestrator', () =>
             await new Promise(resolve => setTimeout(resolve, 50));
 
             // Simulate file change - should handle error gracefully
-            if (addHandler)
-            {
-                // Should not throw despite generator error
-                await (addHandler as (path: string) => void)(join(TEST_DIR, 'test.ts'));
-                await new Promise(resolve => setTimeout(resolve, 50));
-
-                // Test passed if we reach here without throwing
-                expect(true).toBe(true);
-            }
+            // Should not throw despite generator error
+            handlers.add(join(TEST_DIR, 'test.ts'));
+            await orchestrator.settled();
         });
     });
 

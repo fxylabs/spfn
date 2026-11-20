@@ -28,8 +28,9 @@
 
 import { readFileSync } from 'node:fs';
 import nodeModule from 'node:module';
-import { extname, sep } from 'node:path';
+import { dirname, extname, join, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { FileReader } from './aliases';
 
 /** `module` or `commonjs`, as a resolve hook states it. */
 export type ModuleFormat = 'module' | 'commonjs';
@@ -53,19 +54,34 @@ export function isDependency(file: string, root: string): boolean
     return fileSegments.slice(common === -1 ? fileSegments.length : common).includes('node_modules');
 }
 
-/** The `type` of the package `file` belongs to, if it states one. */
-export function packageType(file: string): string | undefined
+/**
+ * The `type` of the package `file` belongs to, if it states one. With `read`,
+ * the `package.json` found is read through it, and so is the path of one in
+ * each directory looked in before it: the codegen loader stamps them all.
+ */
+export function packageType(file: string, read?: FileReader): string | undefined
 {
     const packageJson = findPackageJSON(pathToFileURL(file));
+    const found = packageJson === undefined ? undefined : dirname(packageJson);
 
-    return packageJson === undefined ? undefined : JSON.parse(readFileSync(packageJson, 'utf8')).type;
+    for (let directory = dirname(file); read !== undefined && directory !== found && dirname(directory) !== directory; directory = dirname(directory))
+    {
+        read(join(directory, 'package.json'));
+    }
+
+    if (packageJson === undefined)
+    {
+        return undefined;
+    }
+
+    return JSON.parse(read?.(packageJson) ?? readFileSync(packageJson, 'utf8')).type;
 }
 
 /**
  * The format to state for an application source file, or undefined to leave
  * the one its author stated (an extension, a `type`) to whatever loads it.
  */
-export function applicationFormat(file: string, bySyntax: SyntaxFormat): ModuleFormat | undefined
+export function applicationFormat(file: string, bySyntax: SyntaxFormat, read?: FileReader): ModuleFormat | undefined
 {
     const extension = extname(file);
 
@@ -74,7 +90,7 @@ export function applicationFormat(file: string, bySyntax: SyntaxFormat): ModuleF
         return 'module';
     }
 
-    return (extension === '.js' || extension === '.jsx') && packageType(file) === undefined
+    return (extension === '.js' || extension === '.jsx') && packageType(file, read) === undefined
         ? bySyntax(file)
         : undefined;
 }

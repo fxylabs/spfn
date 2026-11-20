@@ -28,15 +28,36 @@
  * TypeScript's own parser reads the file. A `baseUrl` with no `paths` resolves
  * nothing by itself: tsc's bare-specifier lookup against a directory is not
  * something the server build does either.
+ *
+ * Every tsconfig file is read through a `FileReader`: the codegen loader
+ * passes one that stamps what it read, and that a file it looked for was not
+ * there, so a load is retried when a tsconfig it used, or one it would now
+ * find first, changes (`../core/inputs`).
  */
 
-import { existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type * as ts from 'typescript';
 import { logger } from '@spfn/core/logger';
 import { typescript } from '../generators/typescript';
 
 const aliasLogger = logger.child('@spfn/core:codegen');
+
+/** Reads a file: its text, or undefined when there is no file there. */
+export type FileReader = (path: string) => string | undefined;
+
+/** A `FileReader` that only reads. */
+export function readIfFile(path: string): string | undefined
+{
+    try
+    {
+        return readFileSync(path, 'utf8');
+    }
+    catch
+    {
+        return undefined;
+    }
+}
 
 /** The `paths` of one tsconfig, with the directory its targets resolve against. */
 export interface ProjectPaths
@@ -62,13 +83,13 @@ export interface PathsMatch
  * `readDirectory` is stubbed out: only `compilerOptions` is wanted here, and
  * letting TypeScript expand `include` would glob the whole project for nothing.
  */
-function parseHost(compiler: typeof ts): ts.ParseConfigHost
+function parseHost(compiler: typeof ts, read: FileReader): ts.ParseConfigHost
 {
     return {
         useCaseSensitiveFileNames: compiler.sys.useCaseSensitiveFileNames,
         readDirectory: () => [],
-        fileExists: compiler.sys.fileExists,
-        readFile: compiler.sys.readFile,
+        fileExists: path => read(path) !== undefined,
+        readFile: path => read(path)?.replace(/^\uFEFF/, ''),
     };
 }
 
@@ -79,15 +100,17 @@ function parseHost(compiler: typeof ts): ts.ParseConfigHost
 const NO_INPUTS = 18003;
 
 /** `compilerOptions` of one tsconfig, with `extends` already merged. */
-function readCompilerOptions(configPath: string, root: string): ts.CompilerOptions | undefined
+function readCompilerOptions(configPath: string, root: string, read: FileReader): ts.CompilerOptions | undefined
 {
-    if (!existsSync(configPath))
+    const compiler = typescript();
+    const host = parseHost(compiler, read);
+
+    if (!host.fileExists(configPath))
     {
         return undefined;
     }
 
-    const compiler = typescript();
-    const { config, error } = compiler.readConfigFile(configPath, compiler.sys.readFile);
+    const { config, error } = compiler.readConfigFile(configPath, host.readFile);
 
     if (error || !config)
     {
@@ -96,7 +119,7 @@ function readCompilerOptions(configPath: string, root: string): ts.CompilerOptio
         return undefined;
     }
 
-    const parsed = compiler.parseJsonConfigFileContent(config, parseHost(compiler), dirname(configPath));
+    const parsed = compiler.parseJsonConfigFileContent(config, host, dirname(configPath));
 
     // An `extends` target TypeScript cannot read leaves `paths` empty rather
     // than failing, and the router then fails to load for a reason that looks
@@ -151,12 +174,12 @@ function searchDirectories(root: string, startDir: string): string[]
 }
 
 /** The `paths` that apply to a file in `startDir`, or undefined when no tsconfig up to `root` declares any. */
-export function projectPaths(root: string, startDir: string): ProjectPaths | undefined
+export function projectPaths(root: string, startDir: string, read: FileReader = readIfFile): ProjectPaths | undefined
 {
     for (const directory of searchDirectories(resolve(root), startDir))
     {
         const configPath = join(directory, 'tsconfig.json');
-        const options = readCompilerOptions(configPath, root);
+        const options = readCompilerOptions(configPath, root, read);
 
         if (options?.paths)
         {
@@ -176,13 +199,13 @@ export function projectPaths(root: string, startDir: string): ProjectPaths | und
  * The compiler options of the tsconfig that governs a file in `startDir`: the
  * nearest one up to `root`, `extends` merged; undefined when there is none.
  */
-export function governingCompilerOptions(root: string, startDir: string): ts.CompilerOptions | undefined
+export function governingCompilerOptions(root: string, startDir: string, read: FileReader = readIfFile): ts.CompilerOptions | undefined
 {
     const configPath = searchDirectories(resolve(root), startDir)
         .map(directory => join(directory, 'tsconfig.json'))
-        .find(path => existsSync(path));
+        .find(path => read(path) !== undefined);
 
-    return configPath === undefined ? undefined : readCompilerOptions(configPath, root);
+    return configPath === undefined ? undefined : readCompilerOptions(configPath, root, read);
 }
 
 /** The part of `specifier` a pattern's `*` stands for, or undefined when the pattern does not match it. */

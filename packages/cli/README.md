@@ -139,6 +139,34 @@ Starts the SPFN server + Next.js (and a codegen watcher, which generates under
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
+The codegen watcher is run by Node under a `tsx` CLI found in a `node_modules` directory on
+the way up from the app (the app's own, which wins), else on the way up from where `spfn`
+itself is installed — the one `spfn`'s bin re-spawns under. `NODE_PATH` is not consulted. With
+neither, the watcher is not started: `spfn dev` logs `Codegen watcher not started: no tsx is
+installed for the app or for the spfn CLI. Install it in the app: pnpm add -D tsx` and goes on
+without it, as when the watcher fails to start. It is never run through `pnpm exec`/`npx`,
+which do not let `spfn dev` wait for it.
+
+On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
+the codegen watcher, and exits once the watcher has: the watcher finishes the generation it is
+running first. A second signal is forwarded too, and the watcher then exits at once, mid-generation
+if one is running: whatever that generation would have reported — a `✓`/`✗` line, a failure held
+back from a run whose inputs changed while it ran — is dropped. Once a
+stop has begun, `spfn dev` starts no child: not Next.js when the server becomes ready during it,
+not a server restart (it logs `Next.js not started: spfn dev is stopping`). A SIGKILL of
+`spfn dev` reaches no child.
+
+So the route map and contract never come from two generations when one SIGTERM or SIGINT is
+sent to the pid of the process that runs `spfn dev`: the tsx child when `bin/spfn.js`
+re-spawned itself under tsx, the bin's own process when it did not. That does not hold for:
+
+- **Ctrl-C in a terminal.** The terminal sends SIGINT to the whole process group, so the
+  watcher gets it twice — from the terminal and from `spfn dev`'s forward — and exits at once,
+  mid-generation if one is running (as before this change).
+- **A signal to the `bin/spfn.js` pid alone**, when the bin re-spawned itself under tsx: that
+  outer process has no signal handler, so it exits and its children run on (read from the
+  source, not run).
+
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--server-only` | Run only the SPFN/Hono server (also auto-selected if Next.js isn't a dependency) | off |

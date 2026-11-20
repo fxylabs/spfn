@@ -23,6 +23,7 @@ import { pathToFileURL } from 'node:url';
 import { constants, runInThisContext } from 'node:vm';
 import { locateLoadError } from './errors';
 import { closeGeneration, GENERATION_PARAMETER, loadHook, openGeneration, projectFileAt, resolveHook } from './hooks';
+import { reportInputs, type Inputs } from '../core/inputs';
 
 /** `module.registerHooks` (Node 22.15+); the `@types/node` this package builds with predates it. */
 const { registerHooks } = nodeModule as unknown as {
@@ -61,13 +62,14 @@ export function newGeneration(): string
 
 /**
  * What a load evaluated, or what it threw — rewritten to name the project's
- * files as written (`./errors`) — and the project files it reached either way,
- * with the paths an import that resolved nowhere was looked for at: a load that
- * failed on a file is to be retried when that file changes or appears.
+ * files as written (`./errors`) — and what it read either way: the project
+ * files and config files it read, stamped, with the paths its resolutions
+ * looked at and found nothing, stamped absent (`./hooks`). A load that failed
+ * on a file is to be retried when that file changes or appears.
  */
 export type ProjectLoad =
-    | { ok: true; module: Record<string, unknown>; touched: string[] }
-    | { ok: false; error: unknown; touched: string[] };
+    | { ok: true; module: Record<string, unknown>; inputs: Inputs }
+    | { ok: false; error: unknown; inputs: Inputs };
 
 function generationURL(file: string, token: string): string
 {
@@ -93,7 +95,7 @@ export async function importProjectModule(file: string, root: string, token: str
         (error: unknown) => ({ ok: false as const, error: locateLoadError(error, projectFileAt) }),
     );
 
-    return { ...settled, touched: closeGeneration(token) };
+    return { ...settled, inputs: closeGeneration(token) };
 }
 
 /** What `require()` returned, or what it threw. */
@@ -113,7 +115,9 @@ function settleRequire(file: string, url: string): { ok: true; module: Record<st
  * `require()` `file` as an ES module, synchronously, under a token of its own:
  * for `.spfnrc.ts`, which `loadCodegenConfig` reads synchronously. It fails as
  * `require()` of an ES module does when the graph has top-level await; what it
- * throws names the project's files as written (`./errors`).
+ * throws names the project's files as written (`./errors`). What it read,
+ * loaded or not, goes to the inputs collector open around it, if any
+ * (`../core/inputs`).
  */
 export function requireProjectModule(file: string, root: string): Record<string, unknown>
 {
@@ -125,7 +129,7 @@ export function requireProjectModule(file: string, root: string): Record<string,
     const settled = settleRequire(file, generationURL(file, token));
     const error = settled.ok ? undefined : locateLoadError(settled.error, projectFileAt);
 
-    closeGeneration(token);
+    reportInputs(closeGeneration(token));
 
     if (!settled.ok)
     {
