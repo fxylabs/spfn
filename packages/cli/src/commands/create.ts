@@ -57,6 +57,7 @@ async function installFromWorkspaceRoot(workspaceRoot: string, projectPath: stri
         {
             logger.error(error.stderr);
         }
+
         return;
     }
 

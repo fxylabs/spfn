@@ -37,12 +37,13 @@ let repository: string;
  * Stands in for every process create starts: create-next-app writes the app's
  * package.json; an install puts each declared package under `cwd/node_modules`.
  */
-function fakeProcess(command: string, args: string[], { cwd }: { cwd: string }): void
+function fakeProcess(_command: string, args: string[], { cwd }: { cwd: string }): void
 {
     if (args.some(arg => arg.startsWith('create-next-app')))
     {
         mkdirSync(join(cwd, 'app'));
         writeFileSync(join(cwd, 'app', 'package.json'), JSON.stringify({ name: 'app', dependencies: { next: '16' } }));
+
         return;
     }
 
