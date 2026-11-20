@@ -34,6 +34,9 @@
  * |    | `__dirname`                                          | filter excluded (a DROP TABLE there under `--force`)    |
  * | R7 | `spfn db generate` by a CLI whose @spfn/core is not  | the refusal advising to dedupe the app, when the cause  |
  * |    | the app's (the app has its own install)              | is the CLI's install                                    |
+ * | R8 | the bin as its own re-spawned child, without the     | the relaunch guard gone: a child without the hook       |
+ * |    | hook (`SPFN_CLI_RELAUNCHED_IN` set, no `--import`);  | re-spawns itself, without bound once the hook argument  |
+ * |    | each bin process counts itself, the third exits      | goes too (773 processes in round 1)                     |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
@@ -225,4 +228,30 @@ it('R7 spfn db generate run by a CLI that is not the app\'s own names the CLI as
     expect(output).toContain(`Two installs of @spfn/core: this spfn CLI is not the app's own — it brings its @spfn/core (\`${realpathSync(coreRoot)}\`) `
         + `beside the app's (\`${realpathSync(appCore)}\`). Run the app's own spfn: \`pnpm exec spfn db generate\``);
     expect(output).not.toContain('dedupe');
+});
+
+it('R8 the bin started as its own re-spawned child without the module hook stops, and starts no process', () =>
+{
+    const depthFile = join(appDir, 'depth.log');
+
+    // Every bin process in the chain counts itself (its main thread: the preload
+    // runs in tsx's loader thread too) and the third ends at once, so even a bin
+    // without its guard cannot re-spawn itself without bound.
+    write('depth-cap.cjs', `if (require('node:worker_threads').isMainThread && process.argv[1] === ${JSON.stringify(bin)})\n{\n`
+        + '    const depth = Number(process.env.R8_DEPTH ?? 0) + 1;\n'
+        + '    process.env.R8_DEPTH = String(depth);\n'
+        + `    require('node:fs').appendFileSync(${JSON.stringify(depthFile)}, depth + '\\n');\n`
+        + '    if (depth > 2) process.exit(97);\n}\n');
+
+    const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        SPFN_CLI_RELAUNCHED_IN: realpathSync(appDir),
+        NODE_OPTIONS: `--require ${join(appDir, 'depth-cap.cjs')}`,
+        PATH: `${join(cliRoot, 'node_modules/.bin')}:${process.env.PATH}`,
+    };
+    const result = spawnSync(process.execPath, [bin, '--version'], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain('the CLI\'s module hook (dist/dev-loader/register.js) did not register in the process spfn re-spawned');
+    expect(readFileSync(depthFile, 'utf8')).toBe('1\n');
 });
