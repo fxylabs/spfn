@@ -7556,6 +7556,12 @@ purge. With the default configuration nothing is sent.
     breaks it. A plain nested `runInTransaction(fn)` joins the purge's transaction and is fine.
   - **A throw rolls the purge back.** The account and its request stay `pending`, no
     `auth.deletion.completed` fires, and the next sweep purges it again and calls the hook again.
+    The purge rethrows the hook's error as `PurgeHookFailedError` (500, from `@spfn/auth/errors`),
+    whose message names the hook and the deletion request and nothing the hook was handed; the
+    hook's own error is its `cause`, for an app that calls `purgeUserService` and catches it. The
+    sweep logs the failure by that name and the request id. Core's transaction runner still logs the
+    rollback with the error's cause chain (at `debug`, or `warn` when it was slow), so a message the
+    hook throws reaches that line as written: leave the address out of it.
 - **`onBeforePurge`** is not part of telling anyone, and runs at another moment: before the purge
   transaction opens, without the account lock, once the primary read finds the account still
   `pending`. It is for the app's own I/O outside the database (files in object storage, an

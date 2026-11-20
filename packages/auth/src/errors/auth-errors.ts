@@ -207,6 +207,29 @@ export class ImmediateDeletionNotAllowedError extends ForbiddenError
 }
 
 /**
+ * Purge Hook Failed Error (500)
+ *
+ * The app's `deletion.onPurge` hook threw, so the purge rolled back and the
+ * next sweep retries it. The hook was handed the account's email and phone, and
+ * what it throws may quote them, so this error's message names only the hook and
+ * the deletion request. The hook's own error is its `cause`, for an app that
+ * catches this one upstream; like a native `cause`, it is not enumerable, so it
+ * is never serialized into a response.
+ */
+export class PurgeHookFailedError extends InternalServerError
+{
+    readonly requestId: number;
+
+    constructor(data: { requestId: number; cause: unknown })
+    {
+        super({ message: `deletion.onPurge failed for deletion request ${data.requestId}` });
+        this.name = 'PurgeHookFailedError';
+        this.requestId = data.requestId;
+        Object.defineProperty(this, 'cause', { value: data.cause, writable: true, configurable: true });
+    }
+}
+
+/**
  * Account Already Exists Error (409)
  *
  * Thrown when trying to register with existing email/phone

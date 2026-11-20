@@ -374,6 +374,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     throw rolls the purge back — account and request stay `pending`, no `completed` — and the next
     sweep retries. `onBeforePurge` is unchanged: it runs before the transaction opens, without the
     lock.
+  - A throwing `onPurge` is rethrown as the new `PurgeHookFailedError` (500, `@spfn/auth/errors`),
+    whose message names the hook and the deletion request only, with the hook's error as its
+    `cause`. The sweep logs a failed purge's error name and request id, never its message: the
+    hook was handed the account's email and phone, and its error may quote them. Core's
+    transaction runner still prints the cause chain's messages on its rollback line (`debug`, or
+    `warn` when slow), so a hook should keep the address out of what it throws.
 
   **Migrate from `sendNotifications: true`:** remove the option, then follow the README recipe
   ("Account Deletion & Recovery" → "Telling the person"): `registerTemplate` three templates with

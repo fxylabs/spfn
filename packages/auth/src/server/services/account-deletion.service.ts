@@ -24,6 +24,7 @@ import {
     DeletionAlreadyRequestedError,
     DeletionNotRequestedError,
     ImmediateDeletionNotAllowedError,
+    PurgeHookFailedError,
 } from '@spfn/auth/errors';
 
 import {
@@ -50,7 +51,7 @@ import { assertStepUp } from './mfa.service';
 import { proveRecentAuthentication, recentAuthenticationHolds, type RecentAuthenticationProof } from './passkey.service';
 import { accountRefusalReason, admissionRefusalError, admitCompletion, admitsAccount, type PrincipalCredential } from './admission.service';
 import { ROUTE_ENROLMENT } from '../routes/channels';
-import { getDeletionConfig, type AuthDeletionConfig } from '../lib/deletion-config';
+import { getDeletionConfig, type AuthDeletionConfig, type PurgedAccount } from '../lib/deletion-config';
 import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { authLogger } from '../logger';
@@ -357,7 +358,7 @@ export async function requestAccountDeletionService(
     // retry: the request is due at once.
     if (gracePeriodDays === 0)
     {
-        onAfterCommit(() => purgePendingRequest(request).then(() => undefined));
+        onAfterCommit(() => purgePendingRequest(request).then(() => undefined, (error: unknown) => logFailedPurge(request.id, error)));
     }
 
     return { requestId: request.id, purgeScheduledAt: request.purgeScheduledAt };
@@ -693,6 +694,22 @@ async function anonymizeUser(user: User): Promise<void>
 }
 
 /**
+ * Calls `onPurge`. The hook holds the account's email and phone, and what it
+ * throws may quote them — an app's "handoff failed for <address>", a constraint
+ * error from its outbox write — so its error leaves here only as the `cause` of
+ * a `PurgeHookFailedError`, whose message the transaction runner and the sweep
+ * can log.
+ *
+ * @throws PurgeHookFailedError when the hook throws or rejects
+ */
+function handOffToApp(onPurge: (account: PurgedAccount) => Promise<void>, account: PurgedAccount, requestId: number): Promise<void>
+{
+    return Promise.resolve(account)
+        .then(onPurge)
+        .catch((cause: unknown) => Promise.reject(new PurgeHookFailedError({ requestId, cause })));
+}
+
+/**
  * The purge's transaction: the account lock (`usersRepository.lockAccount`)
  * and the status read under it — the authoritative check, closing the window
  * between findDueForPurge (replica)/the pre-check and this transaction, so a
@@ -725,7 +742,10 @@ async function destroyPendingAccount(userId: number, requestId: number, config: 
     // hard delete cascades away — are still there to read. Its writes commit
     // with the purge or not at all; a throw rolls everything back and the next
     // sweep retries.
-    await config.onPurge?.({ publicId: user.publicId, email: user.email, phone: user.phone, purgeStrategy });
+    if (config.onPurge)
+    {
+        await handOffToApp(config.onPurge, { publicId: user.publicId, email: user.email, phone: user.phone, purgeStrategy }, requestId);
+    }
 
     if (purgeStrategy === 'hard-delete')
     {
@@ -859,6 +879,27 @@ export interface SweepDuePurgesResult
 }
 
 /**
+ * A purge the next sweep retries — one of its own, or an immediate one. A failed `onPurge` is logged by its name and
+ * request id alone: its cause is the app's error, which may quote the contact
+ * the hook was handed. Anything else is the package's own failure, and goes to
+ * the logger, which describes it without bound values.
+ */
+function logFailedPurge(requestId: number, error: unknown): void
+{
+    if (error instanceof PurgeHookFailedError)
+    {
+        authLogger.service.error('[account-deletion] purge failed, will retry next sweep', {
+            requestId,
+            error: error.name,
+        });
+
+        return;
+    }
+
+    authLogger.service.error('[account-deletion] purge failed, will retry next sweep', error, { requestId });
+}
+
+/**
  * Sweep every request whose grace period has elapsed and purge it. Called by the
  * `auth.deletion.purge` cron job. One user's failure (thrown error, not just an
  * `onBeforePurge` skip) is logged and does not stop the rest of the sweep — it
@@ -888,10 +929,7 @@ export async function sweepDuePurges(now: Date = new Date()): Promise<SweepDuePu
         catch (error)
         {
             skipped++;
-            authLogger.service.error('[account-deletion] purge failed, will retry next sweep', {
-                requestId: request.id,
-                error: error instanceof Error ? error.message : String(error),
-            });
+            logFailedPurge(request.id, error);
         }
     }
 
