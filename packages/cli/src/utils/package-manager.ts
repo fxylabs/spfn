@@ -4,7 +4,15 @@ import { parse } from 'yaml';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
+/** A workspace and the manager its root's lockfile selects. */
+export interface Workspace
+{
+    root: string;
+    packageManager: PackageManager;
+}
+
 const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
+    ['bun.lock', 'bun'],
     ['bun.lockb', 'bun'],
     ['pnpm-lock.yaml', 'pnpm'],
     ['yarn.lock', 'yarn'],
@@ -14,44 +22,40 @@ const LOCKFILES: ReadonlyArray<[string, PackageManager]> = [
 /**
  * The package manager the app in `appDir` uses.
  *
- * The app's own lockfile decides, before any ancestor is read. An ancestor's
- * lockfile counts only when `appDir` is a member of that ancestor's workspace —
- * a directory merely sitting inside a pnpm or yarn repository is its own
- * project, and running the repository's manager there installs the repository,
- * not the app. Otherwise npm.
+ * The app's own lockfile decides, before any ancestor is read. Otherwise the
+ * manager of the workspace `appDir` is a member of (`findWorkspace`) — a
+ * directory merely sitting inside a pnpm or yarn repository is its own project,
+ * and running the repository's manager there installs the repository, not the
+ * app. Otherwise npm.
  */
 export function detectPackageManager(appDir: string): PackageManager
 {
-    return lockfileManager(appDir) ?? memberManager(appDir);
-}
-
-/** The lockfile manager of the workspace `appDir` is a member of, else npm. */
-function memberManager(appDir: string): PackageManager
-{
-    const workspaceRoot = findWorkspaceRoot(appDir);
-
-    return (workspaceRoot ? lockfileManager(workspaceRoot) : null) ?? 'npm';
+    return lockfileManager(appDir) ?? findWorkspace(appDir)?.packageManager ?? 'npm';
 }
 
 /**
- * The root of the workspace `dir` is a member of, or null.
+ * The workspace `dir` is a member of, or null. `dir` need not exist yet.
  *
- * The nearest ancestor that declares a workspace — `pnpm-workspace.yaml`
- * `packages` or `package.json` `workspaces` — answers; `dir` belongs to it when
- * its path matches one of the declared globs and none of the negated (`!…`)
- * ones. A declaration that cannot be read, or is not the documented shape,
- * declares no workspace. `dir` need not exist yet.
+ * An ancestor's lockfile selects its manager, and that manager's declaration
+ * alone decides membership: `pnpm-workspace.yaml` `packages` for pnpm,
+ * `package.json` `workspaces` for yarn, npm and bun. An ancestor without a
+ * lockfile is pnpm's when it has a `pnpm-workspace.yaml` (no other manager reads
+ * that file), npm's otherwise. The nearest ancestor that declares a workspace
+ * answers: `dir` belongs to it when its path matches one of the globs and none
+ * of the negated (`!…`) ones. A declaration that cannot be read, or is not the
+ * documented shape, declares no workspace.
  */
-export function findWorkspaceRoot(dir: string): string | null
+export function findWorkspace(dir: string): Workspace | null
 {
-    for (const candidate of ancestorsOf(dirname(dir)))
+    for (const root of ancestorsOf(dirname(dir)))
     {
-        const patterns = readWorkspacePatterns(candidate);
+        const packageManager = lockfileManager(root) ?? (existsSync(join(root, 'pnpm-workspace.yaml')) ? 'pnpm' : 'npm');
+        const patterns = readWorkspacePatterns(root, packageManager);
 
         if (patterns)
         {
-            return isWorkspaceMember(memberPath(candidate, dir), patterns)
-                ? candidate
+            return isWorkspaceMember(memberPath(root, dir), patterns)
+                ? { root, packageManager }
                 : null;
         }
     }
@@ -83,13 +87,13 @@ function lockfileManager(dir: string): PackageManager | null
 }
 
 /**
- * The workspace globs `dir` declares, or null when it declares no workspace.
- * A `pnpm-workspace.yaml` without `packages` declares a workspace of the root
- * alone.
+ * The workspace globs `packageManager`'s declaration in `dir` lists, or null
+ * when it declares no workspace. A `pnpm-workspace.yaml` without `packages`
+ * declares a workspace of the root alone.
  */
-function readWorkspacePatterns(dir: string): string[] | null
+function readWorkspacePatterns(dir: string, packageManager: PackageManager): string[] | null
 {
-    if (existsSync(join(dir, 'pnpm-workspace.yaml')))
+    if (packageManager === 'pnpm')
     {
         const manifest = readManifest(join(dir, 'pnpm-workspace.yaml'), text => parse(text, { logLevel: 'error' }) ?? {});
 

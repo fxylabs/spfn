@@ -15,6 +15,7 @@ import { readFileSync } from 'fs';
 
 import {
     detectPackageManager,
+    findWorkspace,
     getRunScriptArgs,
 } from '../package-manager.js';
 
@@ -195,5 +196,46 @@ describe('detectPackageManager', () =>
 
         expect(detectPackageManager(join(root, 'apps/web'))).toBe('yarn');
         expect(detectPackageManager(join(root, 'other/app'))).toBe('npm');
+    });
+
+    it('asks the manager whose lockfile is at the root: yarn.lock reads package.json workspaces, not pnpm-workspace.yaml', () =>
+    {
+        const root = makeRepository({
+            'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
+            'package.json': JSON.stringify({ workspaces: ['apps/*'] }),
+            'yarn.lock': '',
+            'apps/web/package.json': '{}',
+            'packages/lib/package.json': '{}',
+        });
+
+        expect(detectPackageManager(join(root, 'apps/web'))).toBe('yarn');
+        expect(detectPackageManager(join(root, 'packages/lib'))).toBe('npm');
+    });
+
+    it('takes bun\'s text lockfile, bun.lock, as bun\'s', () =>
+    {
+        const root = makeRepository({
+            'package.json': JSON.stringify({ workspaces: ['apps/*'] }),
+            'bun.lock': '{}',
+            'apps/web/package.json': '{}',
+            'own/package.json': '{}',
+            'own/bun.lock': '{}',
+        });
+
+        expect(detectPackageManager(join(root, 'apps/web'))).toBe('bun');
+        expect(detectPackageManager(join(root, 'own'))).toBe('bun');
+    });
+
+    it('takes a root with no lockfile as pnpm\'s when it has a pnpm-workspace.yaml, npm\'s otherwise', () =>
+    {
+        const root = makeRepository({
+            'pnpm-workspace.yaml': 'packages:\n  - apps/*\n',
+            'package.json': JSON.stringify({ workspaces: ['tools/*'] }),
+            'apps/web/package.json': '{}',
+            'tools/cli/package.json': '{}',
+        });
+
+        expect(findWorkspace(join(root, 'apps/web'))).toEqual({ root, packageManager: 'pnpm' });
+        expect(findWorkspace(join(root, 'tools/cli'))).toBeNull();
     });
 });

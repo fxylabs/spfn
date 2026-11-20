@@ -46,17 +46,27 @@ npx spfn@beta create my-api --mode bare
 npx spfn@beta init --mode full
 ```
 
-The package manager is the app's own: its lockfile (`bun.lockb`, `pnpm-lock.yaml`,
-`yarn.lock`, `package-lock.json`) decides, before anything above the app is read; otherwise
-the lockfile of the workspace root whose declared globs (`pnpm-workspace.yaml` `packages`,
-`package.json` `workspaces`, `!` negations honoured) list the app's directory; otherwise npm.
-An ancestor declaration that cannot be parsed (after stripping a BOM) or is not the
-documented shape is someone else's file and declares no workspace. A directory inside a pnpm or yarn
-repository that its workspace does not list is its own npm project. Override with `--pm`
+The package manager is the app's own, decided in this order:
+
+1. **The app's own lockfile** (`bun.lock`, `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`,
+   `package-lock.json`). Nothing above the app is read.
+2. **The workspace that lists the app.** Walking up, each directory's lockfile selects its
+   manager, and that manager's declaration decides membership: `pnpm-workspace.yaml`
+   `packages` for pnpm, `package.json` `workspaces` for yarn, npm and bun (`!` negations
+   honoured). A directory with no lockfile is pnpm's if it has a `pnpm-workspace.yaml`,
+   npm's otherwise. The nearest directory that declares a workspace answers; one whose
+   declaration cannot be parsed (after stripping a BOM) or is not the documented shape is
+   someone else's file and declares nothing.
+3. **npm.** A directory inside a pnpm or yarn repository that its workspace does not list
+   is its own npm project.
+
+yarn classic ignores `!` negations in `workspaces`, so a directory such a negation excludes
+is answered npm here while yarn 1 still treats it as a member. Override with `--pm`
 (`create`, `init`). When `create` makes a member of a pnpm workspace, it installs from the
-workspace root. "Dependencies installed" is printed only once every package the step
-declared resolves from the app directory; otherwise the command exits 1 naming the
-missing ones.
+workspace root.
+
+"Dependencies installed" is printed only once every package the step declared resolves from
+the app directory; otherwise the command exits 1 naming the missing ones.
 
 ---
 
@@ -1301,11 +1311,11 @@ committed.
 - **`spfn add` requires a scoped package name** (must contain `/`) and only applies
   migrations when `DATABASE_URL` is set — otherwise it skips with a hint. The single
   exception is `spfn add vercel`, a built-in target rather than a package.
-- **The package manager is the app's own.** Its lockfile decides, then the lockfile of a
-  workspace that lists the app, then npm — an app under a pnpm or yarn repository that the
-  workspace does not list uses npm (see [Usage](#usage)). If detection is wrong (e.g. mixed
-  lockfiles), pass `--pm` to `create` or `init`. `create` installs a pnpm-workspace member
-  from the workspace root, any other app in its own directory.
+- **The package manager is the app's own.** Its lockfile decides, then the lockfile and
+  declaration of a workspace that lists the app, then npm (see [Usage](#usage)). If
+  detection is wrong (e.g. mixed lockfiles), pass `--pm` to `create` or `init`. `create`
+  installs a pnpm-workspace member from the workspace root, any other app in its own
+  directory.
 - **Make scaffold mode explicit in automation.** Interactive runs recommend `full`, while
   historical `--yes` calls without `--mode` remain `bare`. Pass `--mode full` or
   `--mode bare` so scripts state their intended architecture.

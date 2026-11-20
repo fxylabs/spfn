@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspaceRoot, getRunCommand } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getRunCommand } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -115,8 +115,8 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     // 3. Detect the pnpm workspace the new app is a member of (monorepo). A
     // directory the workspace does not list is its own project and installs
     // in its own directory.
-    const memberOf = pm === 'pnpm' ? findWorkspaceRoot(projectPath) : null;
-    const workspaceRoot = memberOf && existsSync(join(memberOf, 'pnpm-workspace.yaml')) ? memberOf : null;
+    const workspace = pm === 'pnpm' ? findWorkspace(projectPath) : null;
+    const workspaceRoot = workspace?.packageManager === 'pnpm' ? workspace.root : null;
     const isInWorkspace = workspaceRoot !== null;
 
     if (isInWorkspace)

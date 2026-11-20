@@ -37,13 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: spfn: inside a pnpm/yarn/bun repository, a directory that is not a workspace member
   is no longer treated as using the repository's manager (#345).** The manager was taken from any
   `pnpm-lock.yaml`, `yarn.lock` or `bun.lockb` up to five directories above, and `package-lock.json`
-  was never looked at. Now the app's own lockfile decides (`package-lock.json` included) before
-  anything above it is read, then the lockfile of the workspace root whose `pnpm-workspace.yaml`
-  `packages` or `package.json` `workspaces` globs list the app (negations honoured; an ancestor
-  declaration that does not parse declares nothing), otherwise npm. So `init`, `add`, `build`,
-  `start`, `dev`, `setup`, `provision` and `create` (without `--pm`), run in such a directory, use
-  the app's own lockfile or npm, and install, add and run scripts there; `create --pm pnpm` there
-  installs in the app directory instead of from the repository root. `spfn init` gains `--pm`.
+  was never looked at. Now the app's own lockfile decides (`package-lock.json` and bun's text
+  `bun.lock` included) before anything above it is read; then the workspace that lists the app,
+  where each ancestor's lockfile selects the manager whose declaration decides (`pnpm-workspace.yaml`
+  `packages` for pnpm, `package.json` `workspaces` for yarn, npm and bun; negations honoured; an
+  ancestor declaration that does not parse declares nothing); otherwise npm. So `init`, `add`,
+  `build`, `start`, `dev`, `setup`, `provision` and `create` (without `--pm`), run in such a
+  directory, use the app's own lockfile or npm, and install, add and run scripts there;
+  `create --pm pnpm` there installs in the app directory instead of from the repository root.
+  `spfn init` gains `--pm`.
 
 ### Fixed
 

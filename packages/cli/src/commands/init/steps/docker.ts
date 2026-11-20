@@ -29,7 +29,7 @@ const PM_DOCKERFILE_ADAPTATIONS: Record<string, [string, string][]> = {
     ],
     bun: [
         ['# Install pnpm\nRUN corepack enable pnpm', '# Install bun\nRUN npm install -g bun'],
-        ['pnpm-lock.yaml*', 'bun.lockb*'],
+        ['pnpm-lock.yaml*', 'bun.lock*'],
         ['RUN pnpm install --frozen-lockfile --prod=false', 'RUN bun install --frozen-lockfile'],
         ['RUN pnpm run spfn:build', 'RUN bun run spfn:build'],
         ['# Remove dev dependencies (optional, reduces image size)\nRUN pnpm prune --prod\n\n', ''],
