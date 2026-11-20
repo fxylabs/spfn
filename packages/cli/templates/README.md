@@ -14,7 +14,11 @@ docker compose up -d
 #    .env.server — server secrets: DB, cache (gitignored, never loaded by Next.js)
 #    Review them and adjust as needed.
 
-# 3. Start the dev server (Next.js :3790 + SPFN API :8790)
+# 3. Create the database tables: the installed SPFN packages' migrations,
+#    then the app's own tables (src/server/entities)
+{{pmExec}} spfn db push
+
+# 4. Start the dev server (Next.js :3790 + SPFN API :8790)
 {{pmRun}} spfn:dev
 ```
 
@@ -47,8 +51,9 @@ A feature is a vertical slice: `Entity` (Drizzle table) → `Repository` →
 {{pmRun}} spfn:dev          # dev: Next.js + SPFN API (add --watch to restart on changes)
 {{pmRun}} spfn:build        # production build
 {{pmRun}} spfn:start        # run the production build
-{{pmExec}} spfn db generate     # create a migration from schema changes
-{{pmExec}} spfn db migrate      # apply pending migrations
+{{pmExec}} spfn db push         # development: apply the schema to the database
+{{pmExec}} spfn db generate     # migration-based deployment: write a migration from schema changes
+{{pmExec}} spfn db migrate      # migration-based deployment: apply pending migrations
 {{pmExec}} spfn env check       # check .env files against the schema
 {{pmExec}} spfn secret set DB_URL   # store a secret (keychain locally, SOPS for deploys)
 ```

@@ -9,8 +9,8 @@ import chalk from 'chalk';
 import { logger } from '../utils/logger.js';
 import { detectPackageManager, findWorkspace, formatCommandLine, getAddArgs, getOneOffCommandLine, getRunCommand, runInstall, type CommandLine, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
-import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
+import { printNextSteps, type NextStepsOptions } from './init/next-steps.js';
 
 interface CreateOptions
 {
@@ -272,12 +272,13 @@ async function createProject(projectName: string, options: CreateOptions): Promi
 
     // 9. Initialize SPFN
     const initSpinner = ora('Initializing SPFN...').start();
+    let scaffold: NextStepsOptions;
 
     try
     {
-        // Run spfn init programmatically, with the package manager decided here
-        const { initializeSpfn } = await import('./init/index.js');
-        await initializeSpfn({ yes: true, overwriteReadme: true, mode, pm });
+        // Run spfn init's scaffold programmatically, with the package manager decided here
+        const { scaffoldSpfn } = await import('./init/index.js');
+        scaffold = await scaffoldSpfn({ yes: true, overwriteReadme: true, mode, pm });
 
         initSpinner.succeed('SPFN initialized');
     }
@@ -288,23 +289,10 @@ async function createProject(projectName: string, options: CreateOptions): Promi
         process.exit(1);
     }
 
-    // 10. Success message
+    // 10. Success message and the scaffold's next steps
     console.log('\n' + chalk.green.bold('✓ Project created successfully!\n'));
-
-    console.log(chalk.bold('Next steps:\n'));
-    console.log(`  ${chalk.cyan('cd')} ${projectName}`);
-    console.log(`  ${chalk.cyan('docker compose up -d')}  ${chalk.gray('# Start PostgreSQL & Redis')}`);
-    console.log(`  ${chalk.gray(`# .env.local & .env.server are generated — ${ENV_FILES_HINT}`)}`);
-    if (mode === 'full')
-    {
-        const spfnCommand = pm === 'npm' ? 'npx spfn' : `${pm} spfn`;
-        console.log(`  ${chalk.cyan(`${spfnCommand} db push`)}  ${chalk.gray("# Apply auth migrations, then create the app's tables")}`);
-    }
-    console.log(`  ${chalk.cyan(`${getRunCommand(pm)} spfn:dev`)}  ${chalk.gray('# Start dev server')}\n`);
-
-    console.log(chalk.bold('Your app will be available at:\n'));
-    console.log(`  ${chalk.cyan('http://localhost:3790')}  ${chalk.gray('(Next.js)')}`);
-    console.log(`  ${chalk.cyan('http://localhost:8790')}  ${chalk.gray('(SPFN API)')}\n`);
+    printNextSteps({ ...scaffold, projectName });
+    console.log();
 
     // Production deployment guidance
     console.log(chalk.bold('🚀 Ready for production?\n'));

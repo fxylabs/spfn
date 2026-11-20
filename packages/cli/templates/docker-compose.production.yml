@@ -1,7 +1,9 @@
 version: '3.8'
 
 services:
-  # Database migration service (runs before app starts)
+  # Database migration service (runs before app starts). A migration-based
+  # deployment: it applies the SPFN packages' migrations and the app's own,
+  # which `spfn db generate` writes; `spfn db push` is for development.
   migrate:
     build:
       context: .

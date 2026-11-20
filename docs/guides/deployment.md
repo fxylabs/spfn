@@ -385,7 +385,9 @@ docker-compose -f docker-compose.production.yml down
 
 ## Database Migrations
 
-Superfunction provides CLI commands for managing database migrations:
+A deployment applies migrations: the app's own, written by `spfn db generate`, and
+those its SPFN packages ship. (A new app in development creates its tables with
+`spfn db push` instead; generate its first migration before the first deployment.)
 
 ```bash
 # Generate migration from schema changes
