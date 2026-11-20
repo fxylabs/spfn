@@ -19,7 +19,6 @@ import { digestOfJson } from './digest.js';
 import { validateSetupDescriptorEnvelope } from './validate.js';
 import { verifySignedDocument, type TrustedKey } from './signature.js';
 import { atLeast } from './version.js';
-import { getOneOffCommand } from '../utils/package-manager.js';
 
 /** V1 official setup origins. An exact list, not a suffix match. */
 export const SETUP_ORIGIN_ALLOWLIST = ['https://start.superfunction.xyz'] as const;
@@ -334,7 +333,7 @@ export function assertCliCompatible(descriptor: SetupDescriptorV1, cliVersion: s
                 recommended: descriptor.cli.recommendedVersion,
             },
             next: {
-                command: getOneOffCommand(`spfn@${descriptor.cli.recommendedVersion}`, ['kit', 'install', descriptor.setupUrl]),
+                command: `pnpm dlx spfn@${descriptor.cli.recommendedVersion} kit install ${descriptor.setupUrl}`,
                 requiresHumanApproval: false,
             },
         });
