@@ -245,10 +245,15 @@ itself — entities under `spfn db generate`, `db push` and `db tenant`, `drizzl
 `db push` and `db tenant`, `server.config` under `spfn provision`, `env.schemas` files under `spfn
 env`, your router under codegen — load as they do under `spfn dev`. (`drizzle-kit`, which `db
 generate`, `check`, `drop` and `studio` hand a `drizzle.config.ts` to, reads that file and the
-schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs the command
-without the hook: `spfn env` stops, saying to add `tsx`, and `spfn db` leaves your TypeScript to
-Node, which stops at the first file it cannot load. The hook states the format of every file of
-yours that `tsx` would otherwise guess from `package.json`:
+schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs
+the command without the hook, and a command that loads your TypeScript — `spfn env`, `spfn db`
+(`push`, `tenant`, and `generate` with the entity registry), `spfn provision` — stops before its
+first import with `tsx is not installed in this project, and it is what loads TypeScript. Add it:
+<your package manager's add command>` and exit code 1. The cost: every `spfn` command in a project
+re-spawns itself once to get the hook, and the hook's resolve takes its own time — ~73 ms of
+self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
+hook time minus Node's own resolve). The hook states the format of every file of yours that `tsx`
+would otherwise guess from `package.json`:
 
 - `.ts` and `.tsx` run as ESM, with or without `"type": "module"`, also when imported with a query
   of your own (`./route.ts?v=2`), which reaches the module as you wrote it — one evaluation per

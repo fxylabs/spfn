@@ -214,7 +214,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what they may touch, and `--schema`, which replaces only its files, no longer goes on without it.
   `drizzle-kit`, which `db generate`, `check`, `drop` and `studio` hand `drizzle.config.ts` to,
   reads it and the schema by its own rule as before. Top-level `await` in an entity now loads (`db
-  generate` failed on it). `spfn env` loads `env.schemas` files the same way.
+  generate` failed on it). `spfn env` loads `env.schemas` files the same way. The cost: every `spfn`
+  command in a project re-spawns itself once to get the hook, and the hook's resolve adds ~73 ms of
+  self-time over 2,815 resolves on `spfn --version` in example 01 (dev VM, Node 22).
 - **BREAKING: spfn, @spfn/core: every `spfn db` command and the `spfn provision` runner refuse a
   second copy of `@spfn/core` (#349)**, with the message a server refuses with: a `.cjs` file that
   requires `@spfn/*` from an entity or `server.config` stops the command, naming the file. A `spfn`
