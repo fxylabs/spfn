@@ -40,8 +40,9 @@
  * | R33| the watcher entry with a `.spfnrc.ts` that fails to load,    | a watcher that exits on a broken config while the server  |
  * |    | then fixed                                                   | runs on (regeneration off until a restart), or one that   |
  * |    |                                                              | stays up silent, or never loads the fix                   |
- * | R33b| the watcher entry with an installed core whose orchestrator  | a watcher dead on `TypeError … 'flatMap'` while spfn dev  |
- * |    | lacks `loadsGenerators` (a core before the config reload)    | runs on without codegen                                   |
+ * | R33b| the watcher entry with an installed core without the          | a watcher dead on Node's own error while spfn dev runs on |
+ * |    | CodegenOrchestrator export, exporting it as undefined, or    | without codegen; or a core broken in its own code         |
+ * |    | without ./codegen; then one missing a dependency of its own  | reported as an old one                                    |
  * | R34| the watcher entry with a generator held by a file gate: one   | an entry that exits mid-generation, or that ignores every |
  * |    | signal, then the gate opened; then two signals               | signal while a generation hangs (orphaned by spfn dev)    |
  * | R34b| the watcher entry reloading a `.spfnrc.ts` whose custom      | a load that never settles taken for a hung watcher: no    |
@@ -576,24 +577,45 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
 
     it('R33b the watcher entry with a core that cannot load its generators stops, naming the installed core and the required range', async () =>
     {
-        // Without it, a core older than the config reload ignores loadGenerators:
-        // the watcher dies on a TypeError about flatMap, and spfn dev runs on
-        // without codegen.
-        installCoreInApp();
+        // Without it, a core older than the config reload makes the watcher die
+        // on Node's own error (no export, undefined, no './codegen'), and spfn
+        // dev runs on without codegen; a core broken for another reason must
+        // still show its own error, not "update @spfn/core".
+        const cli = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
+        const core = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf8'));
+        const notStarted = `[SPFN] Codegen watcher not started: @spfn/core ${core.version} is installed; `
+            + `spfn ${cli.version} requires @spfn/core ${cli.peerDependencies['@spfn/core']} and a core that reloads generators. Update @spfn/core.`;
+        const shapes: { core: string; patch: () => void; says: string }[] = [
+            { core: 'without the CodegenOrchestrator export', patch: () => patchCodegen(source => source.replace('export { CodegenOrchestrator, ', 'export { ')), says: notStarted },
+            { core: 'exporting CodegenOrchestrator as undefined', patch: () => patchCodegen(source => 'const absentOrchestrator = undefined;\n'
+                + source.replace('export { CodegenOrchestrator, ', 'export { absentOrchestrator as CodegenOrchestrator, ')), says: notStarted },
+            { core: 'without the ./codegen subpath', patch: removeCodegenSubpath, says: notStarted },
+            { core: 'missing a dependency of its own', patch: () => patchCodegen(source => 'import \'spfn-missing-dependency\';\n' + source),
+                says: 'Cannot find package \'spfn-missing-dependency\'' },
+        ];
 
-        const codegen = join(appDir, 'node_modules/@spfn/core/dist/codegen/index.js');
-
-        writeFileSync(codegen, readFileSync(codegen, 'utf8').replace('static loadsGenerators = true;', ''));
         write('.spfn/watcher.mjs', watcherEntrySource());
 
-        const watcher = startWatcher(tsx);
-        const cli = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
-        const version = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf8')).version;
+        for (const shape of shapes)
+        {
+            installCoreInApp();
+            shape.patch();
 
-        expect(await watcher.exited, watcher.output()).toBe(1);
-        expect(watcher.output()).toContain(`[SPFN] Codegen watcher not started: @spfn/core ${version} is installed; `
-            + `spfn ${cli.version} requires @spfn/core ${cli.peerDependencies['@spfn/core']} and a core that reloads generators. Update @spfn/core.`);
-        expect(watcher.output()).not.toContain('flatMap');
+            const watcher = startWatcher(tsx);
+
+            try
+            {
+                const output = { code: await watcher.exited, text: watcher.output() };
+
+                expect({ core: shape.core, code: output.code, says: output.text.includes(shape.says) }, output.text)
+                    .toEqual({ core: shape.core, code: 1, says: true });
+                expect(output.text.includes('Codegen watcher not started'), output.text).toBe(shape.says === notStarted);
+            }
+            finally
+            {
+                await watcher.kill();
+            }
+        }
     });
 
     it('R15 .spfnrc.ts sees its own file in import.meta.url, filename and dirname', () =>
@@ -779,11 +801,29 @@ function installCoreInApp(): void
 {
     const installed = join(appDir, 'node_modules/@spfn/core');
 
-    unlinkSync(installed);
+    rmSync(installed, { recursive: true, force: true });
     mkdirSync(installed);
     cpSync(join(coreRoot, 'package.json'), join(installed, 'package.json'));
     cpSync(join(coreRoot, 'dist'), join(installed, 'dist'), { recursive: true, filter: source => !source.endsWith('.map') });
     symlinkSync(join(coreRoot, 'node_modules'), join(installed, 'node_modules'), 'dir');
+}
+
+/** Rewrite the app-installed core's `@spfn/core/codegen` entry (`installCoreInApp`). */
+function patchCodegen(rewrite: (source: string) => string): void
+{
+    const codegen = join(appDir, 'node_modules/@spfn/core/dist/codegen/index.js');
+
+    writeFileSync(codegen, rewrite(readFileSync(codegen, 'utf8')));
+}
+
+/** Drop `./codegen` from the app-installed core's exports (`installCoreInApp`). */
+function removeCodegenSubpath(): void
+{
+    const manifest = join(appDir, 'node_modules/@spfn/core/package.json');
+    const { exports, ...rest } = JSON.parse(readFileSync(manifest, 'utf8'));
+
+    delete exports['./codegen'];
+    writeFileSync(manifest, JSON.stringify({ ...rest, exports }));
 }
 
 /**
