@@ -693,8 +693,9 @@ exits 1 before any write when a destructive statement is pending, and applies as
 when none is), then applies each package's pending migrations (one
 transaction per package, as `db migrate`) and then the project statements (one
 transaction). A project table may reference a package table on an empty database. A
-package failure exits 1 with the project schema untouched; a project failure exits 1
-with the package migrations already committed. Before applying anything,
+package failure exits 1 with the project schema untouched; a project failure exits 1,
+and the package migrations this run applied stay committed (it says so when there are
+any). Before applying anything,
 `db push` lists each package's pending migrations by folder or tag name;
 `db push --dry-run` lists them too and applies neither them nor the project
 statements. What it guarantees, and how: every query of its plan — Drizzle Kit's

@@ -243,8 +243,8 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
         // 9. Apply the function package migrations, then the project statements:
         //    a project table may reference a package table
-        await applyFunctionMigrations(functionPlans);
-        await applyProjectStatements(connection.db, selection, functionPlans.length > 0);
+        const packageMigrationsApplied = await applyFunctionMigrations(functionPlans);
+        await applyProjectStatements(connection.db, selection, packageMigrationsApplied > 0);
     }
     finally
     {
@@ -344,12 +344,12 @@ async function selectProjectStatements(
 
 /**
  * Apply the selected project statements in one transaction. On failure it
- * rolls back and exits 1; function package migrations already committed stay.
+ * rolls back and exits 1; function package migrations this run committed stay.
  */
 async function applyProjectStatements(
     db: PushConnection['db'],
     { statements, skipped }: ProjectSelection,
-    afterFunctionMigrations: boolean,
+    packageMigrationsApplied: boolean,
 ): Promise<void>
 {
     try
@@ -362,7 +362,7 @@ async function applyProjectStatements(
     catch (error)
     {
         console.error(chalk.red(`\n❌ The project statements were rolled back: ${describeError(error, env.DATABASE_URL)}`));
-        if (afterFunctionMigrations)
+        if (packageMigrationsApplied)
         {
             console.error(chalk.yellow('Function package migrations applied above stay applied; fix the schema and run spfn db push again.'));
         }
@@ -433,13 +433,13 @@ function loadFunctionPlansOrExit(): FunctionMigrationPlan[]
 }
 
 /**
- * Run function package migrations (e.g., @spfn/cms)
+ * Run function package migrations (e.g., @spfn/cms); returns how many applied.
  */
-async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<void>
+async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<number>
 {
     if (plans.length === 0)
     {
-        return;
+        return 0;
     }
 
     console.log(chalk.blue('\n📦 Applying function package migrations:'));
@@ -447,13 +447,15 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
 
     try
     {
-        await executeFunctionMigrations(plans);
+        const applied = await executeFunctionMigrations(plans);
         console.log(chalk.green('\n✅ All function migrations applied\n'));
+
+        return applied;
     }
     catch (error)
     {
         console.error(chalk.red('\n❌ Failed to apply function package migrations — nothing of the project schema was applied'));
-        console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
+        console.error(chalk.red(describeError(error, env.DATABASE_URL)));
         process.exit(1);
     }
 }

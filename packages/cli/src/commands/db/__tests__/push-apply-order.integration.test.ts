@@ -45,6 +45,9 @@ const PACKAGE_SQL = 'CREATE SCHEMA spfn_i163fix;\n--> statement-breakpoint\nCREA
 const FAILING_PACKAGE_SQL = `${PACKAGE_SQL}--> statement-breakpoint\nSELECT 1 / 0;\n`;
 const PACKAGE_TABLE = 'drizzle."__spfn_fn_i163fix_migrations"';
 const ORDER_LINE = 'Function package migrations are applied first, then the project statements.';
+const STAY_APPLIED_LINE = 'Function package migrations applied above stay applied; fix the schema and run spfn db push again.';
+/** Two rows of one key: the package's migration fails on its primary key. */
+const DUPLICATE_PACKAGE_SQL = `${PACKAGE_SQL}--> statement-breakpoint\nINSERT INTO spfn_i163fix.things (id) VALUES (1), (1);\n`;
 
 /** `accounts` references the package's table: by its key, or by a column the package never creates. */
 const ACCOUNTS = {
@@ -219,8 +222,7 @@ describe('db push applies function package migrations first', () =>
 
         expect(errors.join('\n')).toContain(
             '❌ The project statements were rolled back: column "code" referenced in foreign key constraint does not exist');
-        expect(errors.join('\n')).toContain(
-            'Function package migrations applied above stay applied; fix the schema and run spfn db push again.');
+        expect(errors.join('\n')).toContain(STAY_APPLIED_LINE);
         expect(errors.join('\n')).not.toMatch(/Failed query|params:/);
         expect(await db.unsafe(`SELECT count(*)::int AS count FROM ${PACKAGE_TABLE}`)).toEqual([{ count: 1 }]);
         expect(await exists('spfn_i163fix.things')).toBe(true);
@@ -266,6 +268,35 @@ describe('db push applies function package migrations first', () =>
 
         expect(output()).toMatch(/Destructive changes \(2\):\n\s+DROP TABLE "spfn_i163fix"."things"/);
     });
+    it('T3b a package migration fails on a constraint: the message is the server\'s, read as the project failure\'s is', async () =>
+    {
+        writeFixture({ packageSql: DUPLICATE_PACKAGE_SQL });
+
+        await expect(push({ force: true })).rejects.toThrow('exit 1');
+
+        expect(errors.join('\n')).toContain(
+            'duplicate key value violates unique constraint "things_pkey" (constraint things_pkey)');
+        expect(await exists('spfn_i163fix.things')).toBe(false);
+    });
+
+    it('T4b a project statement fails with every package already up to date: no line about package migrations this run applied', async () =>
+    {
+        writeFixture({ accounts: ACCOUNTS.byMissingColumn });
+        // A first push of a schema without accounts applies the package
+        writeFileSync(join(root, 'src', 'server', 'entities', 'base.entity.ts'),
+            "import { pgSchema, integer } from 'drizzle-orm/pg-core';\n"
+            + "export const app = pgSchema('i378_app');\n"
+            + "export const notes = app.table('notes', { id: integer('id').primaryKey() });\n");
+        await dbPush({ force: true, schema: './src/server/entities/base.entity.ts' });
+        expect(await exists('spfn_i163fix.things')).toBe(true);
+
+        await expect(push({ force: true })).rejects.toThrow('exit 1');
+
+        expect(errors.join('\n')).toContain('❌ The project statements were rolled back: column "code" referenced');
+        expect(errors.join('\n')).not.toContain('stay applied');
+        expect(await exists('i378_app.accounts')).toBe(false);
+    });
+
     it('T9 the confirmation is aborted (Ctrl-C, EOF): exit 1, nothing written — no package migration, no project statement', async () =>
     {
         await db.unsafe('CREATE SCHEMA i378_app; CREATE TABLE i378_app.notes (id integer PRIMARY KEY, extra text)');

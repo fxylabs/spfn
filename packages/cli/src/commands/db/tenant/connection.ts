@@ -7,8 +7,9 @@
  * is the server's message for a statement that failed, a local file error's
  * own message, else only an error code — with the URL and its password cut out
  * whatever the source, and any other URL's credentials blanked (`redactUrls`).
- * `db push` prints its failed project statement the same
- * way: through drizzle and `pg`, whose errors are read here too.
+ * `db push` prints a failed package migration (postgres.js) and a failed
+ * project statement (through drizzle and `pg`, whose errors are read here too)
+ * the same way.
  */
 
 import { DrizzleQueryError } from 'drizzle-orm';

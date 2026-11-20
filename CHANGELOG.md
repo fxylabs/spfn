@@ -634,6 +634,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@spfn/core/codegen` and now also `@spfn/core/server`. It marks any process the spfn CLI started
   to load app source, and from the mark on a second copy is refused where it is recorded, as in a
   server — in a codegen process too, inside the router load, besides the check after it.
+- **spfn: `spfn db push` output and failures follow the new apply order (#378).** The plan lists each
+  function package's pending migrations first, then the project statements, with one line saying
+  so. A function package migration that fails now means the project schema was not applied
+  (`❌ Failed to apply function package migrations — nothing of the project schema was applied`);
+  it used to mean the project statements were already committed.
+- **spfn: `spfn db push`'s destructive confirmation has three outcomes (#378).** No skips the listed
+  statements and still applies the other project statements and the package migrations, as the
+  question now says. An aborted question (Ctrl-C, EOF) used to count as No and apply the rest; it
+  now exits 1 with nothing applied (`❌ The confirmation was aborted — nothing was applied`). A run
+  whose stdin is not a terminal used to hang at the question; with a destructive statement pending
+  and no `--force` it now exits 1 before any write, naming `--force`. A failed package migration is
+  printed as a failed project statement is (the server's message, its constraint, never the
+  connection URL), and a project failure says package migrations stay applied only when this run
+  applied one.
 
 ### Fixed
 
@@ -651,6 +665,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `credential` is required unless `includeCurrent: true`. `LogoutParams.keyId` and `RotateKeyParams.oldKeyId` accept `null` (revoke
   nothing / refuse). **Migrate:** a direct `revokeAllKeysService` caller passes `credential`
   (`getAuth(c).credential`) in place of `currentKeyId`.
+- **spfn: `spfn db push` applies function package migrations before the project statements
+  (#378).** On an empty database, a project table with a foreign key to a package table (say
+  `spfn_auth.users`) failed with `schema "spfn_auth" does not exist`: the project statements ran
+  first, rolled back, and the package migrations never ran, so every retry failed the same way,
+  while `--dry-run` showed a clean plan. Both halves are still planned read-only, once, before any
+  write, and destructive project statements are confirmed (or declined) before any write. Then
+  each package's pending migrations apply, one committed transaction per package as `db migrate`
+  does, and then the project statements in one transaction. A failing project statement now exits
+  1 with the server's message (`❌ The project statements were rolled back: …`; it used to be
+  uncaught), and the package migrations it followed stay applied.
+- **spfn: a new app is told to run `spfn db push` (#378).** Both scaffold modes ship the starter
+  `examples` entity and no project migration, but `spfn init --mode full` said `db migrate` (which
+  creates the auth tables and never the app's), `spfn create --mode full` printed init's list and
+  then its own, and `--mode bare` named no database command at all — the app's first query failed on
+  a missing table. One list of next steps, printed once by whichever command ran, now names
+  `spfn db push` wherever the scaffold holds an entity or `@spfn/auth`. The generated README, the
+  entities README, the auth and MCP guides say `db push` for development and keep
+  `db generate` + `db migrate` for a migration-based deployment.
 - **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
   failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
   `params`, its stack header and the driver's `detail` reached the logs through the runner's
@@ -744,38 +776,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     grants no longer stamp `updated_at` from the application clock, and the user-settings upsert
     drops its redundant `updatedAt`. The `setWhere` guards still move the stamp only on a real
     change.
-- **spfn: `spfn db push` output and failures follow the new apply order (#378).** The plan lists each
-  function package's pending migrations first, then the project statements, with one line saying
-  so. A function package migration that fails now means the project schema was not applied
-  (`❌ Failed to apply function package migrations — nothing of the project schema was applied`);
-  it used to mean the project statements were already committed.
-- **spfn: `spfn db push`'s destructive confirmation has three outcomes (#378).** No skips the listed
-  statements and still applies the other project statements and the package migrations, as the
-  question now says. An aborted question (Ctrl-C, EOF) used to count as No and apply the rest; it
-  now exits 1 with nothing applied (`❌ The confirmation was aborted — nothing was applied`). A run
-  whose stdin is not a terminal used to hang at the question; with a destructive statement pending
-  and no `--force` it now exits 1 before any write, naming `--force`.
-
-### Fixed
-
-- **spfn: `spfn db push` applies function package migrations before the project statements
-  (#378).** On an empty database, a project table with a foreign key to a package table (say
-  `spfn_auth.users`) failed with `schema "spfn_auth" does not exist`: the project statements ran
-  first, rolled back, and the package migrations never ran, so every retry failed the same way,
-  while `--dry-run` showed a clean plan. Both halves are still planned read-only, once, before any
-  write, and destructive project statements are confirmed (or declined) before any write. Then
-  each package's pending migrations apply, one committed transaction per package as `db migrate`
-  does, and then the project statements in one transaction. A failing project statement now exits
-  1 with the server's message (`❌ The project statements were rolled back: …`; it used to be
-  uncaught), and the package migrations it followed stay applied.
-- **spfn: a new app is told to run `spfn db push` (#378).** Both scaffold modes ship the starter
-  `examples` entity and no project migration, but `spfn init --mode full` said `db migrate` (which
-  creates the auth tables and never the app's), `spfn create --mode full` printed init's list and
-  then its own, and `--mode bare` named no database command at all — the app's first query failed on
-  a missing table. One list of next steps, printed once by whichever command ran, now names
-  `spfn db push` wherever the scaffold holds an entity or `@spfn/auth`. The generated README, the
-  entities README, the auth and MCP guides say `db push` for development and keep
-  `db generate` + `db migrate` for a migration-based deployment.
 - **@spfn/auth: `mfaLockedEvent`, `passkeyEnrolledEvent` and `passkeyRevokedEvent` are exported from
   `@spfn/auth/server` (#361)**, with `MfaLockedPayload`, `PasskeyEnrolledPayload` and
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app
