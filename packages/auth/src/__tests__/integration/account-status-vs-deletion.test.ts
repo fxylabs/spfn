@@ -71,7 +71,7 @@ const { sendEmail, sendSMS } = await import('@spfn/notification/server');
 const { runInTransaction } = await import('@spfn/core/db');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
-const { configureDeletion } = await import('@/server/lib/deletion-config');
+const { __resetDeletionForTests } = await import('@/server/lib/deletion-config');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -155,7 +155,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         await teardownTestDb();
         restoreEnv('SPFN_AUTH_VERIFICATION_TOKEN_SECRET', previousTokenSecret);
         restoreEnv('SPFN_AUTH_TOKEN_ENCRYPTION_KEYS', previousKeyring);
-        configureDeletion();
+        __resetDeletionForTests();
     });
 
     beforeEach(async () =>
@@ -163,7 +163,7 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
         await clearTables(getTestDb());
         resetMemoryRateLimitStore();
         await initializeAuth();
-        configureDeletion();
+        __resetDeletionForTests();
         vi.mocked(sendEmail).mockClear();
         vi.mocked(sendSMS).mockClear();
     });

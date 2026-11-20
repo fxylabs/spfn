@@ -15,7 +15,7 @@ import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
 import { settleLinkMail } from './lib/link-mail-delivery';
-import { configureDeletion } from './lib/deletion-config';
+import { assertDeletionConsistent, configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
 import { configureDeviceLink } from './lib/device-link-config';
 import { assertChannelsConsistent, configureChannels, type AuthChannelsOptions } from './lib/channels-config';
@@ -168,6 +168,11 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * Registering the purge job itself is a separate step — see `authJobRouter`
      * (`@spfn/auth/server`) and the README, since job registration happens after
      * this lifecycle hook runs and can't be triggered from here.
+     *
+     * A later `createAuthLifecycle()` that omits it, or omits an option, leaves
+     * what an earlier one stated as it is; one that states an option with
+     * another value, or another `onBeforePurge`/`onPurge` function, refuses
+     * boot in `afterInfrastructure`, naming both.
      *
      * @example
      * ```typescript
@@ -471,6 +476,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // createAuthDeletionJobRouter() may be called by the app right after this
     // constructor returns (same builder chain), and it needs the resolved config
     // immediately. See lib/deletion-config.ts for the full ordering rationale.
+    // An omitted option leaves an earlier call's as it is; a contradicting one
+    // is refused below, in afterInfrastructure.
     configureDeletion(options.deletion);
 
     // Same reason, one step simpler: nothing but request handlers read this, and
@@ -510,7 +517,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
          *    on a partial Sign in with Apple web setup, on an Android relay or
          *    assetlinks.json setup that cannot work, on an authorization
          *    server issuer no client could use, or on two lifecycles that
-         *    stated different channels
+         *    stated different channels or deletion options
          * 1. Ensures admin account exists (creates if missing)
          * 2. Initializes RBAC system with built-in + custom roles/permissions
          * 3. Refuses boot on an SPFN_AUTH_ROLE_EMAIL_DOMAINS policy that cannot work
@@ -542,6 +549,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning: two createAuthLifecycle() calls that stated
             // different channels. Silent when at most one stated them.
             assertChannelsConsistent();
+            // Same reasoning: two createAuthLifecycle() calls that stated one
+            // deletion option differently, or two owners of one purge hook.
+            // Silent when at most one stated each.
+            assertDeletionConsistent();
             // Same reasoning, after the channels it reads: a contradicting
             // second statement, no method listed, a required factor beside a
             // device channel that proves none, passkey-only beside a weaker

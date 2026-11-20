@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { configureAuth, getAuthConfig, type AuthConfig } from '@/server/lib/config';
 import { createAuthLifecycle, type AuthLifecycleOptions } from '@/server/lifecycle';
-import { configureDeletion, getDeletionConfig } from '@/server/lib/deletion-config';
+import { __resetDeletionForTests, getDeletionConfig } from '@/server/lib/deletion-config';
 
 /** An option with a value outside its set, and what the refusal must name. */
 const AUTH_CONFIG_REFUSALS: [string, unknown, RegExp][] = [
@@ -39,7 +39,7 @@ describe('T5: unknown policy values refuse at configuration', () =>
     afterEach(() =>
     {
         configureAuth({ csrf: undefined, oauthProviders: undefined, oauthLink: undefined });
-        configureDeletion(undefined);
+        __resetDeletionForTests();
     });
 
     it.each(AUTH_CONFIG_REFUSALS)('configureAuth %s', (_option, config, refusal) =>

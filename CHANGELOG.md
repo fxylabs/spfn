@@ -354,6 +354,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `sendNotifications` as removed, pointing at the README recipe, so an app that relied on the
     notices does not silently stop sending them. A misspelt option is refused the same way, listing
     the options.
+  - Two `createAuthLifecycle()` calls combine their `deletion` options as their `channels` do: what
+    was stated holds. A lifecycle that states no `deletion` (or leaves an option out) changes nothing,
+    so a later one no longer silently drops the first one's `onPurge` or `allowSelfImmediate`. An
+    option stated twice with different values, or two different `onBeforePurge`/`onPurge` functions,
+    refuses boot naming both. `configureDeletion()` with no argument no longer resets to the defaults.
   - `auth.deletion.requested` gains `immediate: boolean`, true whenever the grace period is 0
     (`gracePeriodDays: 0`, or a request with `immediate: true`): the purge runs right after that
     commit, so there is no date to announce and nothing to cancel. `auth.deletion.cancelled` and

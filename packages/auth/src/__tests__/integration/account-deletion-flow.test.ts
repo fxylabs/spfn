@@ -65,7 +65,7 @@ const { mainAuthRouter } = await import('@/server/routes');
 const { defineRouter, registerRoutes } = await import('@spfn/core/route');
 const { ErrorHandler } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
-const { configureDeletion } = await import('@/server/lib/deletion-config');
+const { __resetDeletionForTests, configureDeletion } = await import('@/server/lib/deletion-config');
 const { sweepDuePurges, purgePendingRequest, requestAccountDeletionService } = await import('@/server/services/account-deletion.service');
 const { authDeletionRequestedEvent, authDeletionCancelledEvent, authDeletionCompletedEvent } = await import('@/server/events');
 const { accountDeletionRequestsRepository } = await import('@/server/repositories');
@@ -139,7 +139,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         await clearTables(db);
         await initializeAuth();
         await db.execute(sql`TRUNCATE spfn_auth.test_deletion_notice_outbox`);
-        configureDeletion(); // reset to defaults between tests
+        __resetDeletionForTests();
         sendEmailMock.mockClear();
         sendSMSMock.mockClear();
         vi.spyOn(authDeletionRequestedEvent, 'emit');
@@ -518,7 +518,7 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
         await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(1));
         expect(vi.mocked(authDeletionRequestedEvent.emit).mock.calls[1]![0]).toMatchObject({ userPublicId: configured.publicId, immediate: true });
 
-        configureDeletion();
+        __resetDeletionForTests();
         const { userId } = await registerViaFlow('n2-asked@example.com', 'SecurePassword123!');
         await requestAccountDeletionService(Number(userId), { requestedBy: 'admin', immediate: true });
         await vi.waitFor(() => expect(authDeletionCompletedEvent.emit).toHaveBeenCalledTimes(2));

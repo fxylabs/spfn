@@ -145,7 +145,7 @@ import {
     getPendingDeletionInfo,
     purgePendingRequest,
 } from '../../server/services/account-deletion.service';
-import { configureDeletion } from '../../server/lib/deletion-config';
+import { __resetDeletionForTests, configureDeletion } from '../../server/lib/deletion-config';
 // Imported the same way account-deletion.service.ts imports them (package
 // specifier, not the relative source path) — otherwise this resolves a second,
 // distinct module instance and `instanceof` fails even for the "same" class.
@@ -192,7 +192,7 @@ describe('account-deletion.service', () =>
         usersRepository.lockAccount.mockReset();
         usersRepository.lockAccount.mockImplementation((id: number) => usersRepository.findById(id));
         usersRepository.findByIdOnPrimary.mockImplementation((id: number) => usersRepository.findById(id));
-        configureDeletion(); // reset to defaults between tests
+        __resetDeletionForTests();
         accountDeletionRequestsRepository.create.mockImplementation(async (data: any) => ({ id: 99, ...data }));
         // Default: conditional claim/cancel succeeds (repo returns the updated row).
         // Individual tests override this to simulate the "0 rows matched" race.

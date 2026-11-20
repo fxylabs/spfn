@@ -3,7 +3,9 @@
  *
  * Singleton config for the account deletion/recovery lifecycle, mirroring the
  * one-time-token manager pattern (`lib/one-time-token.ts`): a mutable module-level
- * value, set once during `createAuthLifecycle()` and read at request/handler time.
+ * value, set by `createAuthLifecycle()` and read at request/handler time. Several
+ * lifecycles combine as their channels do (`lib/channels-config.ts`): what was
+ * stated holds, and a contradiction refuses boot — see `configureDeletion`.
  *
  * `purgeCron` is the one field this module does NOT make effective on its own —
  * `job('auth.deletion.purge').cron(expression)` bakes the cron string in at
@@ -86,17 +88,34 @@ const SEND_NOTIFICATIONS_REMOVED = 'deletion.sendNotifications was removed: @spf
     + 'Send your own from the auth.deletion.requested / auth.deletion.cancelled events and the deletion.onPurge hook — '
     + 'see the @spfn/auth README, "Account Deletion & Recovery", recipe "Telling the person".';
 
-let config: AuthDeletionConfig = {
+const DEFAULTS: AuthDeletionConfig = {
     gracePeriodDays: DEFAULT_DELETION_GRACE_PERIOD_DAYS,
     purgeStrategy: DEFAULT_DELETION_PURGE_STRATEGY,
     allowSelfImmediate: DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE,
     purgeCron: DEFAULT_DELETION_PURGE_CRON,
 };
 
+/** Every option an application stated, each as first stated, to hold every later call to. */
+let stated: Partial<AuthDeletionConfig> = {};
+
+/** Why boot must be refused, once two calls stated one option differently. */
+let contradiction: string | null = null;
+
+let config: AuthDeletionConfig = { ...DEFAULTS };
+
 /**
- * Set the resolved deletion config. Called synchronously from `createAuthLifecycle()`
+ * Set the deletion config. Called synchronously from `createAuthLifecycle()`
  * (not from `afterInfrastructure`) so it takes effect before any route/job handler
  * that reads `getDeletionConfig()` can run.
+ *
+ * The rule `configureChannels` follows: what was stated holds. A call that
+ * states nothing (`deletion` undefined, or an option left undefined) changes
+ * nothing, so a second lifecycle built without the option keeps the first
+ * one's `onPurge` and `allowSelfImmediate`. An option stated by two calls with
+ * different values is a contradiction, refused at boot by
+ * `assertDeletionConsistent` naming both, the first staying in force
+ * meanwhile. A hook stated twice is two owners of one hook, refused the same
+ * way unless it is the same function.
  *
  * @throws Error for an option it does not know — `sendNotifications`, removed,
  *   named as such, so an app that relied on it learns at boot that nothing is
@@ -106,18 +125,50 @@ let config: AuthDeletionConfig = {
  */
 export function configureDeletion(options?: Partial<AuthDeletionConfig>): void
 {
-    assertKnownDeletionOptions(options ?? {});
-    assertDeletionOption('purgeStrategy', options?.purgeStrategy, PURGE_STRATEGIES);
-    assertDeletionOption('allowSelfImmediate', options?.allowSelfImmediate, [true, false]);
+    if (options === undefined)
+    {
+        return;
+    }
 
-    config = {
-        gracePeriodDays: options?.gracePeriodDays ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
-        purgeStrategy: options?.purgeStrategy ?? DEFAULT_DELETION_PURGE_STRATEGY,
-        allowSelfImmediate: options?.allowSelfImmediate ?? DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE,
-        purgeCron: options?.purgeCron ?? DEFAULT_DELETION_PURGE_CRON,
-        onBeforePurge: options?.onBeforePurge,
-        onPurge: options?.onPurge,
-    };
+    assertKnownDeletionOptions(options);
+    assertDeletionOption('purgeStrategy', options.purgeStrategy, PURGE_STRATEGIES);
+    assertDeletionOption('allowSelfImmediate', options.allowSelfImmediate, [true, false]);
+
+    const statedNow: Partial<AuthDeletionConfig> = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+    contradiction ??= contradictionWith(statedNow);
+    stated = { ...statedNow, ...stated };
+    config = { ...DEFAULTS, ...stated };
+}
+
+/** The refusal for options stated again with another value, or null when every one agrees. */
+function contradictionWith(statedNow: Partial<AuthDeletionConfig>): string | null
+{
+    const clashes = DELETION_OPTIONS
+        .filter(key => key in statedNow && key in stated && statedNow[key] !== stated[key])
+        .map(key => describeClash(key, stated[key], statedNow[key]));
+
+    if (clashes.length === 0)
+    {
+        return null;
+    }
+
+    return `createAuthLifecycle() was given different deletion options in two calls: ${clashes.join('; ')}. `
+        + 'State each once, or the same in every call. Until then the first stays in force.';
+}
+
+function describeClash(key: keyof AuthDeletionConfig, first: unknown, second: unknown): string
+{
+    if (typeof first === 'function' || typeof second === 'function')
+    {
+        return `${key} by two different functions, ${functionName(first)} and ${functionName(second)} — one hook has one owner`;
+    }
+
+    return `${key} ${JSON.stringify(first)} and ${JSON.stringify(second)}`;
+}
+
+function functionName(value: unknown): string
+{
+    return typeof value === 'function' && value.name ? `'${value.name}'` : 'an anonymous function';
 }
 
 function assertKnownDeletionOptions(options: object): void
@@ -140,6 +191,30 @@ function assertDeletionOption(name: string, value: unknown, allowed: readonly un
     {
         throw new Error(`deletion.${name} does not accept ${JSON.stringify(value)}. Allowed: ${allowed.join(', ')}.`);
     }
+}
+
+/**
+ * Refuse boot when two `createAuthLifecycle()` calls stated one deletion
+ * option differently, or two different `onBeforePurge`/`onPurge` hooks.
+ *
+ * Called from `afterInfrastructure` rather than thrown by `configureDeletion`:
+ * a contradiction is only known once every `createAuthLifecycle()` call has
+ * run (see `lifecycle.ts`).
+ */
+export function assertDeletionConsistent(): void
+{
+    if (contradiction !== null)
+    {
+        throw new Error(contradiction);
+    }
+}
+
+/** Test-only: the defaults, nothing stated, no contradiction */
+export function __resetDeletionForTests(): void
+{
+    stated = {};
+    contradiction = null;
+    config = { ...DEFAULTS };
 }
 
 /**
