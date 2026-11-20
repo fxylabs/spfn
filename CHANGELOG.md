@@ -86,6 +86,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a run of the watch loop and settles when that run has finished.
 - **@spfn/core: watch state is per orchestrator.** The files each router's load reached were kept
   in a module-wide map, so a second orchestrator in the process watched the first app's files.
+- **spfn: `spfn db push --dry-run` writes nothing (spfn/spfn#163).** In 0.4.0-beta.1 a dry run
+  whose project schema had no pending change applied the function package migrations (and created
+  their bookkeeping tables) instead of previewing them; with a pending project change it said
+  nothing about them. `db push` now plans first — the project statements and, per function package,
+  the pending migrations, worked out without writing — prints both, and stops on a dry run before
+  any write. Each query of the dry run's plan runs on one connection in its own `BEGIN READ ONLY`
+  transaction, rolled back when the query ends, so the dry run holds no lock between statements;
+  before the plan runs, `transaction_read_only` is read once, in one such transaction, and every
+  plan query then opens its transaction with the same `BEGIN READ ONLY`; when that read is not
+  `on` it exits 1 naming `--dry-run`. Applying reads the same pending list, so a preview and the
+  push after it agree.
+
+  Output changes scripts may match: `✅ No changes detected — database is up to date` is now
+  `✅ No changes detected — project schema is up to date` (the old sentence was false while
+  package migrations were pending); when at least one function package is installed, every push
+  and dry run prints `📦 Function package migrations pending:` with one `<package> (<n>):` line
+  and its `- <migration>` lines per package, or `📦 No function package migrations pending`; a
+  dry run ends with `🔍 Dry run: nothing was applied.` The `📦 Applying function package
+  migrations:` header and its `- <package>` lines are unchanged, as in `spfn db migrate`.
 
 - **@spfn/core, spfn: codegen loads the app as ESM in the process's own module graph; one copy of
   `@spfn/core` (#335).** Codegen loaded the router (and `.spfnrc.ts`, the generator module, custom

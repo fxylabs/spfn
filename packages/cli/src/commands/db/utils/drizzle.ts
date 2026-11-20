@@ -664,12 +664,38 @@ export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<s
 }
 
 /**
- * Create a drizzle-orm PgDatabase instance for pushSchema().
- * Uses `pg` (node-postgres) driver because drizzle-kit's internal adapter
- * expects `execute()` to return `{ rows: [...] }`, which `pg` provides
- * but `postgres.js` does not.
+ * One client for `db push`: a drizzle-orm PgDatabase for pushSchema(), and
+ * `query` for raw SQL on the same client.
  */
-export async function createPushConnection(): Promise<{ db: any; close: () => Promise<void> }>
+export interface PushConnection
+{
+    db: any;
+    query: (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+    close: () => Promise<void>;
+    /** With `readOnly`: `transaction_read_only` as the server reports it inside one of the read-only transactions */
+    transactionReadOnly?: string;
+}
+
+/** The one method of a pg client that drizzle's node-postgres session and `PushConnection.query` call. */
+type Queryable = { query: (...args: any[]) => Promise<any> };
+
+/**
+ * Open the push connection on one pg client, not a pool. pushSchema sends
+ * each of its queries through `db.execute` and opens no transaction or client
+ * of its own.
+ *
+ * With `readOnly` every query, drizzle's and `query`'s alike, runs in its own
+ * `BEGIN READ ONLY` transaction (see readOnlyQueries): PostgreSQL refuses any
+ * write, and a lock a statement takes ends with that statement, so a dry run
+ * holds no lock between statements. The mode is set by a statement, not a
+ * startup parameter, so a pooler cannot drop it; `transactionReadOnly` is read
+ * back the same way, and the caller checks it before the plan runs.
+ *
+ * Uses `pg` (node-postgres) because drizzle-kit's internal adapter expects
+ * `execute()` to return `{ rows: [...] }`, which `pg` provides but
+ * `postgres.js` does not.
+ */
+export async function createPushConnection(options: { readOnly?: boolean } = {}): Promise<PushConnection>
 {
     loadEnv();
 
@@ -681,15 +707,58 @@ export async function createPushConnection(): Promise<{ db: any; close: () => Pr
     const pg = await import('pg');
     const { drizzle } = await import('drizzle-orm/node-postgres');
 
-    const connectionConfig = resolvePushConnectionConfig(env.DATABASE_URL);
-    const pool = new pg.default.Pool({
-        ...connectionConfig,
-        max: 1,
-    });
-    const db = drizzle({ client: pool });
+    const client = new pg.default.Client(resolvePushConnectionConfig(env.DATABASE_URL));
+    await client.connect();
+
+    const queryable: Queryable = options.readOnly ? readOnlyQueries(client) : client;
+    const connection: PushConnection = {
+        db: drizzle({ client: queryable as typeof client }),
+        query: async (text, params) => (await queryable.query(text, params)).rows,
+        close: () => client.end(),
+    };
+
+    return options.readOnly ? withReadOnlySetting(connection) : connection;
+}
+
+/**
+ * A `query` that runs each call as `BEGIN READ ONLY`, the call, `ROLLBACK` on
+ * `client`. pushSchema issues its queries concurrently, and pg alone would
+ * interleave the three statements of different calls, so the calls form a
+ * queue: each starts once the one before it has rolled back, whether or not
+ * that one failed.
+ */
+function readOnlyQueries(client: Queryable): Queryable
+{
+    let previous: Promise<unknown> = Promise.resolve();
+
+    const inReadOnlyTransaction = async (args: unknown[]) =>
+    {
+        await client.query('BEGIN READ ONLY');
+        try
+        {
+            return await client.query(...args);
+        }
+        finally
+        {
+            await client.query('ROLLBACK');
+        }
+    };
 
     return {
-        db,
-        close: () => pool.end(),
+        query: (...args) =>
+        {
+            const result = previous.then(() => inReadOnlyTransaction(args));
+            previous = result.catch(() => undefined);
+
+            return result;
+        },
     };
+}
+
+/** Read back, inside one of the read-only transactions, whether the server holds it read-only. */
+async function withReadOnlySetting(connection: PushConnection): Promise<PushConnection>
+{
+    const [{ setting }] = await connection.query(`SELECT current_setting('transaction_read_only') AS setting`);
+
+    return { ...connection, transactionReadOnly: String(setting) };
 }

@@ -28,14 +28,27 @@ export type FunctionMigrationPlan = FunctionMigrationInfo & {
 };
 
 /**
+ * What working out the pending migrations needs: queries only. `spfn db push`
+ * passes its own connection, read-only on a dry run.
+ */
+export interface MigrationReader
+{
+    query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+}
+
+/**
  * Minimal DB surface the runner needs. Adapters exist for postgres.js (runtime)
  * and PGlite (tests).
  */
-export interface MigrationDb
+export interface MigrationDb extends MigrationReader
 {
-    query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
     transaction<T>(fn: (tx: MigrationDb) => Promise<T>): Promise<T>;
 }
+
+export type PendingFunctionMigrations = {
+    packageName: string;
+    entries: FunctionMigrationEntry[];
+};
 
 /**
  * Parse migration folders for all packages up front, so a broken package fails
@@ -62,32 +75,21 @@ async function migrateLegacyTable(
     plans: FunctionMigrationPlan[],
 ): Promise<void>
 {
-    const legacyCheck = await db.query(
-        `SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'drizzle' AND table_name = '__spfn_fn_migrations'
-        ) AS "exists"`,
-    );
+    const legacyHashes = await readLegacyHashes(db);
 
-    if (!legacyCheck[0]?.exists)
+    if (!legacyHashes)
     {
         return;
     }
 
     console.log(chalk.dim('\n  Migrating legacy shared migration table to per-package tables...'));
 
-    const legacyRows = await db.query(
-        `SELECT hash, created_at FROM drizzle."__spfn_fn_migrations" ORDER BY id`,
-    ) as { hash: string; created_at: string }[];
-
-    if (legacyRows.length === 0)
+    if (legacyHashes.size === 0)
     {
         await db.query(`DROP TABLE drizzle."__spfn_fn_migrations"`);
 
         return;
     }
-
-    const legacyHashes = new Set(legacyRows.map(row => row.hash));
 
     for (const plan of plans)
     {
@@ -107,29 +109,96 @@ async function migrateLegacyTable(
 
         // The legacy table stores sha256 hashes of migration SQL content, so a
         // hash match identifies which legacy rows belong to this package.
-        let copied = 0;
-        for (const entry of plan.entries)
-        {
-            if (!legacyHashes.has(entry.hash))
-            {
-                continue;
-            }
+        const legacyEntries = plan.entries.filter(entry => legacyHashes.has(entry.hash));
 
+        for (const entry of legacyEntries)
+        {
             await db.query(
                 `INSERT INTO drizzle."${tableName}" (hash, created_at) VALUES ($1, $2)`,
                 [entry.hash, entry.millis],
             );
-            copied++;
         }
 
-        if (copied > 0)
+        if (legacyEntries.length > 0)
         {
-            console.log(chalk.dim(`    ✓ ${plan.packageName}: copied ${copied} migration record(s)`));
+            console.log(chalk.dim(`    ✓ ${plan.packageName}: copied ${legacyEntries.length} migration record(s)`));
         }
     }
 
     await db.query(`DROP TABLE drizzle."__spfn_fn_migrations"`);
     console.log(chalk.dim('    ✓ Legacy migration table removed\n'));
+}
+
+/**
+ * The hashes in the legacy shared table, or undefined when there is none.
+ */
+async function readLegacyHashes(db: MigrationReader): Promise<Set<string> | undefined>
+{
+    const legacyCheck = await db.query(
+        `SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'drizzle' AND table_name = '__spfn_fn_migrations'
+        ) AS "exists"`,
+    );
+
+    if (!legacyCheck[0]?.exists)
+    {
+        return undefined;
+    }
+
+    const legacyRows = await db.query(`SELECT hash FROM drizzle."__spfn_fn_migrations" ORDER BY id`);
+
+    return new Set(legacyRows.map(row => String(row.hash)));
+}
+
+/**
+ * The newest `created_at` in a package's table, or undefined when the table is
+ * missing or empty. Looked up in `pg_catalog`, which needs no `drizzle` schema.
+ */
+async function readLastRecordedMillis(db: MigrationReader, tableName: string): Promise<number | undefined>
+{
+    const exists = await db.query(`SELECT to_regclass($1) IS NOT NULL AS "exists"`, [`drizzle."${tableName}"`]);
+
+    if (!exists[0]?.exists)
+    {
+        return undefined;
+    }
+
+    const rows = await db.query(
+        `SELECT created_at FROM drizzle."${tableName}" ORDER BY created_at DESC LIMIT 1`,
+    );
+
+    return rows.length > 0 ? Number(rows[0]?.created_at) : undefined;
+}
+
+/**
+ * Each package's pending migrations, without writing anything.
+ *
+ * Pending = entries newer than the last applied record — the same
+ * timestamp-based rule drizzle-orm ≤0.45 used for these tables, so databases
+ * migrated by earlier CLI versions continue seamlessly. A package with no
+ * record yet counts what the legacy shared table holds, as migrateLegacyTable
+ * would copy it. Applying reads its pending list here too, so a preview and
+ * the run after it cannot disagree.
+ */
+export async function resolvePendingFunctionMigrations(
+    db: MigrationReader,
+    plans: FunctionMigrationPlan[],
+): Promise<PendingFunctionMigrations[]>
+{
+    const legacyHashes = await readLegacyHashes(db) ?? new Set<string>();
+    const pending: PendingFunctionMigrations[] = [];
+
+    for (const plan of plans)
+    {
+        const legacyMillis = plan.entries.filter(entry => legacyHashes.has(entry.hash)).map(entry => entry.millis);
+        const lastMillis = await readLastRecordedMillis(db, functionMigrationsTable(plan.packageName))
+            ?? Math.max(Number.NEGATIVE_INFINITY, ...legacyMillis);
+
+        pending.push({ packageName: plan.packageName, entries: plan.entries.filter(entry => entry.millis > lastMillis) });
+    }
+
+    return pending;
 }
 
 async function ensureMigrationsTable(db: MigrationDb, tableName: string): Promise<void>
@@ -145,11 +214,8 @@ async function ensureMigrationsTable(db: MigrationDb, tableName: string): Promis
 }
 
 /**
- * Apply one package's pending migrations inside a transaction.
- *
- * Pending = entries newer than the last applied record — the same
- * timestamp-based rule drizzle-orm ≤0.45 used for these tables, so databases
- * migrated by earlier CLI versions continue seamlessly.
+ * Apply one package's pending migrations (resolvePendingFunctionMigrations)
+ * inside a transaction.
  */
 export async function applyFunctionMigrationPlan(
     db: MigrationDb,
@@ -160,11 +226,7 @@ export async function applyFunctionMigrationPlan(
 
     await ensureMigrationsTable(db, tableName);
 
-    const rows = await db.query(
-        `SELECT created_at FROM drizzle."${tableName}" ORDER BY created_at DESC LIMIT 1`,
-    );
-    const lastMillis = rows.length > 0 ? Number(rows[0]?.created_at) : Number.NEGATIVE_INFINITY;
-    const pending = plan.entries.filter(entry => entry.millis > lastMillis);
+    const [{ entries: pending }] = await resolvePendingFunctionMigrations(db, [plan]);
 
     if (pending.length === 0)
     {
