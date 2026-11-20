@@ -842,7 +842,12 @@ matches no folder, or when the folder still uses the drizzle-kit ≤0.31 layout
 writing anything, and in either refusal case it reports an error instead of a count —
 `` bookkeeping does not match local migrations; `spfn db migrate` will refuse `` — which the boot
 gate refuses to start on (`MigrationBookkeepingMismatchError`, exported from `@spfn/core/db`).
-Restore the missing folders, or correct the rows, before migrating.
+The error names each unmatched row and the folder stamp or hash that would match it: restore that
+folder, or delete the row after confirming its SQL is applied, then check `spfn db status`.
+
+A folder renamed after it was applied is the one pending case `spfn db migrate` must not fix:
+it would run the applied SQL again. Rename the folder back, or set the row's `name` to the new
+folder name, then check `spfn db status`.
 
 An app already deployed with the app role as owner moves the tables once (nothing does it
 automatically), as a superuser or the current owner:

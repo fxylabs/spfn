@@ -134,10 +134,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read as applied while migrate ran it again. Status now calls drizzle-orm's `readMigrationFiles`
   and `getMigrationsToRun`, the calls migrate makes, so it lists exactly what migrate will run. This
   is the bug being fixed: an app that read "0 pending" may now read "N pending" and the gate
-  refuses to boot it — run `pnpm spfn db migrate`. A bookkeeping table written before drizzle-orm
-  1.0 (no `name` column) is named the way migrate names it, without writing; when a row matches no
-  folder in `src/server/drizzle`, or the folder still has the drizzle-kit ≤0.31 `meta/_journal.json`
-  layout, migrate refuses, and status now reports the error
+  refuses to boot it. What to do depends on why it is pending — read the names `spfn db status`
+  lists: a migration with an older timestamp that was never applied → run `pnpm spfn db migrate`;
+  a folder renamed after it was applied → do **not** migrate (it would run the applied SQL again):
+  rename the folder back, or set that row's `name` in `drizzle.__drizzle_migrations` to the new
+  folder name, then check that `spfn db status` no longer lists it. A bookkeeping table written
+  before drizzle-orm 1.0 (no `name` column) is named the way migrate names it, without writing;
+  when a row matches no folder in `src/server/drizzle`, or the folder still has the drizzle-kit
+  ≤0.31 `meta/_journal.json` layout, migrate refuses, and status now reports the error
   `bookkeeping does not match local migrations` (new `MigrationBookkeepingMismatchError` in
   `@spfn/core/db`) instead of a clean count: `db status` exits 1, `db status --json` reports
   `reachable: false` with the new `reason: "bookkeeping-mismatch"` and the text in `detail`
@@ -146,9 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawn the server, health reports `status: "unknown"` with the reason, and the boot gate refuses
   to start whatever `SPFN_ALLOW_PENDING_MIGRATIONS` / `allowPending` say — they mean "start
   although migrations are still to be applied", and migrate refusing the database means nothing
-  applied later repairs it; the refusal says so. Restore the missing
-  folder or correct the row (or run `drizzle-kit up` for the journal layout), then
-  `pnpm spfn db migrate`. Function package migrations keep #357's rule.
+  applied later repairs it; the refusal says so. For a version-0 row no folder matches, the error
+  names each row and the folder stamp or hash that would match it: restore that folder, or delete
+  the row after confirming its SQL is applied; for the journal layout, run `drizzle-kit up`. Then
+  check `spfn db status`. Function package migrations keep #357's rule.
 - **BREAKING: @spfn/core: `filterPendingEntries` is no longer exported from `@spfn/core/db`
   (#357).** It was the shared "name OR timestamp" filter; function packages now go through
   `pendingFunctionMigrations`, and the project target's rule (unchanged here, #370) is private to
