@@ -28,6 +28,7 @@ import type { TestContext } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api-postgres';
 import { closeDatabase, initDatabase } from '../../manager';
+import { runsInCi } from '../../__tests__/helpers/ci';
 import { TEST_DATABASE_URL } from '../../__tests__/helpers/db-fixture';
 import { SEED_ROWS, TENANCY_SCHEMA, TENANCY_TABLES } from './tenancy-fixtures';
 
@@ -77,7 +78,7 @@ export async function twoRoleUnavailability(owner: postgres.Sql, app: postgres.S
         () => 'PostgreSQL not available at TEST_DATABASE_URL',
     );
 
-    if (reason !== undefined && process.env.CI)
+    if (reason !== undefined && runsInCi())
     {
         throw new Error(`${reason}, and CI provides both roles — failing instead of skipping`);
     }

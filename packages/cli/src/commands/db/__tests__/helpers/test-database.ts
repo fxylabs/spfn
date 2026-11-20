@@ -50,7 +50,7 @@ export async function requireDatabase(sql: postgres.Sql, label: string): Promise
 {
     const reachable = await sql`select 1`.then(() => true, () => false);
 
-    if (!reachable && process.env.CI)
+    if (!reachable && runsInCi())
     {
         throw new Error(`${label}: PostgreSQL is not reachable, and CI runs it — failing instead of skipping`);
     }
@@ -61,4 +61,16 @@ export async function requireDatabase(sql: postgres.Sql, label: string): Promise
     }
 
     return reachable;
+}
+
+/**
+ * `CI` set to anything but nothing, `false` or `0`: the definition core's test
+ * helpers use (`src/db/__tests__/helpers/ci.ts`). A truthiness test took
+ * `CI=false` for CI and turned a skip into a failure.
+ */
+function runsInCi(): boolean
+{
+    const value = process.env.CI?.trim().toLowerCase();
+
+    return value !== undefined && value !== '' && value !== 'false' && value !== '0';
 }

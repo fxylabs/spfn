@@ -385,7 +385,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PostgreSQL or the second test role was missing, so vitest counted those rows as passed. They
   now skip through the test context; the two-role harness (`tenancy-db.ts`,
   `migration-gate-roles.test.ts`) also checks that the app role connects, and fails instead of
-  skipping under `CI`, whose PostgreSQL has both roles.
+  skipping under CI, whose PostgreSQL has both roles. "CI" means `CI` set to anything but
+  nothing, `false` or `0`, there and in the spfn tenant tests' database check; `CI=false` used to
+  count as CI and turn the skip into a failure.
 
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
