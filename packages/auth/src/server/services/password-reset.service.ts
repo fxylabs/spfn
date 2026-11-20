@@ -51,7 +51,7 @@ import { accountRefusal, admitsAccount } from './admission.service';
 import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
-import { loginBindingFields, type LoginResult } from './auth.service';
+import { assertNewPasswordDiffers, loginBindingFields, type LoginResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType, SessionBindingType } from '../types';
 
 /**
@@ -359,8 +359,10 @@ async function replaceCredentials(
  * nothing signed in.
  *
  * A refusal that is the user's to fix — a password the policy rejects, a body
- * with no device key — leaves the setup session usable, so the fix is retyping
- * the password rather than asking for a fresh email.
+ * with no device key, the current password on an account that must change it
+ * (400 `ValidationError`, the flag kept: #362) — leaves the setup session
+ * usable, so the fix is retyping the password rather than asking for a fresh
+ * email.
  *
  * The answer carries the binding fields, like every other path that starts a
  * session. A reset on an account that opted in registers a bound key — 24 hours,
@@ -405,6 +407,13 @@ export async function completePasswordResetService(
         authLogger.service.warn('Password reset session refused', { reason: 'account is no longer active' });
 
         throw new PasswordResetSessionError();
+    }
+
+    // Under the lock, before anything is written: the refusal leaves the setup
+    // session live, so the person retypes a different password.
+    if (user.passwordChangeRequired)
+    {
+        await assertNewPasswordDiffers(params.password, user.passwordHash);
     }
 
     const registered = await replaceCredentials(row, user, passwordHash, params);

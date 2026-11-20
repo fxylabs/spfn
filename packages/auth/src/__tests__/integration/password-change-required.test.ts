@@ -279,6 +279,23 @@ describe.skipIf(!dbAvailable)('passwordChangeRequired is a restricted session (#
         }
     }
 
+    /** A reset link asked for, mailed and confirmed: the setup secret it hands out. */
+    async function openResetSession(): Promise<string>
+    {
+        expect((await post('/_auth/password/reset', { email: EMAIL })).status).toBe(200);
+        const mail = sendEmail.mock.calls.filter(([arg]) => arg?.template === 'password-reset').at(-1)!;
+        const token = new URL(mail[0].data.confirmUrl).searchParams.get('token')!;
+        const confirmed = await post('/_auth/password/reset/confirm', { token });
+        expect(confirmed.status).toBe(200);
+
+        return (await confirmed.json()).setupSecret;
+    }
+
+    function completeReset(setupSecret: string, password: string, keyPair: KeyPair): Promise<Response>
+    {
+        return post('/_auth/password/reset/complete', { setupSecret, password, ...deviceKey(keyPair) });
+    }
+
     function codeFor(secret: string): string
     {
         return hotp(decodeBase32(secret), totpStep(Date.now()));
@@ -433,22 +450,42 @@ describe.skipIf(!dbAvailable)('passwordChangeRequired is a restricted session (#
 
     it('P7: a password reset clears the restriction — the session it answers is admitted on an app route', async () =>
     {
-        expect((await post('/_auth/password/reset', { email: EMAIL })).status).toBe(200);
-        const mail = sendEmail.mock.calls.filter(([arg]) => arg?.template === 'password-reset').at(-1)!;
-        const token = new URL(mail[0].data.confirmUrl).searchParams.get('token')!;
-        const confirmed = await post('/_auth/password/reset/confirm', { token });
-        expect(confirmed.status).toBe(200);
+        const setupSecret = await openResetSession();
         const keyPair = generateKeyPair('ES256');
 
-        const completed = await post('/_auth/password/reset/complete', {
-            setupSecret: (await confirmed.json()).setupSecret,
-            password: RESET_PASSWORD,
-            ...deviceKey(keyPair),
-        });
+        const completed = await completeReset(setupSecret, RESET_PASSWORD, keyPair);
 
         expect(completed.status, await completed.clone().text()).toBe(200);
         expect(await flag()).toBe(false);
         expect((await request('GET', '/app/whoami', signedBy(keyPair).authorization)).status).toBe(200);
+    });
+
+    it('R1: a reset of a flagged account to its current password is 400 and keeps the flag; the same setup session then completes with another', async () =>
+    {
+        const setupSecret = await openResetSession();
+
+        const refused = await completeReset(setupSecret, PASSWORD, generateKeyPair('ES256'));
+        const text = await refused.text();
+
+        expect(refused.status, text).toBe(400);
+        expect(JSON.parse(text).error.code, text).toBe('ValidationError');
+        expect(await flag()).toBe(true);
+        expect((await passwordLogin()).response.status).toBe(200);
+
+        const retried = await completeReset(setupSecret, RESET_PASSWORD, generateKeyPair('ES256'));
+
+        expect(retried.status, await retried.clone().text()).toBe(200);
+        expect(await flag()).toBe(false);
+    });
+
+    it('R1b: an unflagged account still resets to the password it had', async () =>
+    {
+        await setFlag(false);
+
+        const completed = await completeReset(await openResetSession(), PASSWORD, generateKeyPair('ES256'));
+
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        expect((await passwordLogin()).response.status).toBe(200);
     });
 
     it('X1: re-typing the current password as the new one is refused, and the requirement stays', async () =>

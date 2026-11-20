@@ -445,7 +445,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it whatever the route. Renewal is unchecked, as for enrolment. What clears it: the change itself, in
   its own transaction under the account lock, or a completed password reset. **The new password must
   differ from the current one**: `PUT /_auth/password` with the current password as `newPassword` is
-  400 `ValidationError` and clears nothing (one more hash compare). `GET /_auth/session`, the web
+  400 `ValidationError` and clears nothing (one more hash compare); a reset of a flagged account to
+  its current password is the same 400, its setup session left usable for another try (an unflagged
+  account may still reset to the password it had). `GET /_auth/session`, the web
   OAuth finalize answer and the native OAuth answer now carry `passwordChangeRequired`.
   `createAuthLifecycle()`'s `afterRoutes` now refuses to boot an app built by another copy of Hono
   whatever the second-factor policy, since a flagged account's request reads its route. Mobile contract

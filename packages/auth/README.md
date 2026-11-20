@@ -840,7 +840,9 @@ package's client helpers call neither on the way to a change.
 under the account lock, or a completed password reset. The next request reads the account on the
 primary and is admitted — the same session, nothing re-issued. **The new password must differ from
 the current one:** sending the current password as `newPassword` is 400 `ValidationError`, and the
-flag stays.
+flag stays. A reset of a flagged account is held to the same rule (an unflagged account may still
+reset to the password it had): 400 `ValidationError`, nothing written, and the setup session stays
+usable for another try until it expires.
 
 **With a second factor to enrol as well**, both requirements are outstanding. A request is admitted
 when the route admits **either** one — requiring both would leave no route at all, since the change
@@ -2759,8 +2761,8 @@ it was not already, `passwordChangeRequired` is cleared, and `auth.password.rese
 after commit.
 
 The new hash, the revocations, the new device key and the completion mark commit together. A
-password that fails the strength policy leaves the session usable, so the user retypes rather
-than requesting a fresh email.
+password that fails the strength policy — or, on an account that must change its password, the
+current one — leaves the session usable, so the user retypes rather than requesting a fresh email.
 
 **Settings.**
 

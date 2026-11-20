@@ -694,13 +694,16 @@ async function verifyCurrentPassword(params: ChangePasswordParams): Promise<stri
 }
 
 /**
- * Refuse a new password that is the current one — one more hash compare,
- * against the hash the current password was just verified with. An account
- * setting its first password has nothing to compare.
+ * Whether a new password may clear `passwordChangeRequired` (#362): not when it
+ * is the current one, or the seeded password would survive the requirement.
+ * One more hash compare; an account with no password has nothing to compare.
  *
- * @throws ValidationError
+ * The change holds every account to it. A reset holds only a flagged account:
+ * resetting an unflagged account to the password it had stays allowed.
+ *
+ * @throws ValidationError when the new password is the current one
  */
-async function assertNewPasswordDiffers(newPassword: string, currentHash: string | null): Promise<void>
+export async function assertNewPasswordDiffers(newPassword: string, currentHash: string | null): Promise<void>
 {
     if (currentHash !== null && await verifyPassword(newPassword, currentHash))
     {
