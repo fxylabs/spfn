@@ -151,12 +151,19 @@ describe('{ primary: true } on the repository read helpers (app role, integratio
         expect(db.readLog).toEqual([]);
     });
 
-    it.for(READS)('P2 $helper without the option still runs on the read pool, nothing on the write pool', async ({ read, id, own, setting }, context) =>
+    it.for(READS)('P2 $helper without the option sends to the read pool the same statements { primary: true } sends to the write pool, nothing to the write pool', async ({ read, id, own, setting }, context) =>
     {
         db.skipIfUnavailable(context);
 
+        expect(await read(id, own, { primary: true })).toBe(1);
+        expect(db.readLog).toEqual([]);
+
+        const onPrimary = db.writeLog.splice(0);
+
+        db.settingLog.length = 0;
+
         expect(await read(id, own)).toBe(1);
-        expect(db.readLog.filter(isBegin)).toHaveLength(1);
+        expect(db.readLog).toEqual(onPrimary);
         expect(db.readLog).toContain('set transaction read only');
         expect(db.settingLog).toEqual([{ pool: 'read', setting, value: String(id) }]);
         expect(db.writeLog).toEqual([]);
@@ -170,24 +177,34 @@ describe('{ primary: true } on the repository read helpers (app role, integratio
 
         app.get('/w/:workspaceId/reads', tenancy.guard({ param: 'workspaceId' }), async (c) =>
         {
+            db.writeLog.length = 0;
+            db.readLog.length = 0;
+
             const own = await read(7, 'two', { primary: true });
             const foreignLabel = await read(7, 'three', { primary: true });
+            const readsOnPool = { write: db.writeLog.filter(isBegin).length, read: db.readLog.length };
             const sent = db.writeLog.length + db.readLog.length;
             const refusal = await read(9, 'three', { primary: true }).then(
                 () => 'admitted',
                 (error: unknown) => (error instanceof TenantMismatchError ? 'TenantMismatchError' : String(error)),
             );
 
-            return c.json({ own, foreignLabel, refusal, sentByRefusal: db.writeLog.length + db.readLog.length - sent });
+            return c.json({ own, foreignLabel, readsOnPool, refusal, sentByRefusal: db.writeLog.length + db.readLog.length - sent });
         });
 
         const response = await app.request('/w/7/reads');
 
         expect(response.status).toBe(200);
-        expect(await response.json()).toEqual({ own: 1, foreignLabel: 0, refusal: 'TenantMismatchError', sentByRefusal: 0 });
+        expect(await response.json()).toEqual({
+            own: 1,
+            foreignLabel: 0,
+            readsOnPool: { write: 2, read: 0 },
+            refusal: 'TenantMismatchError',
+            sentByRefusal: 0,
+        });
     });
 
-    it.for(READS)('P4 $helper with { primary: true } inside a transaction runs in it and sees its uncommitted write', async ({ read, id, write }, context) =>
+    it.for(READS)('P4 $helper with { primary: true } inside a transaction runs in it and sees its uncommitted write; after the commit it reads that write on the write pool', async ({ read, id, write }, context) =>
     {
         db.skipIfUnavailable(context);
 
@@ -201,6 +218,13 @@ describe('{ primary: true } on the repository read helpers (app role, integratio
         expect(seen).toBe(1);
         expect(db.writeLog.filter(isBegin)).toHaveLength(1);
         expect(db.writeLog).not.toContain('set transaction read only');
+        expect(db.readLog).toEqual([]);
+
+        db.writeLog.length = 0;
+
+        expect(await read(id, 'fresh', { primary: true })).toBe(1);
+        expect(db.writeLog.filter(isBegin)).toHaveLength(1);
+        expect(db.writeLog).toContain('set transaction read only');
         expect(db.readLog).toEqual([]);
     });
 
