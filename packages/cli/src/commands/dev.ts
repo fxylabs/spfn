@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { execa, type ExecaChildProcess } from 'execa';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
+import { getCliVersion, getCorePeerRange } from '../utils/version.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
 import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
@@ -50,13 +51,6 @@ function writeAgentInstructions(cwd: string, agentFiles: boolean): void
         logger.warn(`[SPFN] Could not write the agent instruction files (AGENTS.md, CLAUDE.md): ${error instanceof Error ? error.message : String(error)}`);
     }
 }
-
-/**
- * The first @spfn/core whose `CodegenOrchestrator` loads its generators
- * (`loadGenerators`), which the watcher entry needs. The release that ships it
- * raises this package's `@spfn/core` peer floor to it.
- */
-const CORE_LOADING_GENERATORS = '0.4.0-beta.2';
 
 /**
  * The codegen watcher's entry, `.spfn/watcher.mjs`: the generators of the
@@ -121,8 +115,8 @@ const codegenResolutionError = () =>
 // A core that cannot load the generators itself — no './codegen' to resolve,
 // no CodegenOrchestrator, or one without loadsGenerators, which ignores
 // loadGenerators and fails on the generator list it never got — stops the
-// watcher with one message, naming the core installed and the first that loads
-// them (${CORE_LOADING_GENERATORS} or later). Any other failure (no core at all, a core broken in its own code
+// watcher with one message, naming the core installed and the range this spfn
+// requires. Any other failure (no core at all, a core broken in its own code
 // or dependencies) is not an old core and surfaces as its own error.
 const resolutionError = codegenResolutionError();
 const unresolvableCore = ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_MODULE_NOT_FOUND'].includes(resolutionError?.code)
@@ -137,7 +131,7 @@ const codegen = unresolvableCore ? {} : await import('@spfn/core/codegen');
 
 if (codegen.CodegenOrchestrator?.loadsGenerators !== true)
 {
-    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion() ?? 'of unknown version'} is installed, and the spfn dev watcher needs @spfn/core ${CORE_LOADING_GENERATORS} or later. Update @spfn/core.\`);
+    console.error(\`[SPFN] Codegen watcher not started: @spfn/core \${installedCoreVersion() ?? 'of unknown version'} is installed; spfn ${getCliVersion()} requires @spfn/core ${getCorePeerRange()} and a core that reloads generators. Update @spfn/core.\`);
     process.exit(1);
 }
 

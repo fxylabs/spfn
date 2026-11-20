@@ -574,7 +574,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         }
     }, 60_000);
 
-    it('R33b the watcher entry with a core that cannot load its generators stops, naming the installed core and the minimum', async () =>
+    it('R33b the watcher entry with a core that cannot load its generators stops, naming the installed core and the required range', async () =>
     {
         // Without it, a core older than the config reload ignores loadGenerators:
         // the watcher dies on a TypeError about flatMap, and spfn dev runs on
@@ -587,10 +587,12 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
         write('.spfn/watcher.mjs', watcherEntrySource());
 
         const watcher = startWatcher(tsx);
+        const cli = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8'));
         const version = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf8')).version;
 
         expect(await watcher.exited, watcher.output()).toBe(1);
-        expect(watcher.output()).toContain(`[SPFN] Codegen watcher not started: @spfn/core ${version} is installed, and the spfn dev watcher needs @spfn/core 0.4.0-beta.2 or later. Update @spfn/core.`);
+        expect(watcher.output()).toContain(`[SPFN] Codegen watcher not started: @spfn/core ${version} is installed; `
+            + `spfn ${cli.version} requires @spfn/core ${cli.peerDependencies['@spfn/core']} and a core that reloads generators. Update @spfn/core.`);
         expect(watcher.output()).not.toContain('flatMap');
     });
 
