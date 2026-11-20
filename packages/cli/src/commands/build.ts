@@ -54,12 +54,6 @@ async function buildProject(options: BuildOptions): Promise<void>
         process.env.NODE_ENV = 'production';
     }
 
-    // Suppress verbose logs during build (codegen, etc.)
-    if (!process.env.LOG_LEVEL) 
-    {
-        process.env.LOG_LEVEL = 'warn';
-    }
-
     const cwd = process.cwd();
     const pm = detectPackageManager(cwd);
 
@@ -99,7 +93,7 @@ async function buildProject(options: BuildOptions): Promise<void>
             const orchestrator = new CodegenOrchestrator({
                 generators,
                 cwd,
-                debug: true,
+                debug: false,
 
                 // A generator that refuses at build time — a broken route contract,
                 // a router that will not load — must reach the exit code rather

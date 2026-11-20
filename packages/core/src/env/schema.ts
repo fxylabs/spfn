@@ -323,12 +323,12 @@ export function envUrl<T extends Omit<EnvVarSchema, 'key' | 'type'>>(
  * @example
  * ```typescript
  * const schema = {
- *   LOG_LEVEL: {
+ *   APP_LOG_LEVEL: {
  *     ...envEnum(['debug', 'info', 'warn', 'error'] as const, {
  *       description: 'Logging level',
  *       default: 'info',
  *     }),
- *     key: 'LOG_LEVEL',
+ *     key: 'APP_LOG_LEVEL',
  *   }
  * };
  * ```
