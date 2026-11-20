@@ -80,6 +80,21 @@ describe('the machine-readable migration report', () =>
         expect(unreadableStatusReport('not-configured')).toMatchObject({ configured: false, reachable: false });
         expect(unreadableStatusReport('unreachable')).toMatchObject({ configured: true, reachable: false });
     });
+
+    it('reports a bookkeeping mismatch as its own reason, with its text, never as unreachable', () =>
+    {
+        expect(unreadableStatusReport('bookkeeping-mismatch', 'id 1 matches no folder')).toEqual({
+            schemaVersion: 1,
+            configured: true,
+            reachable: false,
+            reason: 'bookkeeping-mismatch',
+            detail: 'id 1 matches no folder',
+            targets: [],
+            pending: [],
+            pendingCount: 0,
+        });
+        expect(unreadableStatusReport('unreachable')).not.toHaveProperty('detail');
+    });
 });
 
 describe('reading the report back out of a child process', () =>
@@ -111,6 +126,20 @@ describe('reading the report back out of a child process', () =>
         expect(readReport(childOutput('no marker here at all'))).toBeNull();
         expect(readReport(childOutput(`${DB_STATUS_JSON_MARKER}{not json`))).toBeNull();
         expect(readReport(childOutput(printed({ schemaVersion: 2 })))).toBeNull();
+    });
+
+    it('hands the port a bookkeeping mismatch with its text, so the Kit can refuse on it', () =>
+    {
+        const report = readReport(childOutput(printed(unreadableStatusReport('bookkeeping-mismatch', 'id 1 matches no folder'))));
+
+        expect(toStatus(report)).toEqual({
+            configured: true,
+            reachable: false,
+            applied: [],
+            pending: [],
+            bookkeepingMismatch: 'id 1 matches no folder',
+        });
+        expect(toStatus(unreadableStatusReport('unreachable'))).not.toHaveProperty('bookkeepingMismatch');
     });
 
     it('turns a child that said nothing usable into "cannot be read"', () =>

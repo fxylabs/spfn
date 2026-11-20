@@ -18,7 +18,7 @@ import { expandArchive } from './../expand.js';
 import { createChildEnv, registryNpmrc } from './../child-env.js';
 import { readManifest, assertManifestCliCompatible, type KitReleaseManifestView } from './../manifest.js';
 import { installedGraphMismatches } from './../package-graph.js';
-import { readCatalog, type KitAdapters, type KitCatalogView } from './../ports.js';
+import { readCatalog, type DatabaseStatus, type KitAdapters, type KitCatalogView } from './../ports.js';
 import { verifySignedDocument } from './../signature.js';
 import { readLicenseFile, type KitLicenseFileV1 } from './../installed-state.js';
 import { AGENT_PACK_RECORD_PATH, readAgentPackRecord } from './../agent-pack.js';
@@ -596,4 +596,27 @@ export async function runLocalGates(
     }
 
     return evidence;
+}
+
+/**
+ * Refuse a migration step whose project bookkeeping `spfn db migrate` would
+ * refuse. Not a wait: the database answered, and nothing changes until the
+ * bookkeeping or `src/server/drizzle` is fixed by hand.
+ */
+export function assertBookkeepingMatches(status: DatabaseStatus, operationId: string): void
+{
+    if (status.bookkeepingMismatch === undefined)
+    {
+        return;
+    }
+
+    throw new KitError(
+        'CLI_MIGRATION_BOOKKEEPING_MISMATCH',
+        'The project\'s migration bookkeeping does not match src/server/drizzle, so `spfn db migrate` would '
+        + 'refuse it. Fix what the detail names (`spfn db status` prints the same), then resume.',
+        {
+            evidence: { reason: 'bookkeeping-mismatch', detail: status.bookkeepingMismatch },
+            next: { command: `spfn kit resume ${operationId} --json`, requiresHumanApproval: false },
+        },
+    );
 }

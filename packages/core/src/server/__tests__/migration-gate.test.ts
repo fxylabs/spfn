@@ -168,6 +168,42 @@ describe('migration boot gate', () =>
         expect((snapshot as { reason: string }).reason).toContain('connection terminated');
     });
 
+    async function connectWithUnmatchedVersionZeroRow(): Promise<void>
+    {
+        cwd = makeProject();
+        mkdirSync(join(cwd, 'src', 'server', 'drizzle', '20260102000000_app'), { recursive: true });
+        writeFileSync(join(cwd, 'src', 'server', 'drizzle', '20260102000000_app', 'migration.sql'), 'SELECT 1;');
+        await connect();
+
+        // Written before drizzle-orm 1.0 (no `name` column), by a migration no longer in the folder.
+        await client!.exec(`CREATE SCHEMA drizzle;
+            CREATE TABLE drizzle."__drizzle_migrations" (id serial PRIMARY KEY, hash text NOT NULL, created_at bigint);
+            INSERT INTO drizzle."__drizzle_migrations" (hash, created_at) VALUES ('gone', 1700000000000);`);
+    }
+
+    it('S4 refuses to start when the project bookkeeping matches no local migration (migrate would refuse)', async () =>
+    {
+        await connectWithUnmatchedVersionZeroRow();
+
+        const error = await runMigrationBootGate({ migrations: { allowPending: false } }, cwd)
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(PendingMigrationsError);
+        expect((error as PendingMigrationsError).message).toContain('bookkeeping does not match local migrations');
+        expect((error as PendingMigrationsError).message).toContain('id 1 matches a folder named 20231114221320_*');
+    });
+
+    it('S4b refuses a bookkeeping mismatch even when pending migrations are allowed', async () =>
+    {
+        await connectWithUnmatchedVersionZeroRow();
+
+        const error = await runMigrationBootGate({ migrations: { allowPending: true } }, cwd)
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(PendingMigrationsError);
+        expect((error as PendingMigrationsError).message).toContain('does not apply');
+    });
+
     it('reuses the cached snapshot within the TTL and re-reads after it', async () =>
     {
         cwd = makeProject();

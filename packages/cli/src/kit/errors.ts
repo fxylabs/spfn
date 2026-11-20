@@ -101,6 +101,14 @@ export const CLI_ONLY_ERROR_EXIT = {
      * it stands rather than with the change already in history.
      */
     CLI_CUSTOMER_SOURCE_CHANGED: KIT_EXIT.REFUSED,
+    /**
+     * The project's migration bookkeeping does not match its migrations folder.
+     *
+     * Refused rather than waiting: the database answered, and `spfn db migrate`
+     * refuses it, so no amount of waiting or resuming changes anything until a
+     * person restores the folder or corrects the bookkeeping row.
+     */
+    CLI_MIGRATION_BOOKKEEPING_MISMATCH: KIT_EXIT.REFUSED,
 } as const;
 
 export type CliOnlyErrorCode = keyof typeof CLI_ONLY_ERROR_EXIT;

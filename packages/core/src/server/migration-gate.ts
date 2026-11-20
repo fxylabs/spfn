@@ -19,8 +19,11 @@ import {
     formatPendingMigrations,
     getDatabase,
     hasMigrationTargets,
+    MigrationBookkeepingMismatchError,
+    MISMATCH_OVERRIDE_NOTE,
     pendingMigrationTargets,
     pendingMigrationsSummary,
+    PROJECT_TARGET_NAME,
     RUN_MIGRATIONS_HINT,
     type MigrationStatus,
     type MigrationStatusDb,
@@ -45,10 +48,19 @@ export type MigrationSnapshot =
     /** Could not check — distinct from "checked and pending". */
     | { state: 'unavailable'; checkedAt: string; reason: string };
 
-type CachedSnapshot = {
+/**
+ * A snapshot plus what only the gate needs: whether the check failed because
+ * the project's bookkeeping does not match its migrations. Health reports that
+ * as `unknown` with the reason; the gate refuses to boot on it.
+ */
+type Inspection = {
+    value: MigrationSnapshot;
+    mismatch?: MigrationBookkeepingMismatchError;
+};
+
+type CachedSnapshot = Inspection & {
     at: number;
     cwd: string;
-    value: MigrationSnapshot;
 };
 
 let cache: CachedSnapshot | null = null;
@@ -90,13 +102,13 @@ function failureReason(error: unknown): string
     return cause instanceof Error ? cause.message : String(cause);
 }
 
-async function inspect(cwd: string, db?: MigrationStatusDb): Promise<MigrationSnapshot>
+async function inspect(cwd: string, db?: MigrationStatusDb): Promise<Inspection>
 {
     const checkedAt = new Date().toISOString();
 
     if (!hasMigrationTargets(cwd))
     {
-        return { state: 'skipped', checkedAt, reason: 'no function package or project migrations found' };
+        return { value: { state: 'skipped', checkedAt, reason: 'no function package or project migrations found' } };
     }
 
     let database = db;
@@ -109,7 +121,7 @@ async function inspect(cwd: string, db?: MigrationStatusDb): Promise<MigrationSn
         }
         catch
         {
-            return { state: 'skipped', checkedAt, reason: 'no database initialized' };
+            return { value: { state: 'skipped', checkedAt, reason: 'no database initialized' } };
         }
     }
 
@@ -117,12 +129,34 @@ async function inspect(cwd: string, db?: MigrationStatusDb): Promise<MigrationSn
     {
         const status = await collectMigrationStatus(database, cwd);
 
-        return { state: 'ok', checkedAt, status, pending: countPendingMigrations(status) };
+        return { value: { state: 'ok', checkedAt, status, pending: countPendingMigrations(status) } };
     }
     catch (error)
     {
-        return { state: 'unavailable', checkedAt, reason: failureReason(error) };
+        return {
+            value: { state: 'unavailable', checkedAt, reason: failureReason(error) },
+            mismatch: error instanceof MigrationBookkeepingMismatchError ? error : undefined,
+        };
     }
+}
+
+async function inspectCached(options: {
+    cwd: string;
+    db?: MigrationStatusDb;
+    force?: boolean;
+    ttlMs?: number;
+}): Promise<CachedSnapshot>
+{
+    const now = Date.now();
+
+    if (!options.force && cache && cache.cwd === options.cwd && now - cache.at < (options.ttlMs ?? SNAPSHOT_TTL_MS))
+    {
+        return cache;
+    }
+
+    cache = { ...await inspect(options.cwd, options.db), at: now, cwd: options.cwd };
+
+    return cache;
 }
 
 /**
@@ -137,19 +171,7 @@ export async function getMigrationSnapshot(options: {
     ttlMs?: number;
 } = {}): Promise<MigrationSnapshot>
 {
-    const cwd = options.cwd ?? process.cwd();
-    const ttl = options.ttlMs ?? SNAPSHOT_TTL_MS;
-    const now = Date.now();
-
-    if (!options.force && cache && cache.cwd === cwd && now - cache.at < ttl)
-    {
-        return cache.value;
-    }
-
-    const value = await inspect(cwd, options.db);
-    cache = { at: now, cwd, value };
-
-    return value;
+    return (await inspectCached({ ...options, cwd: options.cwd ?? process.cwd() })).value;
 }
 
 /**
@@ -166,13 +188,21 @@ function pendingIsAllowed(config?: ServerConfig): boolean
 
 /**
  * Refuse to serve when a function package (or the project) has migrations the
- * database has not applied.
+ * database has not applied, or when the project's bookkeeping does not match
+ * its migrations — `spfn db migrate` refuses that database, so it cannot be
+ * brought up to date either.
  *
- * @throws PendingMigrationsError unless the opt-out is set
+ * @throws PendingMigrationsError unless the opt-out is set; on a bookkeeping
+ * mismatch whatever it says
  */
 export async function runMigrationBootGate(config?: ServerConfig, cwd: string = process.cwd()): Promise<MigrationSnapshot>
 {
-    const snapshot = await getMigrationSnapshot({ cwd, force: true });
+    const { value: snapshot, mismatch } = await inspectCached({ cwd, force: true });
+
+    if (mismatch)
+    {
+        refuseMismatchedBookkeeping(mismatch);
+    }
 
     if (snapshot.state === 'skipped')
     {
@@ -221,4 +251,20 @@ export async function runMigrationBootGate(config?: ServerConfig, cwd: string = 
         `${summary}. ${RUN_MIGRATIONS_HINT}, or set SPFN_ALLOW_PENDING_MIGRATIONS=true to start anyway.`,
         targets.map(target => target.name),
     );
+}
+
+/**
+ * A bookkeeping mismatch is refused whatever the opt-out says. The opt-out
+ * means "start although migrations are still to be applied"; here
+ * `spfn db migrate` refuses the database, so nothing applied later brings it
+ * up to date.
+ *
+ * @throws PendingMigrationsError always
+ */
+function refuseMismatchedBookkeeping(mismatch: MigrationBookkeepingMismatchError): never
+{
+    serverLogger.error(`Refusing to start: ${mismatch.message}`);
+    serverLogger.error(`  ${MISMATCH_OVERRIDE_NOTE}`);
+
+    throw new PendingMigrationsError(`${mismatch.message} ${MISMATCH_OVERRIDE_NOTE}`, [PROJECT_TARGET_NAME]);
 }

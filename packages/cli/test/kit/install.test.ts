@@ -322,6 +322,25 @@ describe('table A — retries, waits and resumes', () =>
         expect(world.activationCalls).toHaveLength(1);
     });
 
+    it('refuses, rather than waits, when the project bookkeeping does not match its migrations (#370)', async () =>
+    {
+        const world = new FakeKitWorld();
+        const mismatch = 'project (src/server/drizzle): bookkeeping does not match local migrations; '
+            + '`spfn db migrate` will refuse. id 1 matches a folder named 20231114221320_*';
+
+        // `db status --json` cannot read a status it would refuse, so it says unreachable too.
+        world.faults.databaseReachable = false;
+        world.faults.databaseBookkeepingMismatch = mismatch;
+
+        const result = await runInstall(installRequest(world), world.adapters);
+
+        expect(result.status).toBe('failed');
+        expect(result.exitCode).toBe(KIT_EXIT.REFUSED);
+        expect(result.code).toBe('CLI_MIGRATION_BOOKKEEPING_MISMATCH');
+        expect(result.summary).toContain('`spfn db migrate` would refuse it');
+        expect(result.evidence).toMatchObject({ reason: 'bookkeeping-mismatch', detail: mismatch });
+    });
+
     it('makes no commit when a gate fails, and commits after the gate is fixed', async () =>
     {
         const world = new FakeKitWorld();

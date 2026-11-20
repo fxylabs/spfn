@@ -12,6 +12,8 @@ import chalk from 'chalk';
 import {
     collectMigrationStatus,
     formatPendingMigrations,
+    MigrationBookkeepingMismatchError,
+    MISMATCH_OVERRIDE_NOTE,
     pendingMigrationTargets,
     pendingMigrationsSummary,
     RUN_MIGRATIONS_HINT,
@@ -60,6 +62,16 @@ export async function getMigrationStatus(
     }
 }
 
+/**
+ * The text of the project's bookkeeping mismatch when `error` is one, else
+ * undefined. A mismatch is not "could not check": the database answered, and
+ * `spfn db migrate` refuses it, so every caller must stop and say so.
+ */
+export function bookkeepingMismatchOf(error: unknown): string | undefined
+{
+    return error instanceof MigrationBookkeepingMismatchError ? error.message : undefined;
+}
+
 export type StartupMigrationCheck = {
     /** The caller must stop: migrations are pending and nothing allows it. */
     block: boolean;
@@ -76,7 +88,8 @@ export type StartupMigrationCheck = {
  *
  * Silent when there is no database to ask: a project without DATABASE_URL, or a
  * database that cannot be reached, is not migration drift and must not be
- * reported as such.
+ * reported as such. A project bookkeeping mismatch blocks whatever the opt-out
+ * says, as the server's gate does: migrate refuses that database.
  *
  * The environment variable is read through `@spfn/core/config`, the same
  * accessor the server's gate uses, so `1` and `yes` mean here what they mean
@@ -98,10 +111,19 @@ export async function checkPendingMigrationsBeforeStart(
     {
         status = await getMigrationStatus(cwd, databaseUrl);
     }
-    catch
+    catch (error)
     {
+        const mismatch = bookkeepingMismatchOf(error);
+
         // "Could not check" is not "checked and pending" — never block on it.
-        return { block: false, allowPending };
+        if (mismatch === undefined)
+        {
+            return { block: false, allowPending };
+        }
+
+        refuseMismatchedBookkeeping(mismatch);
+
+        return { block: true, allowPending };
     }
 
     const targets = pendingMigrationTargets(status);
@@ -130,4 +152,10 @@ export async function checkPendingMigrationsBeforeStart(
     console.error(chalk.dim('   To start anyway: --allow-pending-migrations, or SPFN_ALLOW_PENDING_MIGRATIONS=true\n'));
 
     return { block: true, allowPending };
+}
+
+function refuseMismatchedBookkeeping(mismatch: string): void
+{
+    console.error(chalk.red(`\n❌ Refusing to start: ${mismatch}`));
+    console.error(chalk.dim(`   ${MISMATCH_OVERRIDE_NOTE}\n`));
 }
