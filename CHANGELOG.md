@@ -383,6 +383,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exception rejects instead of opening watchers nothing closes. When the loop ends by an
   exception, a `generateAll()` queued or in progress rejects with it as the `cause`. A
   chokidar error is warned about once, naming the pattern directories.
+- **spfn: `spfn create` runs create-next-app and shadcn through `npx --yes` for every package
+  manager, so `--pm yarn` works with yarn 1 (#367).** It ran them as `<pm> dlx`: yarn 1 has no `dlx`
+  (it looked for a `dlx` script and failed with "Couldn't find a package.json file"), and corepack
+  gives yarn 1 outside a project, so `--pm yarn` failed out of the box; `--pm bun` ran `bunx dlx`.
+  `--pm` still picks the installer: create-next-app installs with `--use-<pm>`, shadcn reads the
+  manager from the lockfile. The hint `spfn kit install` prints for an older CLI now reads
+  `npx --yes spfn@<version> kit install …` instead of `pnpm dlx …`. Not breaking.
 - **spfn: `spfn dev` waits for its codegen watcher on SIGINT/SIGTERM (#353).** It sent the watcher
   SIGTERM and exited at once, through `pnpm exec`/`npx`, which do not wait (npx did not even
   forward the signal), and execa SIGKILLed the wrapper 5 s later: a `kill -TERM` of `spfn dev` left

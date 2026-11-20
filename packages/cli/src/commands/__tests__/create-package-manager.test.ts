@@ -210,3 +210,30 @@ describe('an npm install that npm refuses over drizzle-typebox (npm 10.9.9 outpu
         error.mockRestore();
     });
 });
+
+describe('spfn create launches its one-off packages through npx for every manager', () =>
+{
+    /** The call that started the one-off package `spec`. */
+    function oneOffCall(spec: string): unknown[] | undefined
+    {
+        return mocks.execa.mock.calls.find(([, args]) => args.includes(spec));
+    }
+
+    it.each(['npm', 'pnpm', 'yarn', 'bun'])('runs create-next-app with npx --yes, installing with %s', async pm =>
+    {
+        await createFrom(join(repository, 'scratch'), ['--pm', pm]);
+
+        const [command, args] = oneOffCall('create-next-app@latest')!;
+
+        expect(command).toBe('npx');
+        expect((args as string[]).slice(0, 3)).toEqual(['--yes', 'create-next-app@latest', 'app']);
+        expect(args).toContain(`--use-${pm}`);
+    });
+
+    it.each(['npm', 'pnpm', 'yarn', 'bun'])('runs shadcn with npx --yes when the app installs with %s', async pm =>
+    {
+        await createFrom(join(repository, 'scratch'), ['--pm', pm, '--shadcn']);
+
+        expect(oneOffCall('shadcn@latest')!.slice(0, 2)).toEqual(['npx', ['--yes', 'shadcn@latest', 'init', '--yes', '--defaults']]);
+    });
+});

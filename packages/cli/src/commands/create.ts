@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 
 import { logger } from '../utils/logger.js';
-import { detectPackageManager, findWorkspace, getAddArgs, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, findWorkspace, getAddArgs, getOneOffArgs, getOneOffCommand, getRunCommand, runInstall, type PackageManager } from '../utils/package-manager.js';
 import { confirmInstalled } from './init/steps/package.js';
 import { ENV_FILES_HINT } from '../utils/messages.js';
 import { selectScaffoldMode, type ScaffoldMode } from './init/mode.js';
@@ -142,7 +142,6 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     try
     {
         const createNextAppArgs = [
-            'create-next-app@latest',
             projectName,
             '--typescript',
             '--app',
@@ -166,13 +165,9 @@ async function createProject(projectName: string, options: CreateOptions): Promi
             createNextAppArgs.push('--skip-git');
         }
 
-        // Use the selected package manager's dlx command
-        const createCommand = pm === 'npm' ? 'npx' : pm === 'yarn' ? 'yarn' : pm === 'pnpm' ? 'pnpm' : 'bunx';
-        const createArgs = createCommand === 'npx' ? createNextAppArgs : ['dlx', ...createNextAppArgs];
-
         logger.step('Running create-next-app...');
 
-        await execa(createCommand, createArgs, {
+        await execa('npx', getOneOffArgs('create-next-app@latest', createNextAppArgs), {
             cwd,
             stdio: 'inherit',
             timeout: 300_000, // 5 minutes
@@ -217,15 +212,9 @@ async function createProject(projectName: string, options: CreateOptions): Promi
     {
         try
         {
-            const shadcnCommand = pm === 'npm' ? 'npx' : pm === 'pnpm' ? 'pnpm' : pm === 'yarn' ? 'yarn' : 'bunx';
-            const shadcnBaseArgs = ['dlx', 'shadcn@latest', 'init', '--yes', '--defaults'];
-            const shadcnArgs = shadcnCommand === 'npx'
-                ? ['shadcn@latest', 'init', '--yes', '--defaults']
-                : shadcnBaseArgs;
-
             logger.step('Setting up shadcn/ui...');
 
-            await execa(shadcnCommand, shadcnArgs, {
+            await execa('npx', getOneOffArgs('shadcn@latest', ['init', '--yes', '--defaults']), {
                 cwd: projectPath,
                 stdio: 'inherit',
                 timeout: 300_000,
@@ -235,7 +224,7 @@ async function createProject(projectName: string, options: CreateOptions): Promi
         }
         catch (error)
         {
-            ora().warn('Failed to initialize shadcn/ui (you can run `npx shadcn@latest init` later)');
+            ora().warn(`Failed to initialize shadcn/ui (you can run \`${getOneOffCommand('shadcn@latest', ['init'])}\` later)`);
         }
     }
 

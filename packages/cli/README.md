@@ -110,6 +110,11 @@ Registered top-level commands: `create`, `init`, `add`, `dev`, `build`, `start`,
 Runs `create-next-app` with SPFN-recommended flags (TypeScript, App Router, `src/`,
 Tailwind, import alias `@/*`, no ESLint), sets up SVGR icons, then runs `init`.
 
+`--pm` picks the manager that installs the app's dependencies. The one-off packages `create`
+launches — `create-next-app`, and `shadcn` with `--shadcn` — always run through `npx --yes`,
+whatever the manager: yarn 1 has no `dlx`, and npx comes with Node. create-next-app is told the
+manager with `--use-<pm>`, and shadcn reads it from the lockfile.
+
 Choose `full` for the recommended Prototype-to-Production baseline or `bare` for the
 historical core-only skeleton. Without `--mode`, interactive runs show a mode selector
 with `full` recommended. For backward compatibility, non-interactive `--yes` runs without
@@ -118,7 +123,7 @@ pass `--mode full`.
 
 | Option | Description |
 |--------|-------------|
-| `--pm <manager>` | Force package manager: `npm` \| `pnpm` \| `yarn` \| `bun` |
+| `--pm <manager>` | Package manager that installs: `npm` \| `pnpm` \| `yarn` \| `bun` (yarn 1 included) |
 | `--shadcn` | Also run `shadcn init` |
 | `--mode <mode>` | `bare` (core only) \| `full` (core, auth, i18n, ops) |
 | `--skip-install` | Skip dependency install |
