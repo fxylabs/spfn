@@ -489,7 +489,10 @@ async function answerForExistingKey(
  * transaction took it before that. A suspension, a deletion request or a
  * revoke-all cannot commit between the question and the key: it waits for the
  * key and then revokes it, or the key is refused. A status a channel read
- * earlier (on a replica, before the credential) decides nothing here.
+ * earlier (on a replica, before the credential) decides nothing here. On a
+ * sign-in channel — every one but renewal and rotation — the app's
+ * `signIn.admit` is asked next, under the same lock, and `settled` is told
+ * the outcome in this transaction (`reportRegistration`).
  *
  * It alone decides whether the key replaces one the device already held or
  * arrives as a new device (`claimReplacement`), and everything that follows
