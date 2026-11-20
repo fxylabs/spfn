@@ -1,6 +1,7 @@
 /**
  * The app schema the tenant commands plan from, read the way `db push` reads it:
- * drizzle.config.ts, else core's default (the entities folder scan, or its
+ * drizzle.config.ts (one that cannot be loaded ends the command, as it ends
+ * push), else core's default (the entities folder scan, or its
  * config.ts registry). Function packages are not discovered — their tables
  * are theirs to move.
  */

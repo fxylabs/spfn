@@ -313,12 +313,12 @@ server ran the other: rate-limit `policies` and `.trustedProxyHops()` were ignor
 >   rule.
 > - **`server.config`** — loaded by the `spfn provision` runner. A CommonJS-only shape fails there.
 > - **`drizzle.config.ts`** — read by the CLI itself only under `db push` and `db tenant`, for its
->   `schema` and `schemaFilter`. `__dirname`, `__filename` or `require` there now stops `db push`:
->   `Could not load drizzle.config.ts: <path>: __dirname is not defined in ES module scope. spfn
->   reads <path> as ESM, as the app's other source (drizzle-kit reads it by its own rule): use
->   import.meta.dirname, import.meta.filename and import instead of __dirname`. Under `db push
->   --schema`, which bypasses a config that cannot be loaded, push warns that the config's
->   `schemaFilter` is not applied. `module.exports = { … }` still loads. `db generate`, `check`,
+>   `schema` and `schemaFilter`. A config that cannot be loaded stops `db push` — with `--schema`
+>   too, since its `schemaFilter` is what push may touch — and `db tenant`, with exit code 1.
+>   `__dirname`, `__filename` or `require` there now does: `Could not load <path>: __dirname is not
+>   defined in ES module scope. spfn reads <path> as ESM, as the app's other source (drizzle-kit
+>   reads it by its own rule): use import.meta.dirname, import.meta.filename and import instead of
+>   __dirname`. `module.exports = { … }` still loads. `db generate`, `check`,
 >   `drop` and `studio` hand the file to `drizzle-kit`, which reads it as before — a CommonJS config
 >   works there.
 >
@@ -560,7 +560,8 @@ the schema. A registry loaded as-is (2 or 4) contributes only what it exports:
 re-export with `export *` so a `pgEnum` or `pgSchema` defined next to a table comes
 along. `db push` diffs the PostgreSQL schemas the declared `schemaFilter` names (else
 `public`) plus every schema the loaded modules name — tables, `pgSchema()` objects,
-enums, views, sequences; `--schema` replaces the files but keeps that declared filter.
+enums, views, sequences; `--schema` replaces the files but keeps that declared filter,
+and a `drizzle.config.ts` that cannot be loaded stops push, `--schema` or not.
 
 **A function package's own schema is never the project's.** An installed package that
 ships migrations (`@spfn/auth` → `spfn_auth`) creates and alters its own tables when

@@ -566,18 +566,23 @@ export interface DrizzleConfigSchema
 const COMMONJS_GLOBAL = /\b(__dirname|__filename|require|module|exports) is not defined in ES module scope/;
 
 /**
- * The error a drizzle.config.ts that cannot be imported stops `db push` with:
- * the file, and for a CommonJS-only name, that this process reads the file as
- * ESM — drizzle-kit, which `db generate` hands it to, reads it by its own rule.
+ * The error a drizzle.config.ts that cannot be imported stops `db push` and
+ * `db tenant` with, `--schema` or not: the file declares what they may touch
+ * (its schemaFilter), so without it they have no scope. Names the file, the
+ * load error and the remedy; for a CommonJS-only name, that this process reads
+ * the file as ESM — drizzle-kit, which `db generate` hands it to, reads it by
+ * its own rule.
  */
 function drizzleConfigError(configPath: string, error: unknown): Error
 {
     const message = error instanceof Error ? error.message : String(error);
     const name = COMMONJS_GLOBAL.exec(message)?.[1];
-    const remedy = name === undefined ? '' : `. spfn reads ${configPath} as ESM, as the app's other source `
-        + `(drizzle-kit reads it by its own rule): use import.meta.dirname, import.meta.filename and import instead of ${name}`;
+    const remedy = name === undefined
+        ? 'Make it load: it declares what db push and db tenant may touch, so they do not run without it'
+        : `spfn reads ${configPath} as ESM, as the app's other source (drizzle-kit reads it by its own rule): `
+            + `use import.meta.dirname, import.meta.filename and import instead of ${name}`;
 
-    return new Error(`${configPath}: ${message}${remedy}`, { cause: error });
+    return new Error(`Could not load ${configPath}: ${message}. ${remedy}`, { cause: error });
 }
 
 /**
@@ -586,6 +591,7 @@ function drizzleConfigError(configPath: string, error: unknown): Error
  * this process, under the CLI's module hook: as ESM in any app.
  *
  * @returns undefined when there is no drizzle.config.ts or it names no schema
+ * @throws the file, the load error and the remedy, when it exists and cannot be loaded
  */
 export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Promise<DrizzleConfigSchema | undefined>
 {
@@ -607,34 +613,24 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
     return { schema, schemaFilter: Array.isArray(schemaFilter) ? schemaFilter : undefined };
 }
 
-/**
- * Schema named by the user, with where it came from; undefined leaves the
- * resolution to core (the folder scan, or the registry). `unreadConfig` is why
- * a drizzle.config.ts that --schema bypassed could not be read: its
- * schemaFilter, if it declares one, is not applied.
- */
-export type SchemaSource = DrizzleConfigSchema & { label: string; unreadConfig?: string };
+/** Schema named by the user, with where it came from; undefined leaves the resolution to core (the folder scan, or the registry). */
+export type SchemaSource = DrizzleConfigSchema & { label: string };
 
 /**
  * Pick the schema entry point the way `db generate` does: an explicit --schema,
  * then drizzle.config.ts, then the core default (folder scan, else the registry).
- * A drizzle.config.ts that fails to load throws unless --schema bypasses it; the
- * caller reports it.
+ * --schema replaces the config's files, not the schemaFilter it declares.
+ *
+ * @throws when drizzle.config.ts exists and cannot be loaded, --schema or not
  */
 export async function resolvePushSchemaSource(explicit?: string, cwd: string = process.cwd()): Promise<SchemaSource | undefined>
 {
+    const fromConfig = await readDrizzleConfigSchema(cwd);
+
     if (explicit)
     {
-        // --schema replaces the files, not a schemaFilter the config declares on
-        // purpose; a config that cannot be loaded is what --schema exists to
-        // bypass, and the caller says so
-        return await readDrizzleConfigSchema(cwd).then(
-            config => ({ schema: explicit, schemaFilter: config?.schemaFilter, label: '--schema' }),
-            (error: Error) => ({ schema: explicit, schemaFilter: undefined, label: '--schema', unreadConfig: error.message }),
-        );
+        return { schema: explicit, schemaFilter: fromConfig?.schemaFilter, label: '--schema' };
     }
-
-    const fromConfig = await readDrizzleConfigSchema(cwd);
 
     return fromConfig && { ...fromConfig, label: 'drizzle.config.ts' };
 }

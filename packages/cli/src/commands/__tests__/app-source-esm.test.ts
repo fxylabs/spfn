@@ -29,9 +29,9 @@
  * | R5 | `spfn env list` started as `node --import tsx`, an   | the bin taking a tsx it did not start for the hook: the |
  * |    | env schema with top-level `await` importing          | schema loads as CommonJS and fails; the schema loaded   |
  * |    | @spfn/core/env                                       | by tsx's `tsImport`: a second @spfn/core/env            |
- * | R6 | `spfn db push`, a drizzle.config.ts using            | the CLI's ESM read of a config drizzle-kit reads fine   |
- * |    | `__dirname`, with and without `--schema`             | failing silently: `--schema` dropped its schemaFilter   |
- * |    |                                                      | unsaid                                                  |
+ * | R6 | `spfn db push` with and without `--schema`, and      | a push or tenant move going on without the config's     |
+ * |    | `db tenant export`, a drizzle.config.ts using        | schemaFilter: `--schema` diffed `public`, which the     |
+ * |    | `__dirname`                                          | filter excluded (a DROP TABLE there under `--force`)    |
  * | R7 | `spfn db generate` by a CLI whose @spfn/core is not  | the refusal advising to dedupe the app, when the cause  |
  * |    | the app's (the app has its own install)              | is the CLI's install                                    |
  *
@@ -184,21 +184,27 @@ it('R5 spfn env list started under node --import tsx loads an env schema with to
     expect(Object.entries(dump().core).filter(([, copies]) => copies.join() !== 'esm×1')).toEqual([]);
 });
 
-it('R6 spfn db push names a drizzle.config.ts it cannot read as ESM, with and without --schema', () =>
+it('R6 spfn db push, with and without --schema, and db tenant stop on a drizzle.config.ts they cannot read as ESM', () =>
 {
     writeEntity();
     write('drizzle.config.ts', 'import { join } from \'node:path\';\n'
         + 'export default { schema: join(__dirname, \'src/server/entities\'), schemaFilter: [\'app\'] };\n');
 
     const config = join(realpathSync(appDir), 'drizzle.config.ts');
-    const withConfig = spfn(['db', 'push', '--dry-run']);
-    const withSchema = spfn(['db', 'push', '--dry-run', '--schema', 'src/server/entities/example.entity.ts']);
+    const runs = [
+        ['db', 'push', '--dry-run'],
+        ['db', 'push', '--dry-run', '--schema', 'src/server/entities/example.entity.ts'],
+        ['db', 'tenant', 'export', '1'],
+    ].map(args => ({ args: args.join(' '), ...spfn(args) }));
 
-    expect(withConfig.status, withConfig.output).toBe(1);
-    expect(withConfig.output).toContain(`Could not load drizzle.config.ts: ${config}: __dirname is not defined in ES module scope. `
-        + `spfn reads ${config} as ESM`);
-    expect(withSchema.output).toContain(`drizzle.config.ts could not be loaded, so a schemaFilter it declares is not applied: ${config}: `
-        + '__dirname is not defined in ES module scope');
+    for (const run of runs)
+    {
+        expect({ args: run.args, status: run.status }, run.output).toEqual({ args: run.args, status: 1 });
+        expect(run.output).toContain(`❌ Could not load ${config}: __dirname is not defined in ES module scope. `
+            + `spfn reads ${config} as ESM`);
+        // the plan is never made: no scope, no diff
+        expect(run.output).not.toContain('Schema from');
+    }
 });
 
 it('R7 spfn db generate run by a CLI that is not the app\'s own names the CLI as the second install', () =>

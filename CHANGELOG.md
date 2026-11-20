@@ -207,8 +207,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dev` (table in the CLI README, "Your server source runs as ESM"): in entity files under `db push`,
   `db tenant`, and `db generate` with the entity registry or a function package and no
   `drizzle.config.ts`; in `server.config` under `provision`; in `drizzle.config.ts` under `db push`
-  and `db tenant`, which read its `schema` and `schemaFilter` — `db push` stops naming the file and
-  the CommonJS name, and under `--schema` warns that the config's `schemaFilter` is not applied.
+  and `db tenant`, which read its `schema` and `schemaFilter`. **A `drizzle.config.ts` that does
+  not load as ESM now stops `db push`, with and without `--schema`, and `db tenant`** (exit 1, naming
+  the file, the CommonJS name and `import.meta.dirname`/`import.meta.filename`/`import` as the
+  remedy): its `schemaFilter` is what they may touch, and `--schema`, which replaces only its files,
+  no longer goes on without it.
   `drizzle-kit`, which `db generate`, `check`, `drop` and `studio` hand `drizzle.config.ts` to,
   reads it and the schema by its own rule as before. Top-level `await` in an entity now loads (`db
   generate` failed on it). `spfn env` loads `env.schemas` files the same way.

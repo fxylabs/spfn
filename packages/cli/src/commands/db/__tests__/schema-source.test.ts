@@ -92,16 +92,14 @@ describe('resolvePushSchemaSource', () =>
         expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({ schema: './b.ts', schemaFilter: ['app'], label: '--schema' });
     });
 
-    it('lets --schema bypass a drizzle.config.ts that cannot be loaded', async () =>
+    it('does not let --schema bypass a drizzle.config.ts that cannot be loaded: its schemaFilter is the scope', async () =>
     {
-        writeFileSync(join(cwd, 'drizzle.config.ts'), "throw new Error('DIRECT_URL required');");
+        // rv375b: the config declares ['app']; read without it, the filter fell back to public
+        writeFileSync(join(cwd, 'drizzle.config.ts'), "if (!process.env.NEVER) throw new Error('DIRECT_URL required');\n"
+            + "export default { schema: './a.ts', schemaFilter: ['app'] };\n");
 
-        expect(await resolvePushSchemaSource('./b.ts', cwd)).toEqual({
-            schema: './b.ts',
-            schemaFilter: undefined,
-            label: '--schema',
-            unreadConfig: `${join(cwd, 'drizzle.config.ts')}: DIRECT_URL required`,
-        });
+        await expect(resolvePushSchemaSource('./b.ts', cwd)).rejects
+            .toThrow(`Could not load ${join(cwd, 'drizzle.config.ts')}: DIRECT_URL required. Make it load`);
     });
 });
 
