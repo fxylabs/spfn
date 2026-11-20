@@ -30,6 +30,11 @@
  * |    | await                                                                 |                                 |
  * | H2 | type-less package: `.ts` with TypeScript syntax, through tsx's        | ESM, transformed (tsx's scoped  |
  * |    | `tsImport` (as `spfn env` loads a schema), bare and with `?v=3`       | loader keeps its namespace)     |
+ * | H3 | type-less package: `.js` imported as CommonJS (`?v=1`), rewritten     | CommonJS, then ESM: a format    |
+ * |    | with `export` and imported again (`?v=2`)                             | is what the file holds when it  |
+ * |    |                                                                       | is loaded                       |
+ * | H3 | the hook alone: a `.ts` URL resolved before its file is written; a    | no format, then ESM, for both   |
+ * |    | `.js` symlink naming a dependency, then retargeted to app source      |                                 |
  *
  * Runs against `dist/dev-loader/register.js`: build first
  * (`pnpm --filter spfn build`). Each tsx minor encodes the URL of a file it
@@ -38,12 +43,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createResolveHook } from '../hooks';
 
 const packageRoot = join(__dirname, '../../..');
 const register = join(packageRoot, 'dist/dev-loader/register.js');
@@ -254,5 +260,42 @@ describe('spfn dev resolve hook', () =>
             'tsImport: .ts with TypeScript syntax ?v=3': 'module',
             'default import of ESM-syntax .js': 'undefined',
         });
+    });
+
+    it('H3 classifies a .js file by what it holds when it is loaded, not when its path was first resolved', () =>
+    {
+        const root = join(tmp, 'rewritten');
+
+        write(root, 'package.json', '{ "name": "app" }');
+        write(root, 'rewritten.js', `${records('.js rewritten as ESM ?v=1')}module.exports = {};\n`);
+        write(root, 'rewriter.ts', 'import { writeFileSync } from \'node:fs\';\n'
+            + 'await import(\'./rewritten.js?v=1\');\n'
+            + `writeFileSync(new URL('./rewritten.js', import.meta.url), ${JSON.stringify(`${records('.js rewritten as ESM ?v=2')}export const value = 1;\n`)});\n`
+            + 'await import(\'./rewritten.js?v=2\');\n');
+
+        expect(runProject(root, ['./rewriter.ts'])).toEqual({
+            '.js rewritten as ESM ?v=1': 'commonjs',
+            '.js rewritten as ESM ?v=2': 'module',
+            'default import of ESM-syntax .js': 'undefined',
+        });
+    });
+
+    it('H3 asks again for a URL first resolved before its file existed, or while its symlink named a dependency', () =>
+    {
+        const root = join(tmp, 'unit');
+        const hook = createResolveHook((write(root, 'package.json', '{ "name": "app" }'), root));
+        const formatOf = (path: string) => hook('', undefined, () => ({ url: pathToFileURL(join(root, path)).href })).format;
+
+        write(root, 'node_modules/dep/index.js', 'export const value = 1;\n');
+        write(root, 'esm-syntax.js', 'export const value = 1;\n');
+        symlinkSync(join(root, 'node_modules/dep/index.js'), join(root, 'link.js'));
+
+        expect([formatOf('generated.ts'), formatOf('link.js')]).toEqual([undefined, undefined]);
+
+        write(root, 'generated.ts', 'export const value = 1;\n');
+        rmSync(join(root, 'link.js'));
+        symlinkSync(join(root, 'esm-syntax.js'), join(root, 'link.js'));
+
+        expect([formatOf('generated.ts'), formatOf('link.js')]).toEqual(['module', 'module']);
     });
 });

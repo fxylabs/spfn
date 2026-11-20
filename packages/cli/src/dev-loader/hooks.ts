@@ -24,7 +24,7 @@
  * the root is handed to it as data by `register.ts`.
  */
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { applicationFormat, isDependency } from '@spfn/core/codegen/loader';
 import { buildSync } from 'esbuild';
@@ -135,59 +135,83 @@ interface Statement
     format: string;
 }
 
+/** A resolved URL as the hook reads it: the URL naming its file, and the file's path. */
+interface ParsedUrl
+{
+    url: string;
+    file: string;
+}
+
 /**
- * The resolve hook for the application rooted at `root`. Formats are decided
- * once per file, and what the hook states is kept by the URL tsx resolved: the
- * same module resolves again from every file that imports it, and most of
- * those are dependencies the hook leaves alone, so a repeat costs neither a
- * file-system call nor a URL parse.
+ * A file's identity on disk: inode, size and status-change time, which any
+ * write, rename onto it or chmod moves.
+ */
+function revisionOf(file: string): string
+{
+    const stats = statSync(file, { bigint: true, throwIfNoEntry: false });
+
+    return stats === undefined ? 'gone' : `${stats.ino}:${stats.size}:${stats.ctimeNs}`;
+}
+
+/**
+ * The resolve hook for the application rooted at `root`.
+ *
+ * Kept by the URL tsx resolved is only what the URL's text decides: the URL
+ * naming the file and its path. What the file system says is asked on every
+ * resolve — whether the file exists, its real path (a symlink can be
+ * retargeted), whether that is a dependency, the `package.json` `type` over a
+ * `.js` — since a file the app's codegen or an editor writes can appear or
+ * change under a URL already resolved. The one answer kept is a type-less
+ * `.js` file's syntax, by its real path and revision (`revisionOf`), as it is
+ * the one that costs a parse. Real paths are the system's (`realpathSync.native`):
+ * one call, where Node's own walks the path a `lstat` at a time.
  */
 export function createResolveHook(root: string): ResolveHook
 {
-    const realRoot = realpathSync(root);
-    const formats = new Map<string, string | undefined>();
-    const statements = new Map<string, Statement | undefined>();
+    const realRoot = realpathSync.native(root);
+    const parsedUrls = new Map<string, ParsedUrl>();
+    const syntaxFormats = new Map<string, { revision: string; format: 'module' | 'commonjs' }>();
 
-    function formatOf(file: string): string | undefined
+    function parse(resolvedUrl: string): ParsedUrl
     {
-        if (!formats.has(file))
+        if (!parsedUrls.has(resolvedUrl))
         {
-            formats.set(file, isDependency(file, realRoot) ? undefined : applicationFormat(file, formatBySyntax));
+            const url = withoutCommonJsQuery(resolvedUrl);
+
+            parsedUrls.set(resolvedUrl, { url, file: fileURLToPath(url) });
         }
 
-        return formats.get(file);
+        return parsedUrls.get(resolvedUrl)!;
+    }
+
+    function bySyntax(file: string): 'module' | 'commonjs'
+    {
+        const revision = revisionOf(file);
+
+        if (syntaxFormats.get(file)?.revision !== revision)
+        {
+            syntaxFormats.set(file, { revision, format: formatBySyntax(file) });
+        }
+
+        return syntaxFormats.get(file)!.format;
     }
 
     function statementFor(resolvedUrl: string): Statement | undefined
     {
-        const url = withoutCommonJsQuery(resolvedUrl);
-        const file = fileURLToPath(url);
-        // A URL that names no file is another loader's virtual module, not application source.
-        const format = existsSync(file) ? formatOf(realpathSync(file)) : undefined;
+        const { url, file } = parse(resolvedUrl);
+        // A URL that names no file is another loader's virtual module, or a file not written yet.
+        const realFile = existsSync(file) ? realpathSync.native(file) : undefined;
+        const format = realFile === undefined || isDependency(realFile, realRoot)
+            ? undefined
+            : applicationFormat(realFile, bySyntax);
 
-        if (format === undefined)
-        {
-            return undefined;
-        }
-
-        return { url: format === 'module' ? url : resolvedUrl, format };
+        return format === undefined ? undefined : { url: format === 'module' ? url : resolvedUrl, format };
     }
 
     return (specifier, context, nextResolve) =>
     {
         const result = nextResolve(specifier, context);
-
-        if (!result.url.startsWith('file:'))
-        {
-            return result;
-        }
-
-        if (!statements.has(result.url))
-        {
-            statements.set(result.url, statementFor(result.url));
-        }
-
-        const statement = statements.get(result.url);
+        const statement = result.url.startsWith('file:') ? statementFor(result.url) : undefined;
 
         return statement === undefined ? result : { ...result, ...statement };
     };
