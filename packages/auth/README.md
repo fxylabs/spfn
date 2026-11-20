@@ -582,12 +582,15 @@ enrolled an unlisted proof is refused again, at `mfa/step-up` as at `mfa/verify`
 decision is the account's state as the request reads it on the primary. The
 recent-authentication rule on the passkey routes (`RECENT_AUTH_REQUIRED`) runs as it always has.
 
-In the enrolment-only state with `'passkey'` listed, `passkeys/register/verify` **marks the passkey
-it registered as the second factor in the same transaction** — when the ceremony carried user
-verification, which is the proof; a registration without it (a security key with no PIN) is kept
-unmarked and the account stays in the enrolment-only state — and its answer carries `mfaStatus` (the `mfa/status` shape), so the session is
-ordinary from its next request without a second call. With no policy, or outside that state, it
-marks nothing and its answer has no `mfaStatus`, as before.
+While the policy requires a second factor with `'passkey'` listed, `passkeys/register/verify`
+**marks the passkey it registered as the second factor in the same transaction** — when the
+ceremony carried user verification, which is the proof; a registration without it (a security key
+with no PIN) is kept unmarked, and an enrolment-only account stays in that state — and its answer
+carries `mfaStatus` (the `mfa/status` shape). In the enrolment-only state that makes the session
+ordinary from its next request without a second call; on an enrolled account it marks the spare,
+so a second passkey is a second factor as soon as it exists (#399). With no policy, or with
+`required: false`, it marks nothing and its answer has no `mfaStatus`, as before: there a second
+factor is something the owner chose, and marking stays their act (`mfa/passkey/mark`).
 
 **The marking registration is also a step-up.** In the same transaction it opens
 [the step-up window](#the-step-up-window) for the credential that registered — the device key, or
@@ -595,8 +598,9 @@ the application profile with its key id — with method `passkey`, exactly as `t
 a TOTP: the ceremony just proved the factor the account now holds, with user verification. So the
 sensitive change that usually follows first set-up, a password change, needs no second ceremony.
 Only that registration records one: a registration without user verification records nothing, and
-on an account that is already enrolled adding a passkey does not refresh the window — it needed an
-open window to start, and registering more credentials must not keep it open.
+on an account that is already enrolled adding a passkey does not refresh the window — the spare is
+marked, but it needed an open window to start, and registering more credentials must not keep it
+open.
 
 The client flow, by what the account holds (`secondFactorEnrolmentRequired: true` on the sign-in):
 
@@ -1190,6 +1194,24 @@ if (result.secondFactorEnrolmentRequired)
 `authLoginEvent` gains `secondFactorEnrolmentRequired: boolean` — `false` without the policy. The
 contract's minor moves to 0.14 (fields the server sends), so its supported range is now
 `>=0.14.0 <0.15.0`.
+
+### Migration — a spare passkey is marked under a required policy
+
+**BREAKING (behaviour), only with `secondFactor: { required: true }` and `'passkey'` listed.**
+`passkeys/register/verify` used to mark the new passkey only while the account was enrolment-only.
+A spare an enrolled account added was stored unmarked: it still signed in on its own, but
+`mfa/verify` and `mfa/step-up` refused it as the second factor until the owner also called
+`mfa/passkey/mark`. Now every registration with user verification marks it and answers
+`mfaStatus` ([above](#enrolling-when-the-account-already-holds-a-credential)). The registration
+needed a step-up, recent authentication and user verification already — more than the mark asks
+for — so marking there grants nothing the owner could not do one request later. Only the
+registration that enrols the account records a step-up; a spare does not refresh the window.
+
+There is **no data migration**: the policy is runtime configuration a migration cannot see, and
+marking rows the owner never chose would widen what proves a factor. Passkeys registered before are
+repaired by their owner with `mfa/passkey/mark`; `listPasskeys` gives each one `secondFactor` and
+`userVerified`, so a settings page offers the mark only where it succeeds
+([Managing passkeys](#managing-passkeys)). With `required: false` or no policy nothing changes.
 
 ### Migration — narrow a sign-in on `mfaRequired` before reading `userId`
 
@@ -3464,7 +3486,7 @@ becomes an oracle for which accounts are OAuth-only.
 
 ```typescript
 const { passkeys } = await authApi.listPasskeys.call({ body: {} });
-// → [{ passkeyId, label, deviceType, backedUp, transports, createdAt, lastUsedAt }]
+// → [{ passkeyId, label, deviceType, backedUp, transports, createdAt, lastUsedAt, secondFactor, userVerified }]
 
 await authApi.renamePasskey.call({ body: { passkeyId, label: 'Old iPhone' } });
 await authApi.revokePasskey.call({ body: { passkeyId } });
@@ -3483,6 +3505,12 @@ await authApi.revokePasskey.call({ body: { passkeyId } });
   only ever "not yours".
 - **Renaming has no recent-authentication gate**: a label is display only and nothing is
   authorized by it.
+- **`secondFactor` says the passkey is marked as the account's second factor**, and
+  **`userVerified` that its registration verified the person** — what marking requires. Offer
+  "use as second factor" (`mfa/passkey/mark` with `secondFactor: true`) only where `secondFactor`
+  is false and `userVerified` true; elsewhere the mark answers 409
+  `PASSKEY_USER_VERIFICATION_REQUIRED`. A mark proves a factor only while the policy lists
+  `'passkey'`.
 
 #### Recovery — read this before shipping a passkey-only sign-up
 
@@ -4032,8 +4060,9 @@ credential as their second factor. Every rule reads that, on every use:
   possession and verification were both shown. At `mfa/verify` and `mfa/step-up` a passkey must also
   be marked (or, in the enrolment-only state, any live one).
 - **Marking needs a registration that verified the person.** Registration records it
-  (`passkeys.registered_user_verified`); `mfa/passkey/mark` on one that did not answers **409
-  `PASSKEY_USER_VERIFICATION_REQUIRED`**, and the enrolment-only registration does not mark it.
+  (`passkeys.registered_user_verified`, `userVerified` in `listPasskeys`); `mfa/passkey/mark` on one
+  that did not answers **409 `PASSKEY_USER_VERIFICATION_REQUIRED`**, and a registration under a
+  required policy does not mark it.
 - `SPFN_AUTH_PASSKEY_USER_VERIFICATION` is what the browser is asked for, and with `required`, a
   sign-in without verification is refused outright. It no longer decides what a second factor is.
 

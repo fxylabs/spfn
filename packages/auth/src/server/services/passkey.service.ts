@@ -76,8 +76,12 @@ import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 import { reportAccountRefusal, reportedFailure, signInAttempt } from './sign-in-guard.service';
 import { registerPublicKeyService } from './key.service';
 import { assertEnrolmentProven, assertStepUp, mfaEnrolledForUser, mfaStatusService, type MfaStatus } from './mfa.service';
-import { assertNotLastListedFactor, isEnrolmentOnly, secondFactorEnrolmentFields } from './second-factor-policy.service';
-import { isMethodListed } from '../lib/second-factor-policy';
+import {
+    assertNotLastListedFactor,
+    registrationMark,
+    secondFactorEnrolmentFields,
+    type RegistrationMark,
+} from './second-factor-policy.service';
 import type { PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { updateLastLoginService } from './user.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
@@ -103,6 +107,18 @@ export interface PasskeySummary
     transports: string[];
     createdAt: string;
     lastUsedAt: string | null;
+    /**
+     * Marked as the account's second factor. It proves one only while the
+     * policy lists `'passkey'` (`secondFactor.methods`).
+     */
+    secondFactor: boolean;
+    /**
+     * Its registration verified the person (`registered_user_verified`) — what
+     * `mfa/passkey/mark` requires: an app offers "use as second factor" only
+     * where this is true, or the mark answers 409
+     * `PASSKEY_USER_VERIFICATION_REQUIRED`.
+     */
+    userVerified: boolean;
 }
 
 /**
@@ -122,6 +138,8 @@ function toSummary(row: Passkey): PasskeySummary
         transports: row.transports ?? [],
         createdAt: row.createdAt.toISOString(),
         lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+        secondFactor: row.secondFactor,
+        userVerified: row.registeredUserVerified,
     };
 }
 
@@ -458,9 +476,9 @@ export interface FinishPasskeyEnrollmentResult
     createdAt: string;
     /**
      * The account's second-factor state, present only when this registration
-     * also marked the passkey as its second factor — in the policy's
-     * enrolment-only state (#309). Absent otherwise, so the answer without a
-     * policy is the one it always was.
+     * also marked the passkey as its second factor — under a policy that
+     * requires one (#309, #399). Absent otherwise, so the answer without a
+     * required policy is the one it always was.
      */
     mfaStatus?: MfaStatus;
 }
@@ -480,21 +498,23 @@ export interface FinishPasskeyEnrollmentResult
  * turn binding off. It is checked before the transaction (a failed one spends
  * its challenge) and spent under the lock.
  *
- * In the policy's enrolment-only state (#309) with `'passkey'` listed, the new
- * passkey is marked as the second factor in the same transaction — when the
- * ceremony carried user verification, which is the proof; a registration
- * without it is possession alone, is kept unmarked, and the account stays in
- * that state (au7-A4). Every registration records whether it verified the
- * person (`registered_user_verified`), which a later mark requires.
- * Otherwise the session is ordinary on its next request, and the marking
- * registration also records a step-up for the credential that made it, in the
- * same transaction: the ceremony proved the factor with user verification, as
- * `totp/confirm` does, so a sensitive change right after needs no second
- * ceremony (#372). No other registration records one — on an enrolled account
- * adding a passkey does not refresh the window. An account that
- * already held a credential reaches this only from a device that proved it
- * (`assertEnrolmentProven`). With no policy, or outside that state, nothing is
- * marked.
+ * While the policy requires a second factor with `'passkey'` listed, the new
+ * passkey is marked as the second factor in the same transaction
+ * (`registrationMark`) — when the ceremony carried user verification, which
+ * is the proof; a registration without it is possession alone and is kept
+ * unmarked (au7-A4). An enrolled account's spare is marked too (#399). Every
+ * registration records whether it verified the person
+ * (`registered_user_verified`), which a later mark requires.
+ *
+ * A mark that takes the account out of the enrolment-only state (#309) makes
+ * the session ordinary on its next request, and also records a step-up for
+ * the credential that made it, in the same transaction: the ceremony proved
+ * the factor with user verification, as `totp/confirm` does, so a sensitive
+ * change right after needs no second ceremony (#372). No other registration
+ * records one — on an enrolled account adding a passkey does not refresh the
+ * window. An account that already held a credential reaches this only from a
+ * device that proved it (`assertEnrolmentProven`). With no policy, or an
+ * optional one, nothing is marked.
  *
  * **The decision is made here, under the account lock** (`assertMayRegister`):
  * the challenge's stamp admitted for this key, then step-up and recent
@@ -572,7 +592,7 @@ async function keepPasskey(
         throw new PasskeyAlreadyRegisteredError();
     }
 
-    const marksFactor = verified.userVerified && isMethodListed('passkey') && await isEnrolmentOnly(params.userId);
+    const mark = await registrationMark(params.userId, verified.userVerified);
     const row = await passkeysRepository.create({
         userId: params.userId,
         credentialId: verified.credentialId,
@@ -583,7 +603,7 @@ async function keepPasskey(
         backedUp: verified.backedUp,
         aaguid: verified.aaguid,
         label: params.label ?? null,
-        secondFactor: marksFactor,
+        secondFactor: mark.marks,
         registeredUserVerified: verified.userVerified,
     });
 
@@ -593,16 +613,35 @@ async function keepPasskey(
         label: row.label ?? undefined,
     }));
 
-    const enrolled = { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+    return await registrationAnswer(
+        params,
+        mark,
+        { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() },
+    );
+}
 
-    if (!marksFactor)
+/**
+ * The answer to a kept registration: `mfaStatus` when it marked the passkey,
+ * and a step-up recorded only when that mark enrolled the account (#372) —
+ * a spare on an enrolled account does not refresh the window.
+ */
+async function registrationAnswer(
+    params: FinishPasskeyEnrollmentParams,
+    mark: RegistrationMark,
+    enrolled: FinishPasskeyEnrollmentResult,
+): Promise<FinishPasskeyEnrollmentResult>
+{
+    if (!mark.marks)
     {
         return enrolled;
     }
 
-    // This credential just proved the factor it made, with user verification:
-    // a step-up, as `totp/confirm` records one (#372).
-    await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), 'passkey');
+    if (mark.enrols)
+    {
+        // This credential just proved the factor it made, with user verification:
+        // a step-up, as `totp/confirm` records one (#372).
+        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), 'passkey');
+    }
 
     return { ...enrolled, mfaStatus: await mfaStatusService(params.userId) };
 }

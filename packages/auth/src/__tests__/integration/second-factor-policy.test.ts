@@ -4,8 +4,11 @@
  * One test per row of the #309 case table — S1–S19, R1–R7, K1–K5 — of the
  * first review round — F1, F2 and P1–P12 — of the second — G1, G2, RV-A,
  * RV-D and the recovery-code generation — D2 of #329, SU1–SU3 of #372
- * (a marking registration records a step-up) and SU4–SU5 of #393 (one spend of a
- * step-up assertion across its two consumers), named for its row. The boot
+ * (a marking registration records a step-up), M399-1–M399-4 of #399 (a
+ * user-verified registration is marked whenever the policy requires a factor),
+ * RV412-P1 of its review (only a listed passkey is marked)
+ * and SU4–SU5 of #393 (one spend of a step-up assertion across its two
+ * consumers), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -389,13 +392,13 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     }
 
     /** Register a passkey on this session; the authenticator, its id, and the registration's answer. */
-    async function registerPasskey(session: Session)
+    async function registerPasskey(session: Session, userVerified = true)
     {
         const authenticator = await FixtureAuthenticator.create();
         const options = await post('/_auth/passkeys/register/options', {}, session.authorization);
         expect(options.status, await options.clone().text()).toBe(200);
         const registered = await post('/_auth/passkeys/register/verify', {
-            response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID }),
+            response: authenticator.attest({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, userVerified }),
         }, session.authorization);
         expect(registered.status).toBe(200);
         const answer = await registered.json();
@@ -1525,17 +1528,101 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         expect(await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.userId, userId))).toEqual([]);
     });
 
-    it('SU2: a user-verified registration on an enrolled account does not refresh the step-up window', async () =>
+    it('SU2: a user-verified registration on an enrolled account marks the spare (#399) but does not refresh the step-up window', async () =>
     {
         const { session } = await passkeyEnrolledAccount();
+        // The enrolment-only first registration recorded the window this row ages.
+        expect(await verificationsFor(session.keyId)).toEqual([expect.objectContaining({ method: 'passkey' })]);
         const opened = new Date(Date.now() - 5 * 60_000);
         await getTestDb().update(mfaVerifications).set({ verifiedAt: opened }).where(eq(mfaVerifications.keyId, session.keyId));
 
         const { answer } = await registerPasskey(session);
 
-        expect(answer.mfaStatus).toBeUndefined();
+        expect(answer.mfaStatus).toEqual({ enrolled: true, methods: ['passkey'], recoveryCodesRemaining: 0 });
+        expect(await liveMarkedPasskeys()).toBe(2);
         const [verification] = await verificationsFor(session.keyId);
         expect(verification!.verifiedAt.getTime()).toBe(opened.getTime());
+    });
+
+    // ========================================================================
+    // #399 — a user-verified registration is marked whenever the policy requires a factor
+    // ========================================================================
+
+    it('M399-1: an enrolled account registers a user-verified spare — marked, mfaStatus answered, and mfa/verify accepts it', async () =>
+    {
+        const { session } = await passkeyEnrolledAccount();
+
+        const spare = await registerPasskey(session);
+
+        expect(spare.answer).toEqual({
+            passkeyId: spare.passkeyId,
+            label: null,
+            createdAt: expect.any(String),
+            mfaStatus: { enrolled: true, methods: ['passkey'], recoveryCodesRemaining: 0 },
+        });
+        expect(await liveMarkedPasskeys()).toBe(2);
+
+        const { body: pending } = await passwordLogin();
+        const options = await post('/_auth/mfa/verify/options', { challenge: pending.challenge.secret });
+        const verified = await post('/_auth/mfa/verify', {
+            challenge: pending.challenge.secret,
+            response: spare.authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter: 1 }),
+        });
+
+        expect(verified.status).toBe(200);
+        expect(await verified.json()).toMatchObject({ mfaRequired: false, userId: String(userId) });
+    });
+
+    it('M399-2: the same spare registered without user verification is kept unmarked, and the answer has no mfaStatus', async () =>
+    {
+        const { session } = await passkeyEnrolledAccount();
+
+        const spare = await registerPasskey(session, false);
+
+        expect(spare.answer).toEqual({ passkeyId: spare.passkeyId, label: null, createdAt: expect.any(String) });
+        expect(await liveMarkedPasskeys()).toBe(1);
+    });
+
+    it('M399-3: required: false, an account enrolled by TOTP — a user-verified registration marks nothing', async () =>
+    {
+        usePolicy({ required: false, methods: ['totp', 'passkey'], recoveryCodes: false });
+        const session = await signIn();
+        await enrolTotp(session);
+
+        const { passkeyId, answer } = await registerPasskey(session);
+
+        expect(answer).toEqual({ passkeyId, label: null, createdAt: expect.any(String) });
+        expect(await liveMarkedPasskeys()).toBe(0);
+    });
+
+    it('M399-4: listPasskeys shows each passkey\'s secondFactor and userVerified', async () =>
+    {
+        const session = await signIn();
+        const unmarked = await registerPasskey(session);
+        const unverified = await registerPasskey(session, false);
+        const marked = await registerPasskey(session);
+        expect((await mark(session, marked.passkeyId, true)).status).toBe(200);
+
+        const listed = await (await post('/_auth/passkeys/list', {}, session.authorization)).json();
+
+        expect(listed.passkeys).toHaveLength(3);
+        expect(listed.passkeys).toEqual(expect.arrayContaining([
+            expect.objectContaining({ passkeyId: unmarked.passkeyId, secondFactor: false, userVerified: true }),
+            expect.objectContaining({ passkeyId: unverified.passkeyId, secondFactor: false, userVerified: false }),
+            expect.objectContaining({ passkeyId: marked.passkeyId, secondFactor: true, userVerified: true }),
+        ]));
+    });
+
+    it('RV412-P1: required, methods [\'totp\'], an account enrolled by TOTP — a user-verified registration marks nothing, and the answer has no mfaStatus', async () =>
+    {
+        usePolicy({ required: true, methods: ['totp'], recoveryCodes: false });
+        const session = await signIn();
+        await enrolTotp(session);
+
+        const { passkeyId, answer } = await registerPasskey(session);
+
+        expect(answer).toEqual({ passkeyId, label: null, createdAt: expect.any(String) });
+        expect(await liveMarkedPasskeys()).toBe(0);
     });
 
     it('SU3: first set-up — a temporary-password session registers its marking passkey and changes the password with no second ceremony', async () =>

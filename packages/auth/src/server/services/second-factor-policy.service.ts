@@ -136,6 +136,35 @@ export async function isEnrolmentOnly(userId: number): Promise<boolean>
     return isSecondFactorRequired() && !await mfaEnrolmentRepository.isEnrolledInOnPrimary(userId, listedMethods());
 }
 
+/** What a passkey registration does to the account's second factor. */
+export interface RegistrationMark
+{
+    /** The new passkey is marked as a second factor. */
+    marks: boolean;
+    /** The mark enrols the account: it was in the enrolment-only state until now. */
+    enrols: boolean;
+}
+
+/**
+ * Whether a passkey registration marks the new passkey as a second factor
+ * (#399): when the ceremony verified the person, `'passkey'` is listed and the
+ * policy requires a second factor — whatever the account's state, so a spare
+ * passkey on an enrolled account proves the factor too. Under an optional
+ * policy, or with none, a registration marks nothing; marking stays the
+ * owner's act there (`mfa/passkey/mark`).
+ *
+ * `enrols` is the narrower half: the account was enrolment-only until this
+ * mark. Only that registration is also a step-up (#372) — an enrolled account
+ * adding a spare must not refresh its window. Asked under the account lock,
+ * before the row is written; `isEnrolmentOnly` reads the primary.
+ */
+export async function registrationMark(userId: number, userVerified: boolean): Promise<RegistrationMark>
+{
+    const marks = userVerified && isMethodListed('passkey') && isSecondFactorRequired();
+
+    return { marks, enrols: marks && await isEnrolmentOnly(userId) };
+}
+
 /**
  * Whether enrolling on this account needs a proof first (#309): it is in the
  * enrolment-only state and already holds a credential it could prove itself

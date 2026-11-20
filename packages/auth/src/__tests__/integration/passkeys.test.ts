@@ -900,7 +900,10 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             expect(listed).toHaveLength(2);
             expect(listed.map((entry: { label: string }) => entry.label).sort()).toEqual(['One', 'Two']);
             expect(Object.keys(listed[0]).sort()).toEqual(
-                ['backedUp', 'createdAt', 'deviceType', 'label', 'lastUsedAt', 'passkeyId', 'transports'],
+                [
+                    'backedUp', 'createdAt', 'deviceType', 'label', 'lastUsedAt', 'passkeyId', 'secondFactor',
+                    'transports', 'userVerified',
+                ],
             );
         });
 

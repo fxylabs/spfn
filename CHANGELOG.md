@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in on a device that is not already signed in. It does not cover a still-signed-in browser signing
   in again (the password alone), a bound session's renewal (the passkey alone), or an account that
   has not enrolled yet (the password, then enrolment).
+- **@spfn/auth: `PasskeySummary.secondFactor` and `PasskeySummary.userVerified`** (#399).
+  `listPasskeys` shows whether each passkey is marked as a second factor, and whether its
+  registration verified the person (`registered_user_verified`) — what `mfa/passkey/mark`
+  requires, so an app offers "use as second factor" only where it answers 200 rather than 409
+  `PASSKEY_USER_VERIFICATION_REQUIRED`. The type from `@spfn/auth/server` gains both. Not in the
+  mobile contract: the passkey routes are not contract operations.
 - **@spfn/auth: `stepUpAssertion(api)` and `stepUpWithPasskey(api)`** from `@spfn/auth/client`
   (#372, #393). `stepUpAssertion` asks `mfa/step-up/options`, runs the ceremony and answers the
   assertion unspent, for an app route that checks it with
@@ -220,6 +226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     error's text when it has none, and carry the error under `context.error`. Database connection creation and provider close keep the error
     as their second argument — the caught value itself, not an Error made from its text.
   - A failed job's `output`: see its entry above.
+- **BREAKING (behaviour, under `secondFactor.required: true` only): @spfn/auth: a user-verified
+  passkey registration is marked as a second factor whenever the policy requires one (#399).**
+  `passkeys/register/verify` marked only in the enrolment-only state, so a spare passkey added by an
+  enrolled account was stored unmarked: refused as the second factor at `mfa/verify` and
+  `mfa/step-up` until a separate `mfa/passkey/mark`. Now, with `required: true` and `'passkey'` in
+  `methods`, every registration with user verification marks the passkey and answers `mfaStatus`.
+  Only the registration that takes the account out of the enrolment-only state also records a
+  step-up: an enrolled account adding a spare does not refresh its window (#372). With
+  `required: false` or no policy nothing changes — registration marks nothing. No data migration:
+  passkeys registered before are repaired with `mfa/passkey/mark`, which `listPasskeys` now shows
+  where it can succeed (Added).
 - **@spfn/auth: a passkey registration that marks the account's first passkey factor counts as a
   step-up (#372).** In the second-factor policy's enrolment-only state, `passkeys/register/verify`
   with user verification already marked the passkey; it now also opens the step-up window for the
