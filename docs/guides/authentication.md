@@ -1175,7 +1175,10 @@ purpose. `POST /_auth/keys/list` is what an account screen renders: each row car
 milliseconds, and the `registeredIp` / `registeredUserAgent` the key was first seen from —
 display material, spoofable on any request that does not come through a verified proxy, so
 render them and decide nothing by them. `revokeKey` signs one device out; `revokeAllKeys`
-signs the others out, or everything with `includeCurrent: true`.
+signs the others out, or everything with `includeCurrent: true`. A password change
+(`PUT /_auth/password`) follows the same rule: every other device is signed out, and the one
+that made the change stays signed in unless its body says `includeCurrent: true` — the
+"this device is compromised" choice.
 
 ### Telling the owner a device appeared
 
@@ -1624,7 +1627,7 @@ full design.
 | `/_auth/session/binding/disable/options` | POST | Required | The challenge that proves it is you before turning it off |
 | `/_auth/session/renew/options` | POST | Renewing key | Begin renewing a bound key — signed by the key being renewed, which may be past expiry |
 | `/_auth/session/renew/verify` | POST | Renewing key | Verify the assertion; answers exactly as `/_auth/login` |
-| `/_auth/password` | PUT | Required | Change password |
+| `/_auth/password` | PUT | Required | Change password; signs every other device out (`includeCurrent: true`: this one too) |
 | `/_auth/session` | GET | Required | Get session info |
 | `/_auth/channels` | GET | — | Which sign-in channels the app offers: `{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin }` |
 | `/_auth/tokens` | POST | Required | Issue one-time token |

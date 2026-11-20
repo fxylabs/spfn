@@ -875,7 +875,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         ['logout', (account, session) => post('/_auth/logout', account, {}, session.authorization)],
         ['revoke-all', (account, session) => post('/_auth/keys/revoke-all', account, { includeCurrent: true }, session.authorization)],
         ['password change', (account, session) => send('PUT', '/_auth/password', account,
-            { currentPassword: TEST_PASSWORD, newPassword: NEW_PASSWORD }, { Authorization: session.authorization })],
+            { currentPassword: TEST_PASSWORD, newPassword: NEW_PASSWORD, includeCurrent: true }, { Authorization: session.authorization })],
     ];
 
     it.each(REVOCATIONS)('T3 %s: a token the key issued is refused, and a stream opened with one before closes', async (_name, revoke) =>

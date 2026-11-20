@@ -14,8 +14,7 @@ import {
     VerificationTokenTargetMismatchError,
 } from '@spfn/auth/errors';
 
-import { usersRepository, keysRepository, deviceAuthorizationsRepository, deviceLinksRepository } from '../repositories';
-import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
+import { usersRepository } from '../repositories';
 import { runBeforeRegister } from '../lib/config';
 import { assertPasskeyProven, type PasskeyProof } from '../lib/passkey-proof';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
@@ -28,11 +27,11 @@ import {
     normalizeEmail,
 } from '../helpers';
 import { validateVerificationToken } from './verification.service';
-import { registerPublicKeyService, revokeKeyService } from './key.service';
+import { endEverySessionExcept, registerPublicKeyService, revokeKeyService } from './key.service';
 import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
-import { accountRefusalReason, type PrincipalCredential } from './admission.service';
+import { accountRefusalReason, signingKeyOf, type PrincipalCredential } from './admission.service';
 import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import type { User } from '../entities/users';
@@ -148,6 +147,12 @@ export interface ChangePasswordParams
      * show to set its first password (`assertPasskeyProven`).
      */
     passkeyProof?: PasskeyProof | null;
+    /**
+     * true ends the caller's session too ("this device is compromised").
+     * Default false: the key the request signs with (`signingKeyOf`) is spared,
+     * as `revoke-all` spares it.
+     */
+    includeCurrent?: boolean;
 }
 
 /**
@@ -546,6 +551,12 @@ export async function logoutService(
  * unaffected — including the OAuth-only account with no password and a key
  * older than ten minutes, which still sets a first password and gets a 200.
  *
+ * Every other session ends with it, and every way back in
+ * (`endEverySessionExcept`) — the rule `revoke-all` follows: the key the
+ * request signs with is spared and moves into the new key generation, unless
+ * `includeCurrent`. A one-time token spares the key that issued it; an
+ * application profile or a grant holds no key to spare.
+ *
  * Setting a first password on an account with session binding on asks a
  * passkey proof (`lib/passkey-proof.ts`): it is a first factor the session
  * would otherwise hand out with nothing but itself, and a sign-in with it
@@ -564,9 +575,13 @@ export async function changePasswordService(
 
     const verifiedHash = await verifyCurrentPassword(params);
     // Hashed before the account lock is taken: the hash is the slow step.
-    const newPasswordHash = await hashPassword(params.newPassword);
+    const change = {
+        userId,
+        newPasswordHash: await hashPassword(params.newPassword),
+        spareKeyId: params.includeCurrent ? null : signingKeyOf(params.credential),
+    };
 
-    if (await replaceVerifiedPassword(userId, verifiedHash, newPasswordHash, params.passkeyProof ?? null))
+    if (await replaceVerifiedPassword(change, verifiedHash, params.passkeyProof ?? null))
     {
         return;
     }
@@ -585,10 +600,18 @@ export async function changePasswordService(
     // again, or a password that no longer matches, is refused as before.
     const reverifiedHash = await verifyCurrentPassword({ ...params, passwordHash: undefined });
 
-    if (!await replaceVerifiedPassword(userId, reverifiedHash, newPasswordHash, null))
+    if (!await replaceVerifiedPassword(change, reverifiedHash, null))
     {
         throw new InvalidCredentialsError({ message: 'Current password is incorrect' });
     }
+}
+
+/** What a password change writes, and the key it spares (null: none). */
+interface PasswordChange
+{
+    userId: number;
+    newPasswordHash: string;
+    spareKeyId: string | null;
 }
 
 /**
@@ -600,12 +623,13 @@ export async function changePasswordService(
  * @returns false, with nothing written, when the stored hash moved
  */
 async function replaceVerifiedPassword(
-    userId: number,
+    change: PasswordChange,
     verifiedHash: string | null,
-    newPasswordHash: string,
     passkeyProof: PasskeyProof | null,
 ): Promise<boolean>
 {
+    const { userId } = change;
+
     return await runInTransaction(async () =>
     {
         const account = await usersRepository.lockAccount(userId);
@@ -624,8 +648,8 @@ async function replaceVerifiedPassword(
             await assertPasskeyProven(account, passkeyProof);
         }
 
-        await usersRepository.updatePassword(userId, newPasswordHash, true);
-        await signOutEverywhere(userId);
+        await usersRepository.updatePassword(userId, change.newPasswordHash, true);
+        await endEverySessionExcept(userId, change.spareKeyId, 'Revoked by password change');
 
         return true;
     }, { context: 'auth:change-password' });
@@ -669,33 +693,4 @@ async function storedPasswordHash(userId: number): Promise<string | null>
     }
 
     return user.passwordHash;
-}
-
-/**
- * What a password change ends: every key the account holds, and every way a
- * device could sign itself back in after it.
- */
-async function signOutEverywhere(userId: number): Promise<void>
-{
-    // The device-code requests still in flight are keys that have not been handed
-    // out yet: a poll on an approved one would register a fresh active key moments
-    // after the revocation below, defeating the "log me out everywhere" this call
-    // exists for.
-    await deviceAuthorizationsRepository.denyAllActiveByUserId(userId);
-
-    // Device links the account issued go with them, for the same reason: an
-    // approved link nobody has collected would register a key after this.
-    await deviceLinksRepository.expireAllLiveByUserId(userId);
-
-    // A grant the user gave a CLI carries a refresh token, so a client holding
-    // one signs itself back in within the hour — which is exactly the client a
-    // global revocation is aimed at. Revoked alongside the device codes, and for
-    // the reason they are.
-    await revokeAllOAuth2GrantsForUser(userId);
-
-    // Revoke all existing sessions on password change (incident-response intent:
-    // "change password" should log the user out everywhere). authenticate verifies
-    // against active keys only, so revoked keys' requests immediately fail — no
-    // per-request cost beyond what auth already pays. The user re-authenticates.
-    await keysRepository.revokeAllActiveByUserId(userId, 'Revoked by password change');
 }

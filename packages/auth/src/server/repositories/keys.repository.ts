@@ -304,7 +304,7 @@ export class KeysRepository extends AccountStateRepository
     /**
      * 사용자의 모든 활성 공개키 revoke (비활성화) — 그리고 같은 문장에서 key_epoch +1
      *
-     * 비번 변경 시 전체 세션 로그아웃에 사용. authenticate는 활성 키만 검증하므로,
+     * 전체 로그아웃(includeCurrent)·비번 재설정 등에 사용. authenticate는 활성 키만 검증하므로,
      * revoke된 키로 서명한 기존 세션의 요청은 즉시 401이 된다.
      * Write primary 사용
      */

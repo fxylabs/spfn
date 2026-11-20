@@ -927,8 +927,8 @@ export const revokeKey = route.post('/_auth/keys/revoke')
  * POST /_auth/keys/revoke-all - Sign every device out
  *
  * Spares the calling device by default, so this is "sign out my other devices".
- * `includeCurrent: true` is the full sign-out — until now reachable only as a
- * side effect of changing a password, which nobody does for that reason.
+ * `includeCurrent: true` is the full sign-out. `PUT /_auth/password` follows
+ * the same rule.
  */
 export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
     .input({
@@ -958,6 +958,10 @@ export const revokeAllKeys = route.post('/_auth/keys/revoke-all')
  * Allows authenticated users to change their password
  * Requires current password for verification
  *
+ * Every other session ends with the change; the one making it stays, moved into
+ * the new key generation, unless `includeCurrent: true` (the rule `revoke-all`
+ * follows).
+ *
  * An account with no password that has session binding on sets its first one
  * only with `passkeyResponse`, an assertion over
  * `session/passkey-proof/options { procedure: 'passwordSet' }`; without it,
@@ -973,6 +977,9 @@ export const changePassword = route.put('/_auth/password')
             })),
             newPassword: PasswordSchema,
             passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
+            includeCurrent: Type.Optional(Type.Boolean({
+                description: 'Also revoke the key this request is signed with. Default false: every other session ends, this one stays.',
+            })),
         }),
     })
     .use([rateLimitPolicy('auth-password-change', { limit: 10, windowMs: 60_000 })])
@@ -994,6 +1001,7 @@ export const changePassword = route.put('/_auth/password')
                 procedure: 'passwordSet',
                 response: body.passkeyResponse,
             }),
+            includeCurrent: body.includeCurrent,
         });
 
         return c.noContent();

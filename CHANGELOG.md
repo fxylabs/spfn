@@ -266,6 +266,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template imports them; `spfn build` bundles with the CLI's own tsup, and core and the CLI declare
   their own dotenv. An existing app keeps them harmlessly, apart from `drizzle-typebox` under npm
   (above). The unused `buildServerForCommand` helper, which ran an app-level tsup, is gone.
+- **BREAKING (behaviour): @spfn/auth: a password change keeps the session that made it (#372).**
+  `PUT /_auth/password` used to revoke every key of the account, the caller's included, so the person
+  changing their password was signed out by it — and on an enrolled account signed back in as a new
+  device, with the second factor again. It now ends sessions as `POST /_auth/keys/revoke-all` does,
+  through the same code: every other key, every key waiting on a second factor, device-code approvals
+  and device links not yet collected, and OAuth 2.1 grants; the key the request signs with moves into
+  the new key generation in the same statement and stays signed in — not re-issued, so its binding,
+  the browser's cookies and its step-up window are unchanged. A one-time token spares the key that
+  issued it; an application profile spares no device key. The body gains `includeCurrent` (optional
+  boolean): `true` signs the caller out too, as on `revoke-all`. **Migrate:** an app that sent the
+  person to sign in again after a change finds the session alive; send `includeCurrent: true` where
+  the change is meant to end this device's session as well. A password reset is unchanged. No schema
+  change, no proxy change; the mobile contract does not list the operation and does not move.
 - **BREAKING: @spfn/auth: a disabled or pending-deletion account answers password sign-in as a wrong
   password does (#364).** `POST /_auth/login` used to answer a wrong password `InvalidCredentialsError`
   (401) and the right one `AccountDisabledError` / `AccountPendingDeletionError` (403), telling any

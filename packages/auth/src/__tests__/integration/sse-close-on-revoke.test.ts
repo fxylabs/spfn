@@ -13,7 +13,7 @@
  * | R19  | `POST /_auth/keys/revoke-all` (default, spare current)       | every other active key, not the current               |
  * | R20  | `revoke-all` with `includeCurrent: true`                     | every active key including the current                |
  * | R21  | logout                                                       | the current key                                       |
- * | R22a | password change                                              | every active key                                      |
+ * | R22a | password change                                              | every other active key, not the current               |
  * | R22b | password reset                                               | every active key                                      |
  * | R22c | account deletion request                                     | every active key                                      |
  * | R23a | key rotation                                                 | the old key only; the new key is never closed         |
@@ -398,7 +398,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         await expectClosedAfterCommit([current.keyId]);
     });
 
-    it('R22a PUT /_auth/password closes every active key', async () =>
+    it('R22a PUT /_auth/password closes every other active key, not the current', async () =>
     {
         const { current, others } = await threeDevices('r22a@test.com');
         forgetCloses();
@@ -406,7 +406,7 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
         const changed = await send('PUT', '/_auth/password', { currentPassword: PASSWORD, newPassword: NEW_PASSWORD }, current.authorization);
 
         expect(changed.status).toBe(204);
-        await expectClosedAfterCommit([current.keyId, ...others.map((other) => other.keyId)]);
+        await expectClosedAfterCommit(others.map((other) => other.keyId));
     });
 
     it('R22b a completed password reset closes every active key, and not the key the reset registers', async () =>

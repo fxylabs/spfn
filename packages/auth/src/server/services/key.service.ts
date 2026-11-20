@@ -1120,8 +1120,8 @@ export async function listKeysService(params: ListKeysParams): Promise<KeySummar
  *
  * The caller's own key is spared by default, so "sign out my other devices"
  * does not also end the session making the request. Passing
- * `includeCurrent: true` is the full sign-out, which until now was reachable
- * only as a side effect of changing a password.
+ * `includeCurrent: true` is the full sign-out. A password change follows the
+ * same rule (`changePasswordService`).
  *
  * Live device authorizations are refused as well, in both modes. A device
  * waiting on an approved code has no key yet, so it is never the caller's own
@@ -1154,14 +1154,39 @@ export async function revokeAllKeysService(
             await assertStepUp({ userId, credential: params.credential });
         }
 
-        const revoked = !includeCurrent && currentKeyId
-            ? await keysRepository.revokeAllActiveByUserIdExcept(userId, currentKeyId, reason)
-            : await keysRepository.revokeAllActiveByUserId(userId, reason);
-
-        await revokeEveryWayBackIn(userId);
-
-        return { revokedCount: revoked.length, currentKeyRevoked: includeCurrent };
+        return {
+            revokedCount: await endEverySessionExcept(userId, includeCurrent ? null : currentKeyId ?? null, reason),
+            currentKeyRevoked: includeCurrent,
+        };
     }, { context: 'auth:revoke-all-keys' });
+}
+
+/**
+ * A global revocation — the one definition behind `revoke-all` and the
+ * password change: every active key but `spareKeyId`, every pending key, and
+ * every way a device could sign itself back in after it. The caller holds the
+ * account lock.
+ *
+ * The spared key moves into the new key generation in the same statement
+ * (`revokeAllActiveByUserIdExcept`), so the request that asked keeps its
+ * session — binding, cookie and step-up record untouched — and its next
+ * request is admitted. Null spares nothing.
+ *
+ * @returns how many keys it revoked — the spared one is never among them
+ */
+export async function endEverySessionExcept(
+    userId: number,
+    spareKeyId: string | null,
+    reason: string,
+): Promise<number>
+{
+    const revoked = spareKeyId
+        ? await keysRepository.revokeAllActiveByUserIdExcept(userId, spareKeyId, reason)
+        : await keysRepository.revokeAllActiveByUserId(userId, reason);
+
+    await revokeEveryWayBackIn(userId);
+
+    return revoked.length;
 }
 
 /**

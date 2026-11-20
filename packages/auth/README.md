@@ -346,7 +346,7 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `passkeyProofOptions` | POST `/_auth/session/passkey-proof/options` | yes | the challenge a bound account answers to let another credential in — see [Letting another credential in](#letting-another-credential-in) |
 | `sessionRenewOptions` | POST `/_auth/session/renew/options` | public | begin renewing a bound session key |
 | `sessionRenewVerify` | POST `/_auth/session/renew/verify` | public | verify the assertion; answers exactly as `login` |
-| `changePassword` | PUT `/_auth/password` | yes | change password |
+| `changePassword` | PUT `/_auth/password` | yes | change password; signs every other device out, this one too with `includeCurrent: true` — see [Registered devices](#registered-devices-key-management) |
 | `getAuthSession` | GET `/_auth/session` | yes | current session/user, with the role in force (`null` for none) and the permissions `requirePermissions` enforces |
 | `getAuthChannels` | GET `/_auth/channels` | public | which sign-in channels the app offers, one boolean each — see [channels](#which-sign-in-channels-exist-channels) |
 | `issueOneTimeToken` | POST | yes | short-lived token (e.g. SSE handshake) |
@@ -620,12 +620,13 @@ An account an operator created with a temporary password (`passwordChangeRequire
 3. **`PUT /_auth/password`** with `currentPassword` and `newPassword` → 204, no step-up ceremony in
    between. `currentPassword` (the temporary one) stays required here: with the window just opened,
    a session taken in those minutes could otherwise set a password it never knew.
-4. The change still signs out every session, this one included, so the person **signs in again**
-   with the new password and their passkey (the 202 and `mfa/verify`). Keeping the session that made
-   the change is the second part of #372, not yet released.
+4. The change signs every other session out and **keeps this one**: the person carries on, signed
+   in, with no further ceremony.
 
 Before this release step 3 answered 403 `STEP_UP_REQUIRED` and needed an `mfa/step-up` ceremony with
-the passkey registered seconds earlier — three passkey ceremonies in all; it is two now.
+the passkey registered seconds earlier, and the change then signed this session out too, so the
+person signed in again with the new password and their passkey — three passkey ceremonies in all;
+it is one now, the registration.
 
 When the owner has lost what the account holds, the operator resets it:
 `resetSecondFactorService(userId)` (from `@spfn/auth/server`), in one transaction, revokes every
@@ -1152,7 +1153,8 @@ can prove a replacement now:
   rotation racing "sign out everywhere" therefore writes a key that is dead on arrival. Such a key
   is answered exactly as a revoked one: `401 KeyRevokedError` on the Bearer surface,
   `SESSION_REVOKED` on clientProofV1 (before the proof and the nonce ledger, as a revoked key is).
-  The device that asked to sign out the *others* moves into the new generation with the account.
+  The device that asked to sign out the *others* moves into the new generation with the account,
+  and so does the device that changed the password.
 
 The migration adds `user_public_keys.authenticated_at` (backfilled from `created_at`) and
 `user_public_keys.key_epoch` (backfilled from the account's `users.key_epoch`), so every existing
@@ -1244,6 +1246,26 @@ each path, calling `authApi` the way your login and reset screens already do:
 the handler enforced — the login redirect, redirecting only to the API's `redirectUri`, and the
 `frame-ancestors 'none'` / `no-store` headers. Its CSRF check needs nothing from you: the proxy
 checks the consent POST in every mode, reading that from the route map this package ships.
+
+### Migration — a password change keeps the session that made it
+
+**BREAKING (behaviour)** (#372).
+`PUT /_auth/password` used to revoke every key of the account, the caller's included: the
+person changing their password was signed out by it and had to sign in again — on an enrolled
+account a new device, so with the second factor once more. It now does what `revokeAllKeys`
+does: every other session ends, and every way back in with it, and the session that made the
+change stays signed in, moved into the new key generation. No wire or schema change: the
+answer is still `204`, and the body gains an optional `includeCurrent`.
+
+- **An app that sent the person to the sign-in page after a change** finds the session alive.
+  Keep the person where they are, or send `includeCurrent: true` to sign this device out too.
+- **An app that offers "change the password because this device is compromised"** sends
+  `includeCurrent: true`.
+- **A password reset is unchanged:** it signs every device out and signs the resetting browser
+  in on a fresh key.
+
+The Next.js proxy needs no change: the browser's cookies are not touched by the change, and its
+next request is admitted. The mobile contract does not list a password change, and does not move.
 
 ### Migration — tell a chosen locale from none
 
@@ -2592,7 +2614,8 @@ await authApi.completePasswordReset.call({ body: { password } });
 ```
 
 **Every other device is signed out.** Completing a reset denies every pending device
-authorization and revokes every active key, exactly as `changePassword` does — whoever was
+authorization and revokes every active key, exactly as `revokeAllKeys` with `includeCurrent: true`
+does (a password change, unlike a reset, keeps the session that made it) — whoever was
 signed in on the old password, including the person the reset was needed for, has to sign in
 again. The browser that performed the reset is signed in on a fresh key registered after the
 revocation, so it does not have to retype the new password. `emailVerifiedAt` is stamped if
@@ -2982,6 +3005,8 @@ not recognise rather than assume the set is closed.
 await authApi.revokeKey.call({ body: { keyId } });            // → { keyId, selfRevoked }
 await authApi.revokeAllKeys.call({ body: {} });               // other devices only
 await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // everything
+await authApi.changePassword.call({ body: { currentPassword, newPassword } });   // other devices signed out
+await authApi.changePassword.call({ body: { currentPassword, newPassword, includeCurrent: true } });   // everything
 ```
 
 > **All three key-management operations are POST with their arguments in the body, deliberately.** The mobile auth
@@ -3006,8 +3031,18 @@ await authApi.revokeAllKeys.call({ body: { includeCurrent: true } });   // every
 - **Revoking your own key is allowed.** It is this device's sign-out, which `logout` already does.
   `selfRevoked` in the response tells the two cases apart.
 - **`revokeAllKeys` spares the calling device unless you ask otherwise**, so the common case is
-  "sign out my other devices". `includeCurrent: true` is the full sign-out — until now reachable
-  only as a side effect of changing a password, which nobody does for that reason.
+  "sign out my other devices". `includeCurrent: true` is the full sign-out.
+- **A password change follows the same rule.** `PUT /_auth/password` signs every other device out
+  with the same revocation — other keys, keys waiting on a second factor, device-code approvals and
+  device links not yet collected, OAuth 2.1 grants — and keeps the session that made the change.
+  That key is not re-issued: it moves into the new key generation in the same statement, so its
+  binding, the browser's cookies and its [step-up window](#the-step-up-window) are untouched and
+  its next request is admitted. `includeCurrent: true` in the body signs it out too, for a person
+  who changes the password because this device is the one they no longer trust. A
+  [one-time token](#one-time-token) spares the key that issued it; an
+  [application profile](#custom-auth-profiles-registerauthprofile) has no key here to spare, so
+  every device key goes. See
+  [the migration note](#migration--a-password-change-keeps-the-session-that-made-it).
 - **It also refuses device-code approvals still in flight**, in both modes, because an approved
   code is a key that has not been handed out yet: the next poll would register a fresh active one
   and undo the sign-out. `revokedCount` still counts keys only — a code nobody collected was

@@ -1,8 +1,12 @@
 /**
- * changePasswordService — revoke all sessions on password change (#4)
+ * changePasswordService — a password change ends every other session (#4, #372)
  *
- * A password change must revoke every active key for the user, so existing
- * sessions are logged out (backend authenticate verifies active keys only).
+ * Every active key but the one the request signs with is revoked, so the other
+ * sessions are logged out (backend authenticate verifies active keys only); the
+ * caller's key is spared, as `revoke-all` spares it, unless `includeCurrent`.
+ * Which key that is depends on the credential: a one-time token's is the key
+ * that issued it, and an application profile holds none — its key id is the
+ * verifier's, never a device key, even when it equals one's id.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -25,6 +29,7 @@ const {
     },
     keysRepository: {
         revokeAllActiveByUserId: vi.fn(async () => []),
+        revokeAllActiveByUserIdExcept: vi.fn(async () => []),
     },
     deviceAuthorizationsRepository: {
         denyAllActiveByUserId: vi.fn(async () => []),
@@ -56,31 +61,45 @@ vi.mock('../../server/services/oauth2-grant.service', () => ({ revokeAllOAuth2Gr
 vi.mock('../../server/services/mfa.service', () => ({ assertStepUp }));
 
 import { changePasswordService } from '../../server/services/auth.service';
+import type { PrincipalCredential } from '../../server/services/admission.service';
 
 describe('changePasswordService — session revocation', () =>
 {
     beforeEach(() => vi.clearAllMocks());
 
-    it('revokes all active keys after a successful password change', async () =>
+    /** The key each credential kind spares — null: it revokes every key. */
+    const SPARED: [string, PrincipalCredential, boolean | undefined, string | null][] = [
+        ['a device key', { kind: 'deviceKey', keyId: 'key-of-the-calling-device' }, undefined, 'key-of-the-calling-device'],
+        ['a device key with includeCurrent', { kind: 'deviceKey', keyId: 'key-of-the-calling-device' }, true, null],
+        ['a one-time token', { kind: 'oneTimeToken', issuedByKeyId: 'key-that-issued-it' }, undefined, 'key-that-issued-it'],
+        ['an application profile', { kind: 'appProfile', profile: 'partner', keyId: 'key-of-the-calling-device' }, undefined, null],
+    ];
+
+    it.each(SPARED)('%s: the change revokes every active key but the one it spares', async (_name, credential, includeCurrent, spared) =>
     {
         await changePasswordService({
             userId: 7,
-            credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
+            credential,
             currentPassword: 'old-password',
             newPassword: 'new-password',
             passwordHash: 'old-hash',
+            includeCurrent,
         });
 
         expect(usersRepository.updatePassword).toHaveBeenCalledWith(7, 'new-hash', true);
-        expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledTimes(1);
-        expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledWith(7, expect.any(String));
+        expect({
+            all: keysRepository.revokeAllActiveByUserId.mock.calls,
+            except: keysRepository.revokeAllActiveByUserIdExcept.mock.calls,
+        }).toEqual(spared
+            ? { all: [], except: [[7, spared, 'Revoked by password change']] }
+            : { all: [[7, 'Revoked by password change']], except: [] });
     });
 
     it('refuses the device authorizations still in flight', async () =>
     {
         // Those are keys not yet handed out. A poll on an approved one would
         // register a fresh active key moments after the change revoked every
-        // other, which is the opposite of "log me out everywhere".
+        // other, which is the opposite of "log the others out".
         await changePasswordService({
             userId: 7,
             credential: { kind: 'deviceKey', keyId: 'key-of-the-calling-device' },
@@ -117,6 +136,7 @@ describe('changePasswordService — session revocation', () =>
         expect(verifyPassword).toHaveBeenLastCalledWith('old-password', 'changed-meanwhile');
         expect(usersRepository.updatePassword).not.toHaveBeenCalled();
         expect(keysRepository.revokeAllActiveByUserId).not.toHaveBeenCalled();
+        expect(keysRepository.revokeAllActiveByUserIdExcept).not.toHaveBeenCalled();
     });
 
     it('changes it when the stored hash moved but still holds the current password', async () =>
@@ -138,6 +158,6 @@ describe('changePasswordService — session revocation', () =>
 
         expect(verifyPassword).toHaveBeenLastCalledWith('old-password', 're-encoded');
         expect(usersRepository.updatePassword).toHaveBeenCalledWith(7, 'new-hash', true);
-        expect(keysRepository.revokeAllActiveByUserId).toHaveBeenCalledWith(7, 'Revoked by password change');
+        expect(keysRepository.revokeAllActiveByUserIdExcept).toHaveBeenCalledWith(7, 'key-of-the-calling-device', 'Revoked by password change');
     });
 });
