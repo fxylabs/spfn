@@ -215,9 +215,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `packages/core/src/security/proxy-signature.ts` and `believeSignedAddress` in
     `packages/core/src/middleware/proxy-guard.ts`; 0.5.0 removes it and refuses version 1. Any
     other version is refused (`unknown-version`).
-  - **Upgrade order:** the backend first, then the Next.js app. A new backend verifies an old
-    proxy's version-1 signature (addresses ignored until the app is upgraded); an old backend
-    refuses every request a new proxy signs (403 in `strict`, `untrusted` in `tag`).
+  - **Upgrade order:** the backend first, then the Next.js app **immediately after**. A new
+    backend verifies an old proxy's version-1 signature but ignores its address, so until the app
+    is upgraded `getClientIp` falls back to `X-Forwarded-For` by `SERVER_TRUSTED_PROXY_HOPS` or
+    to the socket address — in a usual deployment the Next.js server's address, **the same one
+    for every user**: every `ip:` rate-limit bucket and the sign-in guard's `attempt.ip` key on
+    that one shared address for the whole window, so one user's failures count against all. An
+    old backend refuses every request a new proxy signs (403 in `strict`, `untrusted` in `tag`),
+    so the app cannot go first.
   - `buildCanonicalString` and `SignatureParts` gain `clientIp`; `signProxyRequest` takes
     `clientIp` and returns the version header; `verifyProxyRequest` takes `version` and
     `clientIp` and answers `version`.
