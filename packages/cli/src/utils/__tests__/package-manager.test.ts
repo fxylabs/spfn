@@ -322,4 +322,52 @@ describe('findUnresolvedPackages', () =>
 
         expect(findUnresolvedPackages(join(root, 'app'))).toEqual(['no-manifest']);
     });
+
+    /**
+     * Stands in for yarn's runtime: marks the process as PnP and lets
+     * `require.resolve` find the packages in `.yarn/store` beside it, which
+     * Node's plain lookup from the app never does.
+     */
+    const FAKE_PNP_RUNTIME = `
+        process.versions.pnp = '3';
+        process.env.NODE_PATH = require('path').join(__dirname, '.yarn/store');
+        require('module')._initPaths();
+    `;
+
+    function pnpRepository(appPath: string, workspaces: string[]): string
+    {
+        return makeRepository({
+            'package.json': JSON.stringify({ name: 'repository', workspaces }),
+            'yarn.lock': '',
+            '.pnp.cjs': FAKE_PNP_RUNTIME,
+            '.yarn/store/repository-only/package.json': '{}',
+            [`${appPath}/package.json`]: app({ 'own-install': '1', 'repository-only': '1' }),
+            [`${appPath}/node_modules/own-install/package.json`]: '{}',
+        });
+    }
+
+    it('resolves a member of a PnP workspace through its root\'s .pnp.cjs', () =>
+    {
+        const root = pnpRepository('apps/web', ['apps/*']);
+
+        expect(findUnresolvedPackages(join(root, 'apps/web'))).toEqual([]);
+    });
+
+    it('ignores the .pnp.cjs of a PnP repository that does not list the app: the repository\'s packages are not the app\'s', () =>
+    {
+        const root = pnpRepository('tools/app', ['apps/*']);
+
+        expect(findUnresolvedPackages(join(root, 'tools/app'))).toEqual(['repository-only']);
+    });
+
+    it('resolves an app through its own .pnp.cjs, the project it is', () =>
+    {
+        const root = makeRepository({
+            'app/package.json': app({ 'pnp-only': '1' }),
+            'app/.pnp.cjs': FAKE_PNP_RUNTIME,
+            'app/.yarn/store/pnp-only/package.json': '{}',
+        });
+
+        expect(findUnresolvedPackages(join(root, 'app'))).toEqual([]);
+    });
 });

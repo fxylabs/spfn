@@ -105,7 +105,7 @@ export function findUnresolvedPackages(appDir: string): string[]
 {
     const { dependencies, devDependencies } = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8').replace(/^\uFEFF/, ''));
     const names = [...Object.keys(dependencies ?? {}), ...Object.keys(devDependencies ?? {})];
-    const pnpRuntime = ancestorsOf(appDir).map(dir => join(dir, '.pnp.cjs')).find(existsSync);
+    const pnpRuntime = pnpRuntimeOf(appDir);
     const { NODE_PATH, NODE_OPTIONS, NODE_PRESERVE_SYMLINKS, ...env } = process.env;
 
     const child = spawnSync(
@@ -156,6 +156,22 @@ function resolves(name)
 
 process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).filter(name => !resolves(name))));
 `;
+
+/**
+ * The Plug'n'Play runtime that resolves the app in `appDir`, or null: the
+ * `.pnp.cjs` of the project the app is — its own — or of the workspace it is a
+ * member of (`findWorkspace`). A `.pnp.cjs` anywhere else above it belongs to a
+ * project the app is not part of: PnP would take the app for that project's
+ * top-level workspace, and Node's plain lookup is what applies to it.
+ */
+function pnpRuntimeOf(appDir: string): string | null
+{
+    const workspace = findWorkspace(appDir);
+
+    return [appDir, ...(workspace ? [workspace.root] : [])]
+        .map(dir => join(dir, '.pnp.cjs'))
+        .find(existsSync) ?? null;
+}
 
 function ancestorsOf(dir: string): string[]
 {
