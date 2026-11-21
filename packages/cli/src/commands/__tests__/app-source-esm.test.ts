@@ -39,6 +39,9 @@
  * |    | each bin process counts itself, the third exits      | goes too (773 processes in round 1)                     |
  * | R9 | the bin whose `process.execve` throws (as Node 26.1+  | the failed relaunch taken for "no tsx": the command     |
  * |    | does on a failed exec), replaced by a preload        | runs on without the hook, saying nothing                |
+ * | R10| a copy of the bin beside a `tsx` that is there but   | any failure to resolve tsx taken for "not installed":   |
+ * |    | broken (package.json that does not parse, an entry   | the command runs on without the hook, saying nothing;   |
+ * |    | file missing), and beside no tsx                     | and a missing tsx no longer run without it              |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
@@ -49,7 +52,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const cliRoot = join(__dirname, '../../..');
 const coreRoot = join(cliRoot, '../core');
@@ -277,4 +280,67 @@ it('R9 the bin whose relaunch fails stops with the error rather than run without
     expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
     expect(result.stderr).toContain('Error: spfn could not re-run itself under tsx and its module hook:');
     expect(result.stderr).toContain('E2BIG: argument list too long, execve');
+});
+
+describe('R10 resolving tsx for the relaunch', () =>
+{
+    /** A copy of the bin in `<appDir>/cli/bin`, so `tsx` resolves from `<appDir>/cli`; `dist/` is the built one. */
+    function binCopy(tsxFiles: Record<string, string> | null): string
+    {
+        mkdirSync(join(appDir, 'cli/bin'), { recursive: true });
+        copyFileSync(bin, join(appDir, 'cli/bin/spfn.js'));
+        write('cli/package.json', JSON.stringify({ name: 'spfn-copy', type: 'module' }));
+        symlinkSync(join(cliRoot, 'dist'), join(appDir, 'cli/dist'), 'dir');
+        Object.entries(tsxFiles ?? {}).forEach(([file, content]) => write(`cli/node_modules/tsx/${file}`, content));
+
+        return join(appDir, 'cli/bin/spfn.js');
+    }
+
+    /** The environment, without what would find a tsx elsewhere: vitest's NODE_PATH holds pnpm's store. */
+    function cleanEnv(): NodeJS.ProcessEnv
+    {
+        const env: NodeJS.ProcessEnv = { ...process.env };
+
+        delete env.SPFN_CLI_RELAUNCHED_IN;
+        delete env.NODE_OPTIONS;
+        delete env.NODE_PATH;
+
+        return env;
+    }
+
+    function version(copy: string): { status: number | null; stdout: string; stderr: string }
+    {
+        return spawnSync(process.execPath, [copy, '--version'], { cwd: appDir, env: cleanEnv(), encoding: 'utf8', timeout: 60_000 });
+    }
+
+    /** Whether `tsx` resolves from `from` in a process of its own, as the bin resolves it. */
+    function resolvable(from: string): boolean
+    {
+        return spawnSync(process.execPath, ['-e', `require('node:module').createRequire(${JSON.stringify(from)}).resolve('tsx')`], { env: cleanEnv() }).status === 0;
+    }
+
+    it.each([
+        ['a package.json that does not parse', { 'package.json': '{ "name": "tsx",' }, 'Invalid package config'],
+        ['its entry file missing', { 'package.json': JSON.stringify({ name: 'tsx', exports: { '.': './dist/loader.mjs' } }) }, 'tsx/dist/loader.mjs'],
+    ])('a tsx with %s stops the command, saying so', (_case, files, cause) =>
+    {
+        const result = version(binCopy(files));
+
+        expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
+        expect(result.stderr).toContain('Error: spfn could not resolve tsx, which it re-runs itself under:');
+        expect(result.stderr).toContain(cause);
+    });
+
+    it('no tsx runs the command without the hook', (context) =>
+    {
+        const copy = binCopy(null);
+
+        // A tsx in a directory above the temporary one (/tmp/node_modules) would be found instead.
+        context.skip(resolvable(copy), 'a tsx is installed above the temporary directory');
+
+        const result = version(copy);
+
+        expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+        expect(result.stdout.trim()).toBe(JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version);
+    });
 });

@@ -69,6 +69,11 @@ function runCli()
  * CWD, so running outside a project (no node_modules/tsx up the tree) crashes the
  * child with ERR_MODULE_NOT_FOUND even though the guard import above succeeds (it
  * resolves package-relative).
+ *
+ * Only the resolver's "Cannot find module 'tsx'" means not installed. Any other
+ * failure — EACCES, a package.json that does not parse, an entry file missing
+ * from the package — is a tsx that is there and broken: the command stops,
+ * saying so, rather than run without the hook.
  */
 async function resolveTsx()
 {
@@ -79,11 +84,22 @@ async function resolveTsx()
     {
         return pathToFileURL(createRequire(import.meta.url).resolve(TSX_MODULE)).href;
     }
-    catch
+    catch (error)
     {
-        // Not installed: run without tsx and the hook.
-        return null;
+        return tsxNotInstalled(error) ? null : tsxUnusable(error);
     }
+}
+
+/** The resolver's not-found for tsx itself; a missing file inside tsx names that file instead. */
+function tsxNotInstalled(error)
+{
+    return error?.code === 'MODULE_NOT_FOUND' && String(error.message).split('\n')[0] === `Cannot find module '${TSX_MODULE}'`;
+}
+
+function tsxUnusable(error)
+{
+    console.error('Error: spfn could not resolve tsx, which it re-runs itself under:', error);
+    process.exit(1);
 }
 
 async function relaunchWithTsx(tsxUrl)
