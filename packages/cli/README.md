@@ -250,9 +250,9 @@ only once every group is empty, with no deadline of its own.
 
 | You send | to | Each child gets | `spfn dev` exits |
 |----------|----|-----------------|------------------|
-| Ctrl-C in the terminal | the terminal's foreground group: `spfn dev` alone | one SIGTERM, from `spfn dev` | after the last child, 0 |
-| `kill <pid>` / SIGTERM, SIGINT or SIGHUP from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
-| the same signal again, or SIGTERM / SIGHUP after a Ctrl-C | | nothing more | unchanged |
+| Ctrl-C (or Ctrl-\\) in the terminal | the terminal's foreground group: `spfn dev` alone | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| `kill <pid>` / SIGTERM, SIGINT, SIGHUP or SIGQUIT from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| the same signal again, or SIGTERM / SIGHUP / SIGQUIT after a Ctrl-C | | nothing more | unchanged |
 | a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
 | — (stopping, and the terminal is no longer `spfn dev`'s: `pnpm exec` exited) | | SIGKILL, to every group left | at once, 130 |
 | SIGKILL | `spfn dev` | nothing | at once |

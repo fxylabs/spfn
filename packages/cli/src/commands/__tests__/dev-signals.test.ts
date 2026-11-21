@@ -12,8 +12,8 @@
  *
  * | #  | signal                                    | catches, which would otherwise pass silently                    |
  * |----|-------------------------------------------|-----------------------------------------------------------------|
- * | S1 | SIGTERM, then SIGINT, to the bin's pid    | a bin that dies alone (the tree runs on, orphaned); Next.js     |
- * |    | (a process manager, `kill <pid>`)         | behind its wrappers never signalled; `spfn dev` exiting before  |
+ * | S1 | SIGTERM, SIGINT or SIGQUIT to the bin's   | a bin that dies alone (the tree runs on, orphaned); Next.js     |
+ * |    | pid (a process manager, `kill <pid>`)     | behind its wrappers never signalled; `spfn dev` exiting before  |
  * |    |                                           | a child (an orphan holding the port); a group left non-empty    |
  * | S2 | SIGINT to the bin's process group (the    | a child in the terminal's group: it gets the terminal's signal  |
  * |    | terminal's Ctrl-C)                        | and `spfn dev`'s, and the watcher abandons its generation       |
@@ -22,6 +22,8 @@
  * |    | both)                                     |                                                                 |
  * | S4 | SIGTERM, then SIGINT, every child held    | a second Ctrl-C that kills the wrapper only: Next.js behind     |
  * |    | past the row                              | `pnpm run`/`sh -c` survives it, holding its port                |
+ * | S5 | SIGQUIT to the bin's process group (the   | `spfn dev` killed by a Ctrl-\ the children no longer get: the   |
+ * |    | terminal's Ctrl-\)                        | whole tree runs on, orphaned                                    |
  * | T1 | one Ctrl-C to `pnpm exec spfn dev` typed  | `spfn dev` and a slow server running on behind the shell's      |
  * |    | in an interactive bash in a terminal, the | prompt, for the server's whole stop, after the launcher exited  |
  * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
@@ -308,7 +310,7 @@ afterEach(async () =>
 
 describe.skipIf(process.platform !== 'linux')('spfn dev supervision (#358)', () =>
 {
-    it.each(['SIGTERM', 'SIGINT'] as const)('S1 %s to the bin\'s pid reaches each child once; spfn dev exits after the last, leaving no process', async (signal) =>
+    it.each(['SIGTERM', 'SIGINT', 'SIGQUIT'] as const)('S1 %s to the bin\'s pid reaches each child once; spfn dev exits after the last, leaving no process', async (signal) =>
     {
         const dev = await startDev({ server: 1000, watcher: 500, next: 2000 });
 
@@ -329,6 +331,19 @@ describe.skipIf(process.platform !== 'linux')('spfn dev supervision (#358)', () 
 
         await until(dev, 'server, watcher and Next.js starting', allStarted);
         process.kill(-dev.child.pid!, 'SIGINT');
+
+        const exit = await exitOf(dev);
+
+        expect(signalsByRole(), dev.output()).toEqual({ server: ['SIGTERM'], watcher: ['SIGTERM'], next: ['SIGTERM'] });
+        expect({ code: exit.code, groupsLeft: groupsLeft() }, dev.output()).toEqual({ code: 0, groupsLeft: [] });
+    }, 60_000);
+
+    it('S5 a terminal\'s Ctrl-\\ (SIGQUIT to the bin\'s group) stops spfn dev as Ctrl-C does, leaving no process', async () =>
+    {
+        const dev = await startDev({ server: 1000, watcher: 500, next: 2000 });
+
+        await until(dev, 'server, watcher and Next.js starting', allStarted);
+        process.kill(-dev.child.pid!, 'SIGQUIT');
 
         const exit = await exitOf(dev);
 

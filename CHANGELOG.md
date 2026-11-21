@@ -907,8 +907,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pid you start is the CLI's, for every command (a SIGTERM to the bin's pid during `spfn db
     migrate` used to leave the command running, orphaned).
   - Each child of `spfn dev` leads a process group of its own and is stopped by one SIGTERM to that
-    group, from `spfn dev`, whatever stopped `spfn dev`: Ctrl-C, or SIGTERM, SIGINT or SIGHUP to the
-    pid. `spfn dev` exits 0 once every group is empty.
+    group, from `spfn dev`, whatever stopped `spfn dev`: Ctrl-C or Ctrl-\\, or SIGTERM, SIGINT,
+    SIGHUP or SIGQUIT to the pid. `spfn dev` exits 0 once every group is empty.
   - The server and the watcher run as `node --import <tsx> --import <spfn's hook> <entry>`: not
     through `pnpm exec`/`npx` (the server did), which exit before what they run, nor through the
     `tsx` CLI (the watcher did), which relays a signal its child already got unless the child

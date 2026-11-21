@@ -15,12 +15,12 @@ import { inTerminalForeground } from './terminal-foreground.js';
  * through this supervisor, and never a second time from the terminal.
  *
  * `spfn dev` exits only once every group is empty, with no deadline of its own:
- * the server's is core's (`SHUTDOWN_TIMEOUT`). SIGTERM and SIGHUP, whenever they
- * come and however often, mean "stop": a repeat is not an escalation, since
- * `pnpm exec spfn dev` adds a SIGTERM to a Ctrl-C's SIGINT, and the terminal
- * hangs up after its job. A SIGINT once the stop has begun — a person pressing
- * Ctrl-C again — SIGKILLs every group left, and `spfn dev` exits 130. A SIGKILL
- * of `spfn dev` reaches no child.
+ * the server's is core's (`SHUTDOWN_TIMEOUT`). SIGTERM, SIGHUP and SIGQUIT
+ * (Ctrl-\), whenever they come and however often, mean "stop": a repeat is not
+ * an escalation, since `pnpm exec spfn dev` adds a SIGTERM to a Ctrl-C's
+ * SIGINT, and the terminal hangs up after its job. A SIGINT once the stop has
+ * begun — a person pressing Ctrl-C again — SIGKILLs every group left, and `spfn
+ * dev` exits 130. A SIGKILL of `spfn dev` reaches no child.
  *
  * A second Ctrl-C means "stop waiting", and when it can no longer arrive it is
  * taken as given. It can arrive while `spfn dev`'s group is its terminal's
@@ -50,6 +50,11 @@ export interface DevChild
     readonly ended: Promise<void>;
 }
 
+/** Each means "stop". SIGQUIT is a terminal's Ctrl-\, which reaches `spfn dev` only, as Ctrl-C does. */
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
+
+type StopSignal = typeof STOP_SIGNALS[number];
+
 const PROCESS_GROUPS = process.platform !== 'win32';
 const GROUP_POLL_MS = 100;
 const KILLING = 'killing what is left of the server, Next.js and the codegen watcher';
@@ -66,9 +71,7 @@ export class DevSupervisor
 
     constructor()
     {
-        process.on('SIGINT', () => this.onSignal('SIGINT'));
-        process.on('SIGTERM', () => this.onSignal('SIGTERM'));
-        process.on('SIGHUP', () => this.onSignal('SIGHUP'));
+        STOP_SIGNALS.forEach(signal => process.on(signal, () => this.onSignal(signal)));
     }
 
     /** Whether a stop has begun. */
@@ -142,7 +145,7 @@ export class DevSupervisor
         process.exit(this.exitCode);
     }
 
-    private onSignal(signal: 'SIGINT' | 'SIGTERM' | 'SIGHUP'): void
+    private onSignal(signal: StopSignal): void
     {
         if (this.stopping && signal === 'SIGINT')
         {
