@@ -175,7 +175,7 @@ describe('{ primary: true } on the repository read helpers (app role, integratio
 
         const app = new Hono();
 
-        app.get('/w/:workspaceId/reads', tenancy.guard({ param: 'workspaceId' }), async (c) =>
+        app.get('/w/:workspaceId/reads', tenancy.guard({ param: 'workspaceId' }).handler, async (c) =>
         {
             db.writeLog.length = 0;
             db.readLog.length = 0;
