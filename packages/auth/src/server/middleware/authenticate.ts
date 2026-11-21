@@ -30,6 +30,7 @@ import { verifyClientToken, decodeToken, authLogger, keysRepository, REQUEST_TOK
 import {
     InvalidTokenError,
     TokenExpiredError,
+    PasswordChangeRequiredError,
     SecondFactorEnrolmentRequiredError,
 } from '@spfn/auth/errors';
 
@@ -456,9 +457,9 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
 
         // The admission `authenticate` asks, through the one function that
         // answers it. A refusal — an account that is not active, a key that
-        // died, a person the policy holds to enrolling — continues
-        // anonymously, which is this middleware's answer to an unusable
-        // principal.
+        // died, a person held to a requirement (a password to change, a
+        // second factor to enrol) — continues anonymously, which is this
+        // middleware's answer to an unusable principal.
         const admission = await admitBearerPrincipal(c, keyRecord, presentingRequest(c));
 
         if ('admitted' in admission)
@@ -486,10 +487,10 @@ registerEnrolmentGate(authenticate.handler);
  * The profile path, as `optionalAuth` reads it.
  *
  * Presented-but-invalid profile credentials are refused, exactly as on
- * `authenticate`. A person the second-factor policy holds to enrolling is not
- * an invalid credential, though — it is a principal this route may not use,
- * which on a route that works signed-out is the anonymous caller the Bearer
- * path below also continues as.
+ * `authenticate`. A person held to a requirement — a password to change, a
+ * second factor to enrol — is not an invalid credential, though — it is a
+ * principal this route may not use, which on a route that works signed-out is
+ * the anonymous caller the Bearer path below also continues as.
  */
 async function optionalProfile(c: Context): Promise<AuthProfileOutcome>
 {
@@ -499,7 +500,7 @@ async function optionalProfile(c: Context): Promise<AuthProfileOutcome>
     }
     catch (err)
     {
-        if (isEnrolmentRequiredRefusal(err))
+        if (isRestrictedSessionRefusal(err))
         {
             return { kind: 'none' };
         }
@@ -513,8 +514,12 @@ async function optionalProfile(c: Context): Promise<AuthProfileOutcome>
  * module instances at once — the package entry and the source tree — and
  * `instanceof` across them is false.
  */
-function isEnrolmentRequiredRefusal(err: unknown): boolean
+function isRestrictedSessionRefusal(err: unknown): boolean
 {
+    const name = (err as { name?: unknown } | null)?.name;
+
     return err instanceof SecondFactorEnrolmentRequiredError
-        || (err as { name?: unknown } | null)?.name === 'SecondFactorEnrolmentRequiredError';
+        || err instanceof PasswordChangeRequiredError
+        || name === 'SecondFactorEnrolmentRequiredError'
+        || name === 'PasswordChangeRequiredError';
 }

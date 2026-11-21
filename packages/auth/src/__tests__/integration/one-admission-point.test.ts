@@ -9,7 +9,9 @@
  * | T1  | every door × status {active, suspended} × deletion {none, pending, deleted}, and inactive → refused |
  * |     | in that door's own answer (a pending deletion with the pending-deletion answer, whatever the       |
  * |     | status); active with none → admitted. The door list is derived from the source (every caller of   |
- * |     | `admitPrincipal`), so a door this table does not drive fails the first T1 row                      |
+ * |     | `admitPrincipal`), so a door this table does not drive fails the first T1 row. Every door is also  |
+ * |     | driven for an active account that must change its password (#362): admitted where what it leads to |
+ * |     | admits that session (renewal, sign-out, mfa/verify), otherwise refused in its own answer            |
  * | T2  | only the admission module can make a principal (brand + sealed constructor), and no source casts   |
  * |     | its way to one                                                                                      |
  * | T3  | a one-time token dies with the key that issued it — logout, revoke-all, password change — and a    |
@@ -159,6 +161,12 @@ interface Door
     prepare: (account: Account) => Promise<Attempt>;
     admitted: (response: Response, account: Account) => Promise<void>;
     refused: (response: Response, state: AccountState) => Promise<void>;
+    /**
+     * Its answer to an active account that must change its password (#362):
+     * `'admitted'` where what the door leads to admits that session, otherwise
+     * the refusal it answers with.
+     */
+    passwordChange: 'admitted' | ((response: Response) => Promise<void>);
 }
 
 interface Account
@@ -539,6 +547,16 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
         expect((await response.json()).userId).toBe(String(account.id));
     };
 
+    /** `optionalAuth`'s answer to an unusable principal: the anonymous caller. */
+    const answeredAnonymous = async (response: Response) =>
+    {
+        expect(response.status).toBe(200);
+        expect((await response.json()).userId).toBeNull();
+    };
+
+    /** The answer to a session that must change its password first: not signed out, told why. */
+    const expectPasswordChangeRefusal = (response: Response) => expectError(response, 403, 'PasswordChangeRequiredError');
+
     const DOORS: Record<string, Door> = {
         bearer: {
             name: 'authenticate, Bearer',
@@ -550,12 +568,14 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: admittedAs,
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         clientProofV1: {
             name: 'authenticate, clientProofV1',
             prepare: proofRequest,
             admitted: admittedAs,
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         appProfile: {
             name: 'authenticate, an app-registered profile',
@@ -565,6 +585,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             }),
             admitted: admittedAs,
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         optionalAuth: {
             name: 'optionalAuth, Bearer',
@@ -575,12 +596,8 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 return () => send('GET', '/t/optional', account, undefined, { Authorization: session.authorization });
             },
             admitted: admittedAs,
-            // This middleware's answer to an unusable principal: the anonymous caller.
-            refused: async (response) =>
-            {
-                expect(response.status).toBe(200);
-                expect((await response.json()).userId).toBeNull();
-            },
+            refused: answeredAnonymous,
+            passwordChange: answeredAnonymous,
         },
         oneTimeToken: {
             name: 'oneTimeTokenAuth',
@@ -596,6 +613,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 expect(response.status).toBe(401);
                 expect((await response.json()).error).toMatchObject({ code: 'UnauthorizedError', message: 'Account is not active' });
             },
+            passwordChange: expectPasswordChangeRefusal,
         },
         sseStream: {
             name: 'an SSE stream opened with a one-time token',
@@ -607,6 +625,8 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: async (response) => expect(response.status).toBe(401),
+            // The core SSE handler answers every refused token alike.
+            passwordChange: async (response) => expect(response.status).toBe(401),
         },
         renewal: {
             name: 'authenticateForRenewal',
@@ -619,6 +639,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: async (response) => expectError(response, 401, 'SessionRenewalRefusedError'),
+            passwordChange: 'admitted',
         },
         signOut: {
             name: 'authenticateForSignOut, an expired bound key inside its grace',
@@ -634,6 +655,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(204),
             refused: expectAccountRefusal,
+            passwordChange: 'admitted',
         },
         oauth2AccessToken: {
             name: 'verifyAccessToken, behind /mcp',
@@ -645,6 +667,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         oauth2Refresh: {
             name: 'the token endpoint, refresh_token',
@@ -656,6 +679,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: expectInvalidGrant,
+            passwordChange: expectInvalidGrant,
         },
         oauth2CodeExchange: {
             name: 'the token endpoint, authorization_code',
@@ -667,6 +691,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: expectInvalidGrant,
+            passwordChange: expectInvalidGrant,
         },
         oauth2Consent: {
             name: 'consent approval, POST /_auth/oauth2/authorize',
@@ -683,6 +708,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 expect((await response.json()).code).toEqual(expect.any(String));
             },
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         mfaVerify: {
             name: 'mfa/verify completing a 202 sign-in',
@@ -694,6 +720,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             },
             admitted: async (response) => expect(response.status).toBe(200),
             refused: async (response) => expectError(response, 401, 'MfaVerificationFailedError'),
+            passwordChange: 'admitted',
         },
         totpConfirm: {
             name: 'mfa/totp/confirm completing an enrolment (admitDeferred)',
@@ -711,6 +738,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 expect((await response.json()).recoveryCodes).toHaveLength(10);
             },
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         deletionRequest: {
             name: 'deletion/request, its session re-admitted under the account lock (admitCompletion)',
@@ -726,6 +754,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 expect((await response.json()).purgeScheduledAt).toEqual(expect.any(String));
             },
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
         deviceCode: {
             name: 'device-code collection',
@@ -750,6 +779,7 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
                 expect((await response.json()).status).toBe('approved');
             },
             refused: expectAccountRefusal,
+            passwordChange: expectPasswordChangeRefusal,
         },
     };
 
@@ -809,6 +839,17 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
             await writeState(account, state);
 
             await door.refused(await attempt(), state);
+        });
+
+        it(`${door.name}: an active account that must change its password gets this door's answer to it`, async () =>
+        {
+            const account = await newAccount();
+            const attempt = await door.prepare(account);
+
+            await getTestDb().update(users).set({ passwordChangeRequired: true }).where(eq(users.id, account.id));
+            const response = await attempt();
+
+            await (door.passwordChange === 'admitted' ? door.admitted(response, account) : door.passwordChange(response));
         });
     });
 

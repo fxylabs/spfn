@@ -18,7 +18,7 @@ import { Hono, type Context, type Next } from 'hono';
 import { defineRouter, registerRoutes, resolveRouteMiddlewares, route } from '@spfn/core/route';
 
 import { mainAuthRouter } from '@/server/routes';
-import { ROUTE_CHANNELS, ROUTE_ENROLMENT, ROUTE_SECOND_FACTOR_METHODS } from '@/server/routes/channels';
+import { markEnrolmentRoutes, ROUTE_CHANNELS, ROUTE_ENROLMENT, ROUTE_SECOND_FACTOR_METHODS } from '@/server/routes/channels';
 import { __resetChannelsForTests, configureChannels } from '@/server/lib/channels-config';
 import {
     __resetSecondFactorPolicyForTests,
@@ -28,7 +28,7 @@ import {
     requireMethod,
     type SecondFactorOptions,
 } from '@/server/lib/second-factor-policy';
-import { isEnrolmentGate, isEnrolmentRoute, registerEnrolmentGate } from '@/server/lib/enrolment-routes';
+import { isEnrolmentGate, registerEnrolmentGate, restrictedRouteAdmits, type SessionRequirement } from '@/server/lib/enrolment-routes';
 import { getPasskeyConfig } from '@/server/lib/config';
 import { createAuthLifecycle } from '@/server/lifecycle';
 import { buildMobileContractBundle } from '@/server/client-proof/contract-bundle';
@@ -205,7 +205,9 @@ describe('second-factor policy (#309)', () =>
 
     it('the enrolment routes are exactly the design\'s, each under its method', () =>
     {
-        const enrolment = Object.entries(ROUTE_ENROLMENT).filter(([, routeClass]) => routeClass !== 'none');
+        const enrolment = Object.entries(ROUTE_ENROLMENT)
+            .map(([key, row]) => [key, row.secondFactorEnrolment] as const)
+            .filter(([, routeClass]) => routeClass !== 'none');
 
         expect(Object.fromEntries(enrolment)).toEqual({
             passkeyRegisterOptions: 'passkey',
@@ -256,16 +258,19 @@ describe('second-factor policy (#309)', () =>
 
     /**
      * Every route mounted behind a probe standing where the global `auth`
-     * stands: what `isEnrolmentRoute` reads from there, per route key, for
-     * every route the global `auth` runs on.
+     * stands: what `restrictedRouteAdmits` reads from there for `requirement`,
+     * per route key, for every route the global `auth` runs on.
      */
-    async function recognisedFrom(probeIsGate: boolean): Promise<Record<string, boolean | undefined>>
+    async function recognisedFrom(
+        probeIsGate: boolean,
+        requirement: SessionRequirement = 'secondFactorEnrolment',
+    ): Promise<Record<string, boolean | undefined>>
     {
         const app = new Hono();
         const recognised: boolean[] = [];
         const probe = async (c: Context, _next: Next) =>
         {
-            recognised.push(isEnrolmentRoute(c));
+            recognised.push(restrictedRouteAdmits(c, requirement));
 
             return c.body(null, 204);
         };
@@ -298,7 +303,7 @@ describe('second-factor policy (#309)', () =>
         configureSecondFactor({ required: true, methods: ['totp'] });
 
         const answers = await recognisedFrom(true);
-        const expected = Object.fromEntries(Object.entries(ROUTE_ENROLMENT).map(([key, routeClass]) =>
+        const expected = Object.fromEntries(Object.entries(ROUTE_ENROLMENT).map(([key, { secondFactorEnrolment: routeClass }]) =>
         {
             const gated = Object.hasOwn(ROUTE_SECOND_FACTOR_METHODS, key);
             const enrolment = routeClass === 'always' || routeClass === 'totp' || (routeClass === 'passkey' && gated);
@@ -331,7 +336,7 @@ describe('second-factor policy (#309)', () =>
         const recognised: boolean[] = [];
         const probe = async (c: Context, _next: Next) =>
         {
-            recognised.push(isEnrolmentRoute(c));
+            recognised.push(restrictedRouteAdmits(c, 'secondFactorEnrolment'));
 
             return c.body(null, 204);
         };
@@ -349,7 +354,7 @@ describe('second-factor policy (#309)', () =>
     it('F4: every route whose authenticator is not the global one is classified as that authenticator behaves', () =>
     {
         const notGlobal = Object.keys(ROUTE_ENROLMENT).filter(key => isPublic(key) || ownAuthenticator(key) !== null);
-        const classOf = (key: string) => ROUTE_ENROLMENT[key as keyof typeof ROUTE_ENROLMENT];
+        const classOf = (key: string) => ROUTE_ENROLMENT[key as keyof typeof ROUTE_ENROLMENT].secondFactorEnrolment;
 
         // Renewal authenticates a bound key itself and never asks the policy:
         // an enrolment-only session renews, and the renewed key is held to
@@ -383,6 +388,40 @@ describe('second-factor policy (#309)', () =>
         // And "unchecked" is used for nothing else.
         expect(Object.keys(ROUTE_ENROLMENT).filter(key => classOf(key) === 'unchecked'))
             .toEqual(['sessionRenewOptions', 'sessionRenewVerify']);
+    });
+
+    it('#362 P2: the routes a session that must change its password reaches are exactly the decided ones', async () =>
+    {
+        // Recognised through the markers the gate reads, not the table alone: a
+        // marker that dropped the passwordChange half would leave the person
+        // with no way to the one route that clears the requirement.
+        const answers = await recognisedFrom(true, 'passwordChange');
+
+        expect(Object.keys(answers).filter(key => answers[key] === true).sort()).toEqual([
+            'changePassword',
+            'getAuthSession',
+            'mfaStatus',
+            'mfaStepUp',
+            'mfaStepUpOptions',
+        ]);
+        // The three whose own authenticator stands in front of the global one:
+        // sign-out and finalize run it from their place in the chain (driven in
+        // the integration suite); renewal never asks.
+        expect(Object.fromEntries(['logout', 'oauthFinalize', 'mfaVerify', 'sessionRenewOptions', 'sessionRenewVerify']
+            .map(key => [key, ROUTE_ENROLMENT[key as keyof typeof ROUTE_ENROLMENT].passwordChange])))
+            .toEqual({ logout: 'admit', oauthFinalize: 'admit', mfaVerify: 'admit', sessionRenewOptions: 'unchecked', sessionRenewVerify: 'unchecked' });
+        expect(Object.entries(ROUTE_ENROLMENT).filter(([, row]) => row.passwordChange === 'admit').map(([key]) => key).sort())
+            .toEqual(['changePassword', 'getAuthSession', 'logout', 'mfaStatus', 'mfaStepUp', 'mfaStepUpOptions', 'mfaVerify', 'oauthFinalize']);
+    });
+
+    it('#362 P8: a route whose row has no passwordChange class fails at mount', () =>
+    {
+        const routes = { probe: route.get('/_auth/probe362').handler(async () => ({ ok: true })) };
+
+        expect(() => markEnrolmentRoutes(routes, { probe: { secondFactorEnrolment: 'none' } as never }))
+            .toThrow('Route "probe" has no passwordChange class in ROUTE_ENROLMENT');
+        expect(() => markEnrolmentRoutes(routes, {} as never))
+            .toThrow('Route "probe" has no entry in ROUTE_ENROLMENT');
     });
 
     it('the method gates are on the design\'s four routes, first among their own middlewares', () =>

@@ -27,6 +27,9 @@ export function assertAppFromThisHono(app: unknown): void
 {
     if (!(app instanceof Hono))
     {
+        // Whatever the second-factor policy (#362): seeding flags accounts in any app, and a flagged
+        // account's every request — the password change that frees it included — reads its route, so
+        // booting would leave that account answered 500 until it is noticed.
         throw new Error(`Refusing to start: @spfn/auth cannot read the server's routes — ${TWO_COPIES}`);
     }
 }

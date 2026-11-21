@@ -57,7 +57,7 @@ import { mfaEnrolmentRepository, usersRepository } from '@/server/repositories';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authLoginEvent, passkeyRevokedEvent } from '@/server/events';
-import { isEnrolmentRoute } from '@/server/lib/enrolment-routes';
+import { restrictedRouteAdmits } from '@/server/lib/enrolment-routes';
 import { __resetChannelsForTests, configureChannels } from '@/server/lib/channels-config';
 import { configureAuthorizationServer } from '@/server/lib/oauth2/config';
 import {
@@ -88,7 +88,7 @@ vi.mock('@/server/lib/enrolment-routes', async (importOriginal) =>
 {
     const actual = await importOriginal<typeof import('@/server/lib/enrolment-routes')>();
 
-    return { ...actual, isEnrolmentRoute: vi.fn(actual.isEnrolmentRoute) };
+    return { ...actual, restrictedRouteAdmits: vi.fn(actual.restrictedRouteAdmits) };
 });
 
 const dbAvailable = await isDatabaseAvailable();
@@ -1365,16 +1365,16 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     it('G1: with the policy on, an enrolled account\'s request never asks which route it matched', async () =>
     {
         const { session } = await passkeyEnrolledAccount();
-        vi.mocked(isEnrolmentRoute).mockClear();
+        vi.mocked(restrictedRouteAdmits).mockClear();
 
         expect((await request('GET', '/_auth/session', session.authorization)).status).toBe(200);
         expect((await request('GET', '/app/whoami', session.authorization)).status).toBe(200);
-        expect(isEnrolmentRoute).not.toHaveBeenCalled();
+        expect(restrictedRouteAdmits).not.toHaveBeenCalled();
 
         // The observation is live: an enrolment-only session's request does ask.
         const other = await signInOther();
         expect((await request('GET', '/_auth/session', other.authorization)).status).toBe(200);
-        expect(isEnrolmentRoute).toHaveBeenCalled();
+        expect(restrictedRouteAdmits).toHaveBeenCalled();
     });
 
     it('D2: a request built by another copy of hono reaching the enrolment gate is a 500 naming the two copies, not 403 SECOND_FACTOR_ENROLMENT_REQUIRED', async () =>
@@ -1399,16 +1399,20 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         await expect(afterRoutes!(new HonoApp())).resolves.toBeUndefined();
     });
 
-    it('D2: afterRoutes boots an app built by another copy of hono while no second factor is required — nothing reads its routes', async () =>
+    it('D2 (#362): afterRoutes refuses another copy of hono with no second factor required too — a seeded account\'s request reads its route', async () =>
     {
+        // Without it, an app with two copies boots, and its seeded admin — held
+        // to a password change by default — meets a 500 on the one route that
+        // would clear it.
         const channels = { deviceCode: false, deviceLink: false };
         const withoutPolicy = createAuthLifecycle({ channels });
 
-        await expect(withoutPolicy.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).resolves.toBeUndefined();
+        await expect(withoutPolicy.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).rejects.toThrow(/two copies of hono are loaded in this process/);
 
         const notRequired = createAuthLifecycle({ channels, secondFactor: { required: false, methods: ['passkey'] } });
 
-        await expect(notRequired.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).resolves.toBeUndefined();
+        await expect(notRequired.afterRoutes!(new OtherHonoCopy() as unknown as Hono)).rejects.toThrow(/two copies of hono are loaded in this process/);
+        await expect(notRequired.afterRoutes!(new HonoApp())).resolves.toBeUndefined();
     });
 
     it('G2: an unmarked passkey is the only credential — enrolment is 403 STEP_UP_REQUIRED; after resetSecondFactorService a passkey registers on first use, marked, and the old one no longer signs in', async () =>

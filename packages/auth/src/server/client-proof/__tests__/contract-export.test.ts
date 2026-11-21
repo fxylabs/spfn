@@ -43,6 +43,7 @@ import {
     OAuthEmailInUseError,
     OAuthProviderLinkOnlyError,
     PasskeyProofRequiredError,
+    PasswordChangeRequiredError,
     SignInRefusedError,
     SignupDisabledError,
 } from '../../../errors/auth-errors';
@@ -190,10 +191,10 @@ describe('operations describe the routes the server answers', () =>
     it('the bundle carries exactly the implemented operations', () =>
     {
         // Less the route key each /_auth operation is matched to the router by,
-        // which is not exported; closedChannel and secondFactor are checked on
-        // their own below.
+        // which is not exported; closedChannel, secondFactor and passwordChange
+        // are checked on their own below.
         const exported = (bundle.operations as Record<string, unknown>[])
-            .map(({ closedChannel: _closedChannel, secondFactor: _secondFactor, ...operation }) => operation);
+            .map(({ closedChannel: _closedChannel, secondFactor: _secondFactor, passwordChange: _passwordChange, ...operation }) => operation);
 
         expect(exported).toEqual(ALL_OPERATIONS.map(({ route: _route, ...operation }) => operation));
     });
@@ -205,12 +206,31 @@ describe('operations describe the routes the server answers', () =>
 
         expect(marked.map((operation) => operation.id)).toEqual(ALL_OPERATIONS
             .filter((operation) => operation.authProfile === 'clientProofV1')
-            .filter((operation) => operation.route === undefined || ROUTE_ENROLMENT[operation.route] === 'none')
+            .filter((operation) => operation.route === undefined || ROUTE_ENROLMENT[operation.route].secondFactorEnrolment === 'none')
             .map((operation) => operation.id));
         expect(marked.every((operation) => (operation.secondFactor as Record<string, unknown>).enrolmentRequired !== undefined))
             .toBe(true);
         expect(marked.map((operation) => operation.secondFactor))
             .toEqual(marked.map(() => ({ enrolmentRequired: { error: 'SecondFactorEnrolmentRequiredError' } })));
+    });
+
+    it('#362: an operation carries passwordChange exactly when it is signed in and its route does not lead to the change', () =>
+    {
+        // Held to the passwordChange column of the table the server gates
+        // with: an operation marked that the server admits (auth.mfa.status)
+        // tells a native client it cannot reach the step it needs, and one left
+        // unmarked hides a refusal it will meet.
+        const marked = (bundle.operations as { id: string; passwordChange?: unknown }[])
+            .filter((operation) => operation.passwordChange !== undefined);
+
+        expect(marked.map((operation) => operation.id)).toEqual(ALL_OPERATIONS
+            .filter((operation) => operation.authProfile === 'clientProofV1')
+            .filter((operation) => operation.route === undefined || ROUTE_ENROLMENT[operation.route].passwordChange === 'refuse')
+            .map((operation) => operation.id));
+        expect(marked.map((operation) => operation.passwordChange))
+            .toEqual(marked.map(() => ({ error: 'PasswordChangeRequiredError' })));
+        expect(marked.map((operation) => operation.id)).not.toContain('auth.mfa.status');
+        expect(marked.map((operation) => operation.id)).toContain('auth.keys.list');
     });
 
     it('#308: an operation carries closedChannel exactly when ROUTE_CHANNELS gates its route', () =>
@@ -1502,6 +1522,20 @@ describe('declared errors match the refusals', () =>
         expect(entry?.surface).toBe('rest');
     });
 
+    it('#362: the password-change refusal carries the status its error class carries', () =>
+    {
+        // Added in 0.15.0: a session whose account must change its password.
+        // Compared with its class for the key-algorithm refusal's reason.
+        const thrown = new PasswordChangeRequiredError();
+        const entry = declared.find((candidate) => candidate.code === thrown.name);
+
+        expect(entry).toBeDefined();
+        expect(entry?.httpStatus).toBe(thrown.statusCode);
+        expect(entry?.httpStatus).toBe(403);
+        expect(entry?.retryable).toBe(false);
+        expect(entry?.surface).toBe('rest');
+    });
+
     it('the app\'s sign-in refusal carries the status its error class carries', () =>
     {
         // Added in 0.14.7 (#361): an app's signIn.admit refused the sign-in.
@@ -1694,9 +1728,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that lists SignInRefusedError (0.14.7, after PasskeyProofRequiredError\'s 0.14.6)', () =>
+    it('the contract line is the revision that carries the required password change (0.15.0, after SignInRefusedError\'s 0.14.7)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.14.7');
+        expect(bundle.contractVersion).toBe('0.15.0');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
@@ -1706,8 +1740,9 @@ describe('declared proof rules match the implementation', () =>
         // for the strongest form of the reason: a sign-in's login fields became
         // optional, so a 0.12.x consumer would reject a 202 outright rather than
         // merely not know about a new field. 0.14.0 moves it on 0.11.0's rule:
-        // fields the server sends, which every generated decoder meets.
-        expect(bundle.supportedRange).toBe('>=0.14.0 <0.15.0');
+        // fields the server sends, which every generated decoder meets. 0.15.0
+        // moves it on the same rule: OauthNativeResponse.passwordChangeRequired.
+        expect(bundle.supportedRange).toBe('>=0.15.0 <0.16.0');
     });
 
     it('states the rule that binds a native id_token to the key it enrolls', () =>

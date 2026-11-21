@@ -19,7 +19,8 @@
  *   presented was ever real. `@spfn/mcp` answers it 401 `invalid_token`, which
  *   sends the client to refresh or re-authorize.
  * - **A thrown 4xx `HttpError` — a valid token whose person may not act right
- *   now.** A 403: `AccountDisabledError`, `AccountPendingDeletionError`, or
+ *   now.** A 403: `AccountDisabledError`, `AccountPendingDeletionError`,
+ *   `PasswordChangeRequiredError` (`PASSWORD_CHANGE_REQUIRED`), or
  *   `SecondFactorEnrolmentRequiredError` (`SECOND_FACTOR_ENROLMENT_REQUIRED`). Thrown rather than nulled so the holder
  *   of a real token is told why, and so its client keeps the token instead of
  *   re-authorizing for one that would be refused the same way. Nothing is
@@ -39,8 +40,8 @@
  * authorization server.
  *
  * The token names a grant; whether the person behind it may be let in — the
- * grant not revoked, the account active on the primary, the second-factor
- * policy — is `admitPrincipal`'s, with an `oauth2Grant` credential. A suspended
+ * grant not revoked, the account active on the primary, its outstanding
+ * requirements (a password to change, the second-factor policy) — is `admitPrincipal`'s, with an `oauth2Grant` credential. A suspended
  * account's client is refused (403) while the suspension lasts, and its grant
  * works again once the account is reactivated.
  */
@@ -66,6 +67,7 @@ import {
 import { authLogger } from '../logger';
 import {
     accessTokenPrincipalFor,
+    admissionRefusalError,
     admitPrincipal,
     type AdmissionRefusal,
     type VerifiedOAuth2AccessToken,
@@ -80,7 +82,8 @@ export type { VerifiedOAuth2AccessToken } from './admission.service';
  * @param resource - The resource being accessed, e.g. `https://api.example.com/mcp`
  * @returns the principal, or null when the token is not valid, for any reason
  * @throws SecondFactorEnrolmentRequiredError (403) for a valid token whose person may only enrol a
- *         second factor; any other error is a failure to verify, never a refusal
+ *         second factor, PasswordChangeRequiredError (403) for one whose person must change the
+ *         password first; any other error is a failure to verify, never a refusal
  */
 export async function verifyAccessToken(
     token: string,
@@ -144,7 +147,8 @@ export async function verifyAccessToken(
  * An admission refusal in this endpoint's two outcomes. What says the token is
  * not valid — its grant revoked or past its lifetime, the account gone — is the
  * one null. What says a real token's person may not act right now — an account
- * disabled or awaiting deletion, a second factor to enrol (#309) — is its 403,
+ * disabled or awaiting deletion, a second factor to enrol (#309), a password
+ * to change (#362) — is its 403,
  * thrown so the client keeps the token instead of re-authorizing for one that
  * would be refused the same way. Nothing is disclosed to anyone else: every
  * token check refused first.
@@ -164,6 +168,8 @@ function refuseToken(refusal: AdmissionRefusal): null
             throw new AccountPendingDeletionError({ purgeScheduledAt: refusal.purgeScheduledAt });
         case 'enrolmentRequired':
             throw new SecondFactorEnrolmentRequiredError();
+        case 'passwordChangeRequired':
+            throw admissionRefusalError(refusal);
     }
 }
 

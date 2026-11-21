@@ -1025,14 +1025,22 @@ export const changePassword = route.put('/_auth/password')
  * Lightweight endpoint for auth checks and guards
  * Does not include profile data
  *
+ * `passwordChangeRequired` is the account row admission read on the primary to
+ * admit this request, as `oauthFinalize` reports it: an app drives its change
+ * page from this read, and a lagging replica would still answer `true` for a
+ * session the change has already freed (#362).
+ *
  * Requires authentication
  */
 export const getAuthSession = route.get('/_auth/session')
     .handler(async (c) =>
     {
-        const { userId } = getAuth(c);
+        const { userId, user } = getAuth(c);
 
-        return await getAuthSessionService(userId);
+        return {
+            ...await getAuthSessionService(userId),
+            passwordChangeRequired: user.passwordChangeRequired,
+        };
     });
 
 /**

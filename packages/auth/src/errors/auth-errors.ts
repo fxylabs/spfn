@@ -2072,6 +2072,37 @@ export class SecondFactorEnrolmentRequiredError extends ForbiddenError
 }
 
 /**
+ * Password Change Required Error (403)
+ *
+ * The signed-in account carries `passwordChangeRequired` — an operator seeded
+ * it with a known password — and has not changed it yet. Every signed-in route
+ * answers this except the ones that lead to the change (`PUT /_auth/password`,
+ * the step-up pair it may ask for, the session read, sign-out), so the session
+ * can do nothing but change its password.
+ *
+ * `details.requirements` lists every requirement the account still has
+ * outstanding, in the order they are answered: `'passwordChange'` first, then
+ * `'secondFactorEnrolment'` when the second-factor policy also holds the
+ * account to enrolling one. An enrolment route stays open while both are.
+ *
+ * 403 and not 401, for `SecondFactorEnrolmentRequiredError`'s reason: the
+ * session is not gone — it is the one the person changes the password with.
+ */
+export class PasswordChangeRequiredError extends ForbiddenError
+{
+    readonly code = 'PASSWORD_CHANGE_REQUIRED';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'Change your password before using this account.',
+            details: data.details,
+        });
+        this.name = 'PasswordChangeRequiredError';
+    }
+}
+
+/**
  * Second Factor Method Disabled Error (404)
  *
  * A second-factor route of a method the application does not list

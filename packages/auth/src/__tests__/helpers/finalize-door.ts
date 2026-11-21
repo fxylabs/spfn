@@ -31,7 +31,7 @@ export function finalizeDoorStandIn(userId: string)
                     throw new UnauthorizedError({ message: 'Authentication header missing or invalid: Bearer {token}' });
                 }
 
-                c.set('auth' as never, { userId, keyId } as never);
+                c.set('auth' as never, { userId, keyId, user: { id: Number(userId), passwordChangeRequired: false } } as never);
             }
 
             await next();

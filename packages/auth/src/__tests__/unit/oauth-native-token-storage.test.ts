@@ -30,7 +30,7 @@ vi.mock('../../server/repositories', () => ({ socialAccountsRepository }));
 
 vi.mock('../../server/services/oauth.service', () => ({
     createOrLinkUser,
-    assertActiveForOAuthSession: vi.fn(async () => undefined),
+    assertActiveForOAuthSession: vi.fn(async () => ({ passwordChangeRequired: false })),
     backfillVerifiedEmail: vi.fn(async () => undefined),
     retryContendedSignIn: (_provider: unknown, attempt: () => Promise<unknown>) => attempt(),
     lockLinkedAccount: () => socialAccountsRepository.findByProviderAndProviderId(),

@@ -27,7 +27,13 @@ import type { Context, MiddlewareHandler } from 'hono';
 import type { NamedMiddleware, RouteDef } from '@spfn/core/route';
 
 import { requireChannel, type AuthChannel } from '../lib/channels-config';
-import { enrolmentMarker, isEnrolmentGate } from '../lib/enrolment-routes';
+import {
+    isEnrolmentGate,
+    restrictedRouteMarker,
+    SESSION_REQUIREMENTS,
+    type RestrictedRouteAdmission,
+    type SessionRequirement,
+} from '../lib/enrolment-routes';
 import { requireMethod, type SecondFactorFeature, type SecondFactorMethod } from '../lib/second-factor-policy';
 import type { VerificationPurpose } from './schema';
 
@@ -229,13 +235,22 @@ async function readPurpose(c: Context): Promise<string | undefined>
 }
 
 /**
- * Which routes an enrolment-only session reaches (`secondFactor.required`).
+ * Which routes a restricted session reaches: one column per requirement an
+ * account can be held to (`SESSION_REQUIREMENTS`).
  *
  * The second classification beside `ROUTE_CHANNELS`, and kept to the same
- * guarantee: every key of `mainAuthRouter` is here, the type says so at
- * compile time and `markEnrolmentRoutes` refuses an unclassified one at
- * import. A route added later and left out would otherwise be one the global
- * `authenticate` has no answer for.
+ * guarantee: every key of `mainAuthRouter` is here with every column, the type
+ * says so at compile time and `markEnrolmentRoutes` refuses an unclassified
+ * route or column at import. A route added later and left out would otherwise
+ * be one the global `authenticate` has no answer for.
+ *
+ * A session held to several requirements reaches a route when **any one** of
+ * them admits it (`admitPrincipal`): requiring all would leave an account that
+ * must both change its password and enrol a second factor no route at all,
+ * since the change is not an enrolment route and no enrolment route changes
+ * the password.
+ *
+ * `secondFactorEnrolment` — an enrolment-only session (`secondFactor.required`):
  *
  * - a method — an enrolment route while that method is listed
  * - `'always'` — an enrolment route under every policy
@@ -248,119 +263,144 @@ async function readPurpose(c: Context): Promise<string | undefined>
  */
 export type RouteEnrolment = SecondFactorMethod | 'always' | 'none' | 'unchecked';
 
+/**
+ * `passwordChange` — an account that must change its password
+ * (`passwordChangeRequired`, #362):
+ *
+ * - `'admit'` — the route leads to the change: the change itself, the step-up
+ *   it may ask for, the session read, sign-out, and the two sign-in
+ *   completions that hand such an account its session (`oauthFinalize`,
+ *   `mfaVerify`)
+ * - `'refuse'` — an account that must change its password is refused with 403
+ *   `PASSWORD_CHANGE_REQUIRED`
+ * - `'unchecked'` — as for enrolment: session renewal, whose own middleware
+ *   holds no session to a requirement; the renewed key is held to it on its
+ *   next request
+ */
+export type RoutePasswordChange = 'admit' | 'refuse' | 'unchecked';
+
+interface RequirementClasses
+{
+    secondFactorEnrolment: RouteEnrolment;
+    passwordChange: RoutePasswordChange;
+}
+
+/** A route's row: its class under each requirement, exhaustive by `SessionRequirement`. */
+export type RouteRequirementClasses = { [R in SessionRequirement]: RequirementClasses[R] };
+
 export const ROUTE_ENROLMENT = {
-    sendVerificationCode: 'none',
-    verifyCode: 'none',
-    register: 'none',
-    requestSignupLink: 'none',
-    confirmSignupLink: 'none',
-    completeSignup: 'none',
-    requestPasswordReset: 'none',
-    confirmPasswordReset: 'none',
-    completePasswordReset: 'none',
-    login: 'none',
-    startDeviceAuth: 'none',
-    startDeviceAuthWeb: 'none',
-    pollDeviceAuth: 'none',
-    getDeviceAuthInfo: 'none',
-    approveDeviceAuth: 'none',
-    denyDeviceAuth: 'none',
-    issueDeviceLink: 'none',
-    redeemDeviceLink: 'none',
-    redeemDeviceLinkWeb: 'none',
-    getDeviceLinkStatus: 'none',
-    confirmDeviceLink: 'none',
-    denyDeviceLink: 'none',
-    cancelDeviceLink: 'none',
-    pollDeviceLink: 'none',
-    passkeyRegisterOptions: 'passkey',
-    passkeyRegisterVerify: 'passkey',
-    passkeyLoginOptions: 'none',
-    passkeyLoginVerify: 'none',
-    listPasskeys: 'passkey',
-    renamePasskey: 'none',
-    revokePasskey: 'none',
-    mfaTotpEnroll: 'totp',
-    mfaTotpConfirm: 'totp',
-    mfaDisable: 'none',
-    mfaMarkPasskey: 'passkey',
-    mfaRegenerateRecoveryCodes: 'none',
-    mfaStatus: 'always',
-    mfaStepUp: 'always',
-    mfaStepUpOptions: 'always',
-    mfaVerify: 'none',
-    mfaVerifyOptions: 'none',
-    logout: 'always',
-    rotateKey: 'none',
-    listKeys: 'none',
-    revokeKey: 'none',
-    revokeAllKeys: 'none',
-    confirmRevokeAllLink: 'none',
-    consumeRevokeAllLink: 'none',
-    changePassword: 'none',
-    getAuthSession: 'always',
-    getAuthChannels: 'none',
-    setSessionBinding: 'none',
+    sendVerificationCode: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    verifyCode: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    register: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    requestSignupLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    confirmSignupLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    completeSignup: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    requestPasswordReset: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    confirmPasswordReset: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    completePasswordReset: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    login: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    startDeviceAuth: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    startDeviceAuthWeb: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    pollDeviceAuth: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getDeviceAuthInfo: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    approveDeviceAuth: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    denyDeviceAuth: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    issueDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    redeemDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    redeemDeviceLinkWeb: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getDeviceLinkStatus: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    confirmDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    denyDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    cancelDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    pollDeviceLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    passkeyRegisterOptions: { secondFactorEnrolment: 'passkey', passwordChange: 'refuse' },
+    passkeyRegisterVerify: { secondFactorEnrolment: 'passkey', passwordChange: 'refuse' },
+    passkeyLoginOptions: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    passkeyLoginVerify: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listPasskeys: { secondFactorEnrolment: 'passkey', passwordChange: 'refuse' },
+    renamePasskey: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    revokePasskey: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    mfaTotpEnroll: { secondFactorEnrolment: 'totp', passwordChange: 'refuse' },
+    mfaTotpConfirm: { secondFactorEnrolment: 'totp', passwordChange: 'refuse' },
+    mfaDisable: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    mfaMarkPasskey: { secondFactorEnrolment: 'passkey', passwordChange: 'refuse' },
+    mfaRegenerateRecoveryCodes: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    mfaStatus: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    mfaStepUp: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    mfaStepUpOptions: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    mfaVerify: { secondFactorEnrolment: 'none', passwordChange: 'admit' },
+    mfaVerifyOptions: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    logout: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    rotateKey: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listKeys: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    revokeKey: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    revokeAllKeys: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    confirmRevokeAllLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    consumeRevokeAllLink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    changePassword: { secondFactorEnrolment: 'none', passwordChange: 'admit' },
+    getAuthSession: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    getAuthChannels: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    setSessionBinding: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
     // enrollPasskey reads it to learn whether the registration needs a
     // passkeyAdd proof; a read about the caller's own session (#400).
-    getSessionBinding: 'passkey',
-    sessionBindingDisableOptions: 'none',
-    passkeyProofOptions: 'none',
-    sessionRenewOptions: 'unchecked',
-    sessionRenewVerify: 'unchecked',
-    issueOneTimeToken: 'none',
-    requestAccountDeletion: 'none',
-    cancelAccountDeletion: 'none',
-    oauthGoogleStart: 'none',
-    oauthGoogleCallback: 'none',
-    oauthStart: 'none',
-    oauthProviders: 'none',
-    getGoogleOAuthUrl: 'none',
-    oauthFinalize: 'always',
-    oauthProviderStart: 'none',
-    oauthProviderCallback: 'none',
-    oauthProviderCallbackPost: 'none',
-    getProviderOAuthUrl: 'none',
-    oauthNative: 'none',
-    oauthAppleNativeStart: 'none',
-    oauthUnlinkNotify: 'none',
-    oauthUnlinkNotifyGet: 'none',
-    oauthLinkStart: 'none',
-    oauthUnlink: 'none',
-    androidAssetLinks: 'none',
-    getInvitation: 'none',
-    acceptInvitation: 'none',
-    createInvitation: 'none',
-    listInvitations: 'none',
-    cancelInvitation: 'none',
-    resendInvitation: 'none',
-    deleteInvitation: 'none',
-    getUserProfile: 'none',
-    updateUserProfile: 'none',
-    checkUsername: 'none',
-    updateUsername: 'none',
-    updateLocale: 'none',
-    listSettings: 'none',
-    getSetting: 'none',
-    setSetting: 'none',
-    resetSetting: 'none',
-    listRoles: 'none',
-    createAdminRole: 'none',
-    updateAdminRole: 'none',
-    deleteAdminRole: 'none',
-    updateUserRole: 'none',
-    issueOpsToken: 'none',
-    listOpsTokens: 'none',
-    revokeOpsToken: 'none',
-    registerOAuth2Client: 'none',
-    getOAuth2Authorize: 'none',
-    createOAuth2AuthorizationCode: 'none',
-    oauth2Token: 'none',
-    oauth2Revoke: 'none',
-    listOAuth2Grants: 'none',
-    revokeOAuth2Grant: 'none',
-    oauth2AuthorizationServerMetadata: 'none',
-} as const satisfies Record<keyof typeof ROUTE_CHANNELS, RouteEnrolment>;
+    getSessionBinding: { secondFactorEnrolment: 'passkey', passwordChange: 'refuse' },
+    sessionBindingDisableOptions: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    passkeyProofOptions: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    sessionRenewOptions: { secondFactorEnrolment: 'unchecked', passwordChange: 'unchecked' },
+    sessionRenewVerify: { secondFactorEnrolment: 'unchecked', passwordChange: 'unchecked' },
+    issueOneTimeToken: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    requestAccountDeletion: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    cancelAccountDeletion: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthGoogleStart: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthGoogleCallback: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthStart: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthProviders: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getGoogleOAuthUrl: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthFinalize: { secondFactorEnrolment: 'always', passwordChange: 'admit' },
+    oauthProviderStart: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthProviderCallback: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthProviderCallbackPost: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getProviderOAuthUrl: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthNative: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthAppleNativeStart: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthUnlinkNotify: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthUnlinkNotifyGet: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthLinkStart: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauthUnlink: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    androidAssetLinks: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    acceptInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    createInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listInvitations: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    cancelInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    resendInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    deleteInvitation: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getUserProfile: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    updateUserProfile: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    checkUsername: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    updateUsername: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    updateLocale: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listSettings: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getSetting: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    setSetting: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    resetSetting: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listRoles: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    createAdminRole: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    updateAdminRole: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    deleteAdminRole: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    updateUserRole: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    issueOpsToken: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listOpsTokens: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    revokeOpsToken: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    registerOAuth2Client: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    getOAuth2Authorize: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    createOAuth2AuthorizationCode: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauth2Token: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauth2Revoke: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    listOAuth2Grants: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    revokeOAuth2Grant: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+    oauth2AuthorizationServerMetadata: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+} as const satisfies Record<keyof typeof ROUTE_CHANNELS, RouteRequirementClasses>;
 
 /**
  * The second-factor routes of one method, answered 404
@@ -377,39 +417,64 @@ export const ROUTE_SECOND_FACTOR_METHODS = {
 } as const satisfies Partial<Record<keyof typeof ROUTE_CHANNELS, SecondFactorFeature>>;
 
 /**
- * The routes with each enrolment route carrying its marker, which the global
- * `authenticate` looks for in the route chain it runs in (lib/enrolment-routes).
+ * The routes with each route a restricted session reaches carrying its marker,
+ * which the global `authenticate` looks for in the route chain it runs in
+ * (lib/enrolment-routes).
  *
  * A method-gated route is an enrolment route whatever the policy lists: while
  * its method is unlisted its own gate answers the 404, which is the answer
  * that route owes every caller, and a 403 from `authenticate` would hide it.
  *
- * @throws when a route has no entry in `ROUTE_ENROLMENT`
+ * @throws when a route has no entry in `ROUTE_ENROLMENT`, or no class in one of its columns
  */
 export function markEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any, any, any>>>(
     routes: TRoutes,
-    classes: Record<keyof TRoutes, RouteEnrolment>,
+    classes: Record<keyof TRoutes, RouteRequirementClasses>,
 ): TRoutes
 {
     return Object.fromEntries(Object.entries(routes).map(([key, route]) =>
     {
-        const routeClass: RouteEnrolment | undefined = classes[key];
+        const admits = restrictedRouteAdmission(key, classes[key]);
 
-        if (routeClass === undefined)
-        {
-            throw new Error(`Route "${key}" has no entry in ROUTE_ENROLMENT. Classify it before mounting it.`);
-        }
-
-        if (routeClass === 'none' || routeClass === 'unchecked')
+        if (Object.keys(admits).length === 0)
         {
             return [key, route];
         }
 
-        const gated = (ROUTE_SECOND_FACTOR_METHODS as Record<string, SecondFactorFeature>)[key] !== undefined;
-        const marker = enrolmentMarker(routeClass === 'always' || gated ? null : routeClass);
-
-        return [key, { ...route, middlewares: withMarker(route.middlewares ?? [], marker) }];
+        return [key, { ...route, middlewares: withMarker(route.middlewares ?? [], restrictedRouteMarker(admits)) }];
     })) as TRoutes;
+}
+
+/**
+ * What a route's marker admits, from its row: nothing for a `'none'` or
+ * `'refuse'` class, and nothing for an `'unchecked'` one, whose route never
+ * runs the global `authenticate`.
+ *
+ * @throws when the route has no row, or its row no class for a requirement
+ */
+function restrictedRouteAdmission(key: string, row: RouteRequirementClasses | undefined): RestrictedRouteAdmission
+{
+    if (row === undefined)
+    {
+        throw new Error(`Route "${key}" has no entry in ROUTE_ENROLMENT. Classify it before mounting it.`);
+    }
+
+    const unclassified = SESSION_REQUIREMENTS.find(requirement => row[requirement] === undefined);
+
+    if (unclassified !== undefined)
+    {
+        throw new Error(`Route "${key}" has no ${unclassified} class in ROUTE_ENROLMENT. Classify it before mounting it.`);
+    }
+
+    const enrolment = row.secondFactorEnrolment;
+    const gated = (ROUTE_SECOND_FACTOR_METHODS as Record<string, SecondFactorFeature>)[key] !== undefined;
+
+    return {
+        ...enrolment === 'none' || enrolment === 'unchecked'
+            ? {}
+            : { secondFactorEnrolment: enrolment === 'always' || gated ? null : enrolment },
+        ...row.passwordChange === 'admit' ? { passwordChange: true } : {},
+    };
 }
 
 type RouteMiddleware = MiddlewareHandler | NamedMiddleware<string>;
@@ -417,7 +482,7 @@ type RouteMiddleware = MiddlewareHandler | NamedMiddleware<string>;
 /**
  * A route's middlewares with its marker in front — or, for a route that runs a
  * registered gate of its own (`oauthFinalizeAuth`), right after that gate:
- * `isEnrolmentRoute` searches the chain after the gate that asks.
+ * `restrictedRouteAdmits` searches the chain after the gate that asks.
  */
 function withMarker(middlewares: RouteMiddleware[], marker: MiddlewareHandler): RouteMiddleware[]
 {

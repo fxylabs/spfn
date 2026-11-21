@@ -779,12 +779,14 @@ export async function lockLinkedAccount(provider: SocialProvider, providerUserId
  * An account refused here is told to the app's `settled` as the sign-in
  * `signIn` names, once the transaction has rolled back (`reportAccountRefusal`);
  * both OAuth flows name theirs.
+ *
+ * @returns the account as the primary holds it, for the sign-in's answer
  */
 export async function assertActiveForOAuthSession(
     userId: number,
     missing: () => Error = () => new ValidationError({ message: 'User not found' }),
     signIn: OAuthSignInAttempt | null = null,
-): Promise<void>
+): Promise<User>
 {
     const user = await usersRepository.findByIdOnPrimary(userId);
 
@@ -799,6 +801,8 @@ export async function assertActiveForOAuthSession(
         await reportAccountRefusal(signIn && signInAttempt(user, signIn.channel, signIn.request), refusal, signIn?.keyId);
         throw admissionRefusalError(refusal);
     }
+
+    return user;
 }
 
 /** An OAuth sign-in as the app's `signIn` guard is told of it: the channel, the request, the key it presented. */

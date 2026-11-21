@@ -19,7 +19,9 @@ import { secondFactorEnrolmentFields } from './second-factor-policy.service';
  *
  * `secondFactorEnrolmentRequired: true` is present exactly when the
  * second-factor policy holds this session to enrolling one, as on the
- * `LoginResult` — this route is one such a session reaches.
+ * `LoginResult` — this route is one such a session reaches. Whether the account
+ * must change its password is not read here: the route reports the account row
+ * admission read on the primary (#362).
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Auth session data (minimal user info + role + permissions)

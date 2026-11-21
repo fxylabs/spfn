@@ -207,14 +207,15 @@ export type AuthProfileOutcome =
  * instead.
  *
  * Every profile — built-in or registered by the app — is admitted through
- * `admitPrincipal`, with this request as the route (#309): a person who may
- * only enrol is refused with a throw of 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`
- * except on an enrolment route reached through the global `authenticate`, and
- * `optionalAuth` reads that refusal as anonymous. A credential that is not a
- * person belongs in a machine principal (`registerMachineVerifier`), which
- * never comes here.
+ * `admitPrincipal`, with this request as the route (#309, #362): a person who
+ * may only enrol, or must change the password first, is refused with a throw of
+ * 403 `SECOND_FACTOR_ENROLMENT_REQUIRED` or `PASSWORD_CHANGE_REQUIRED` except on
+ * a route reached through the global `authenticate` that admits what is
+ * outstanding, and `optionalAuth` reads that refusal as anonymous. A credential
+ * that is not a person belongs in a machine principal (`registerMachineVerifier`),
+ * which never comes here.
  *
- * @throws SecondFactorEnrolmentRequiredError, AccountDisabledError, AccountPendingDeletionError
+ * @throws SecondFactorEnrolmentRequiredError, PasswordChangeRequiredError, AccountDisabledError, AccountPendingDeletionError
  */
 export async function runAuthProfile(c: Context): Promise<AuthProfileOutcome>
 {
@@ -377,7 +378,7 @@ async function admitClientProofProfile(c: Context): Promise<AuthContext>
     }
 
     // 7. The admission every door takes: the account's status, the key's
-    //    liveness on the same read, and the second-factor policy. A key that
+    //    liveness on the same read, and its outstanding requirements. A key that
     //    died since step 1 answers SESSION_REVOKED, as it would have there.
     const admission = await admitPrincipal({
         userId: keyRecord.userId,

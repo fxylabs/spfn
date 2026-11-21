@@ -215,7 +215,11 @@ describe('account-deletion.service', () =>
 
             expect(assertStepUp).toHaveBeenCalledWith({ userId: user.id, credential: KEY_1 });
             // Under the lock, the session is asked of the admission again, for this route.
-            expect(admitCompletion).toHaveBeenCalledWith({ userId: user.id, credential: KEY_1, enrolment: 'none' });
+            expect(admitCompletion).toHaveBeenCalledWith({
+                userId: user.id,
+                credential: KEY_1,
+                enrolment: { secondFactorEnrolment: 'none', passwordChange: 'refuse' },
+            });
             expect(proveRecentAuthentication).toHaveBeenCalledWith(
                 { userId: user.id, credential: KEY_1, currentPassword: 'correct-password' },
                 expect.any(Number),

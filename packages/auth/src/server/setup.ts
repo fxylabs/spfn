@@ -193,8 +193,8 @@ function assertSeedAccountsWithinPolicy(accounts: AdminAccountConfig[]): void
  *
  * Default behavior for created accounts:
  * - emailVerifiedAt: current timestamp (auto-verified)
- * - passwordChangeRequired: true (returned by sign-in, cleared by a password change;
- *   nothing is gated on it)
+ * - passwordChangeRequired: true — the account's session can do nothing but
+ *   change the password until it is changed or reset (#362)
  * - status: 'active'
  *
  * @throws Error when `SPFN_AUTH_ROLE_EMAIL_DOMAINS` does not allow an account's

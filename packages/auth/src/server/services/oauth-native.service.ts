@@ -84,6 +84,8 @@ export interface OAuthNativeResult
     userId?: string;
     keyId?: string;
     isNewUser?: boolean;
+    /** As on `LoginResult`: the account must change its password before this session may do anything else. */
+    passwordChangeRequired?: boolean;
     /** As on `LoginResult`: the session may only enrol a second factor. */
     secondFactorEnrolmentRequired?: boolean;
 }
@@ -196,7 +198,7 @@ async function persistNativeLogin(
 
         // 세션(공개키) 발급 전 계정 상태 검사 — oauth.service.ts의 web 흐름과 동일한 지점
         // No `webProxy`, as for the key below.
-        await assertActiveForOAuthSession(userId, undefined, {
+        const account = await assertActiveForOAuthSession(userId, undefined, {
             channel: 'oauth-native',
             request: { ip: params.ip, userAgent: params.userAgent },
             keyId: params.keyId,
@@ -265,6 +267,13 @@ async function persistNativeLogin(
                 secondFactorEnrolmentRequired: enrolment.secondFactorEnrolmentRequired === true,
             })));
 
-        return { mfaRequired: false, userId: String(userId), keyId: params.keyId, isNewUser, ...enrolment };
+        return {
+            mfaRequired: false,
+            userId: String(userId),
+            keyId: params.keyId,
+            isNewUser,
+            passwordChangeRequired: account.passwordChangeRequired,
+            ...enrolment,
+        };
     }, { context: 'auth:oauth-native' }));
 }

@@ -1770,6 +1770,7 @@ catch (error)
 | `SignupDisabledError` | 403 | `SIGNUP_DISABLED`: a first social sign-in would have created an account and `channels.signup` is `false` |
 | `ChannelDisabledError` | 404 | `CHANNEL_DISABLED`: a route of a channel the app turned off with `channels`; `details.channel` names it |
 | `SecondFactorEnrolmentRequiredError` | 403 | `SECOND_FACTOR_ENROLMENT_REQUIRED`: the app requires a second factor and this account has no listed one; only the enrolment routes answer |
+| `PasswordChangeRequiredError` | 403 | `PASSWORD_CHANGE_REQUIRED`: the account (a seeded admin, say) must change its password first; only the change and what leads to it answer; `details.requirements` (mobile contract 0.15.0) |
 | `SecondFactorMethodDisabledError` | 404 | `SECOND_FACTOR_METHOD_DISABLED`: a route of a method `secondFactor.methods` does not list, or recovery codes turned off; `details.method` names it |
 | `SecondFactorRequiredError` | 409 | `SECOND_FACTOR_REQUIRED`: removing the last listed second factor while one is required |
 | `ReservedUsernameError` | 400 | Username is reserved |

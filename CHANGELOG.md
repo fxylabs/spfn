@@ -427,6 +427,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template imports them; `spfn build` bundles with the CLI's own tsup, and core and the CLI declare
   their own dotenv. An existing app keeps them harmlessly, apart from `drizzle-typebox` under npm
   (above). The unused `buildServerForCommand` helper, which ran an app-level tsup, is gone.
+- **BREAKING (behaviour): @spfn/auth: `passwordChangeRequired` is enforced as a restricted session
+  (#362).** The flag (set by admin seeding, default `true`) used to be only reported; nothing was gated
+  on it, so a seeded account used the app with its seeded password. Now, from an account's next request
+  after the upgrade, a session of a flagged account is answered **403 `PasswordChangeRequiredError`**
+  (`PASSWORD_CHANGE_REQUIRED`, `details.requirements`) on every route — the app's included — except
+  `PUT /_auth/password`, `logout`, `GET /_auth/session`, `mfa/status`, `mfa/step-up/options` and
+  `mfa/step-up` (the step-up a change asks of an enrolled account), plus the two sign-in completions
+  that hand such an account its session (`oauth/finalize`, `mfa/verify`). It is the same mechanism as
+  the second-factor policy's enrolment-only state, generalised: the account's outstanding requirements,
+  in order, are `passwordChange` then `secondFactorEnrolment`; a request is admitted when none is
+  outstanding or the route admits any one of them (so an account held to both can enrol and can change
+  the password), and a refusal names the first — `details.requirements` lists them all. Not signed out:
+  the Next.js proxy keeps the session on it, and the same session works everywhere from the request
+  after the change. `optionalAuth` reads such a caller as anonymous; a one-time token, an OAuth 2.1
+  access token (`verifyAccessToken` throws the error) and the token endpoint (`invalid_grant`) refuse
+  it whatever the route. Renewal is unchecked, as for enrolment. What clears it: the change itself, in
+  its own transaction under the account lock, or a completed password reset. **The new password must
+  differ from the current one**: `PUT /_auth/password` with the current password as `newPassword` is
+  400 `ValidationError` and clears nothing (one more hash compare); a reset of a flagged account to
+  its current password is the same 400, its setup session left usable for another try (an unflagged
+  account may still reset to the password it had). `GET /_auth/session`, the web
+  OAuth finalize answer and the native OAuth answer now carry `passwordChangeRequired`.
+  `createAuthLifecycle()`'s `afterRoutes` now refuses to boot an app built by another copy of Hono
+  whatever the second-factor policy (next entry). Mobile contract
+  **0.15.0** (supported range `>=0.15.0 <0.16.0`): the new code, an optional `passwordChange` on each
+  operation that can answer it, and `OauthNativeResponse.passwordChangeRequired`; `PUT /_auth/password`
+  is not a contract operation — a native client clears the requirement off-contract, as it enrols a
+  second factor. **Migrate:** find the accounts still flagged before upgrading —
+  `SELECT id, email, created_at FROM spfn_auth.users WHERE password_change_required;` — and either let
+  each person change the password on next sign-in (send them to your change page on the 403, reading
+  `GET /_auth/session` rather than your own routes), or clear the flag for accounts whose seeded
+  password was already replaced out of band: `UPDATE spfn_auth.users SET password_change_required =
+  false WHERE id IN (…);`. Seeding sets it only on accounts it creates; `passwordChangeRequired: false`
+  in `SPFN_AUTH_ADMIN_ACCOUNTS` seeds an account without it. An app that enforced the flag itself
+  should stop calling its own routes from its change-password page. No schema change, no migration.
+- **BREAKING (boot): @spfn/auth: `afterRoutes` refuses another copy of Hono in every app (#362).** It
+  used to refuse an app built by a second copy of `hono` only while `secondFactor.required` was set;
+  an app with no second-factor policy booted. It now refuses that app too: seeding flags accounts in
+  any app, and a flagged account's every request — `PUT /_auth/password` included — reads which route
+  it matched, which a second copy hides, so the app would boot and answer that account 500 on the
+  change that frees it. Refusing only those requests was the alternative and was not taken: it is the
+  same 500, found by the first seeded admin rather than at deploy. **Migrate:** an app that boots on
+  two copies today (`pnpm why hono`; an app run as CommonJS beside an ESM server) resolves `hono` to
+  one install and runs as one module format. A custom `app.ts`, which core does not run this hook for,
+  still answers the flagged account's request 500 instead.
 - **BREAKING (behaviour): @spfn/auth: a password change keeps the session that made it (#372).**
   `PUT /_auth/password` used to revoke every key of the account, the caller's included, so the person
   changing their password was signed out by it — and on an enrolled account signed back in as a new

@@ -1,27 +1,30 @@
 /**
- * Which requests are on a second-factor enrolment route
+ * Which requests a restricted session may make
  *
- * The global `authenticate` middleware has to know whether the request in front
- * of it is one an enrolment-only session may make. What makes it one is which
- * route definition matched — not the path the request named, which a prefix
- * mount (`root.route('/api', app)`) changes without changing the route.
+ * A session is restricted while its account has a requirement outstanding — a
+ * password to change (#362), a second factor to enrol (#309). The global
+ * `authenticate` middleware then has to know whether the request in front of
+ * it is one that requirement admits. What makes it one is which route
+ * definition matched — not the path the request named, which a prefix mount
+ * (`root.route('/api', app)`) changes without changing the route.
  *
- * So the classification puts a marker on each enrolment route, as one of the
- * route's own middlewares (`enrolmentMarker`), and the middleware looks for that
+ * So the classification puts a marker on each route a restricted session may
+ * reach, as one of the route's own middlewares (`restrictedRouteMarker`),
+ * carrying which requirements admit it, and the middleware looks for that
  * marker among the handlers Hono matched for this request, inside the route
- * chain it is itself running in (`isEnrolmentRoute`). The marker is a function
- * object this module mints and never hands to anything but the router, so the
- * only way onto a route is the classification.
+ * chain it is itself running in (`restrictedRouteAdmits`). The marker is a
+ * function object this module mints and never hands to anything but the
+ * router, so the only way onto a route is the classification.
  *
  * Only a registered gate may be exempted by a marker (`registerEnrolmentGate`)
- * — `authenticate`, the middleware every enrolment route runs, registers its
+ * — `authenticate`, the middleware every marked route runs, registers its
  * own handler. Another producer of a person principal asking from its own
  * place in a chain (`optionalAuth`, `opsOrUser`, a one-time token) is answered
  * no, wherever it stands.
  *
  * Why nothing else can satisfy it:
  *
- * - an app route at an enrolment route's path on another method is never
+ * - an app route at a marked route's path on another method is never
  *   matched for this request, so its handlers are not in the list at all;
  * - an app route at the same path and method is registered before the package
  *   routes (core registers an app's own routes first), so it runs first — and
@@ -42,6 +45,15 @@ import { assertRequestFromThisHono } from './hono-copy';
 import { isMethodListed, type SecondFactorMethod } from './second-factor-policy';
 
 /**
+ * What an account can be held to before its session may do anything else, in
+ * the order a refusal names them: the password first, since changing it is the
+ * one thing an operator-seeded account must do before anything else.
+ */
+export const SESSION_REQUIREMENTS = ['passwordChange', 'secondFactorEnrolment'] as const;
+
+export type SessionRequirement = typeof SESSION_REQUIREMENTS[number];
+
+/**
  * What an enrolment route needs listed to be one: a method, or nothing.
  *
  * `null` for a route every enrolment-only session reaches (`mfaStatus`,
@@ -51,8 +63,20 @@ import { isMethodListed, type SecondFactorMethod } from './second-factor-policy'
  */
 export type EnrolmentRequirement = SecondFactorMethod | null;
 
-/** Every marker minted, and what it requires. Module state: nothing outside reads or adds to it. */
-const MARKERS = new WeakMap<Function, EnrolmentRequirement>();
+/**
+ * Which requirements a marked route admits a session held to: under
+ * `secondFactorEnrolment` while its method is listed (`null`: always), and
+ * under `passwordChange` when true. A requirement absent is one the route
+ * does not admit.
+ */
+export interface RestrictedRouteAdmission
+{
+    secondFactorEnrolment?: EnrolmentRequirement;
+    passwordChange?: true;
+}
+
+/** Every marker minted, and what it admits. Module state: nothing outside reads or adds to it. */
+const MARKERS = new WeakMap<Function, RestrictedRouteAdmission>();
 
 /** The middlewares a marker answers to. */
 const GATES = new WeakSet<Function>();
@@ -70,17 +94,17 @@ export function isEnrolmentGate(handler: Function): boolean
 }
 
 /**
- * A fresh marker for one enrolment route: a middleware that does nothing but
- * pass the request on, recognised later by identity.
+ * A fresh marker for one route a restricted session may reach: a middleware
+ * that does nothing but pass the request on, recognised later by identity.
  */
-export function enrolmentMarker(requires: EnrolmentRequirement): MiddlewareHandler
+export function restrictedRouteMarker(admits: RestrictedRouteAdmission): MiddlewareHandler
 {
     const marker: MiddlewareHandler = async (_c, next) =>
     {
         await next();
     };
 
-    MARKERS.set(marker, requires);
+    MARKERS.set(marker, admits);
 
     return marker;
 }
@@ -117,8 +141,8 @@ function readMatchedRoutes(c: Context): RouterRoute[]
 }
 
 /**
- * Whether the route this request matched is an enrolment route, under the
- * policy in force.
+ * Whether the route this request matched admits a session held to
+ * `requirement` — for `secondFactorEnrolment`, under the policy in force.
  *
  * Read from the middleware that calls it, which must be a registered gate: the
  * search starts after the entry Hono is running (`c.req.routeIndex`) and stays
@@ -129,7 +153,7 @@ function readMatchedRoutes(c: Context): RouterRoute[]
  * @throws Error when the request was built by another copy of Hono, whose match
  *   result cannot be read
  */
-export function isEnrolmentRoute(c: Context): boolean
+export function restrictedRouteAdmits(c: Context, requirement: SessionRequirement): boolean
 {
     const routes = readMatchedRoutes(c);
     const self = routes[c.req.routeIndex];
@@ -157,11 +181,22 @@ export function isEnrolmentRoute(c: Context): boolean
 
         if (MARKERS.has(handler))
         {
-            const requires = MARKERS.get(handler)!;
-
-            return requires === null || isMethodListed(requires);
+            return admitsUnder(MARKERS.get(handler)!, requirement);
         }
     }
 
     return false;
+}
+
+/** Whether a marker's admission covers `requirement` now. */
+function admitsUnder(admits: RestrictedRouteAdmission, requirement: SessionRequirement): boolean
+{
+    if (requirement === 'passwordChange')
+    {
+        return admits.passwordChange === true;
+    }
+
+    const requires = admits.secondFactorEnrolment;
+
+    return requires === null || (requires !== undefined && isMethodListed(requires));
 }
