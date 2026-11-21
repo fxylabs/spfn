@@ -4,13 +4,19 @@
  * An event's `stackTrace` is its error's description as indented JSON (#382).
  * Its first lines are only `{ kind name code severity`, so the preview is
  * built from the description's fields instead: the fault's name, code,
- * constraint and table, then its top frames. A row stored before #382 holds a
- * raw stack and keeps its first lines.
+ * constraint and table, then its top frames.
+ *
+ * A row stored before #382 holds a raw stack, whose header is the error's
+ * message — for a failed statement its SQL, and its next line `params: …` the
+ * bound values. From that text only what names a place in code is shown: the
+ * error's name and its `at …` frame lines.
  */
 
 const PREVIEW_FRAMES = 3;
 
-const RAW_STACK_LINES = 5;
+const FRAME_LINE = /^\s*at /;
+
+const ERROR_NAME = /^[\w$.]+$/;
 
 interface StoredDescription
 {
@@ -27,7 +33,7 @@ export function eventPreview(stackTrace: string): string
 
     if (!description)
     {
-        return stackTrace.split('\n').slice(0, RAW_STACK_LINES).join('\n');
+        return legacyPreview(stackTrace);
     }
 
     const frames = typeof description.stack === 'string'
@@ -35,6 +41,15 @@ export function eventPreview(stackTrace: string): string
         : [];
 
     return [faultLine(description), ...frames].join('\n');
+}
+
+/** A raw stack's error name — the text before the first `:` of its header — and its frames */
+function legacyPreview(stackTrace: string): string
+{
+    const name = stackTrace.split('\n', 1)[0].split(':', 1)[0].trim();
+    const frames = stackTrace.split('\n').filter(line => FRAME_LINE.test(line)).slice(0, PREVIEW_FRAMES);
+
+    return [ERROR_NAME.test(name) ? name : 'Error', ...frames].join('\n');
 }
 
 /** `Name [code=…] [constraint=…] [table=…]`, each tag only when present */

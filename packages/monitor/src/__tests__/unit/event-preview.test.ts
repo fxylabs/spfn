@@ -4,7 +4,7 @@
  * | #  | goes unnoticed without the row                                                       |
  * | -- | ------------------------------------------------------------------------------------ |
  * | V1 | a database error's preview reading `{ kind name code severity` — no fault, no frame |
- * | V2 | a row stored before #382 (a raw stack) previewing as nothing                         |
+ * | V2 | a row stored before #382 (a raw stack) previewing its header or `params:` line — SQL and bound values |
  */
 
 import { describe, it, expect } from 'vitest';
@@ -45,10 +45,15 @@ describe('eventPreview', () =>
         ]);
     });
 
-    it('V2: a raw stack stored before #382 keeps its first five lines', () =>
+    it('V2: a raw stack stored before #382 previews as its error name and its frames only', () =>
     {
-        const raw = `Error: boom\n${FRAMES}\n    at more (/app/more.js:1:1)`;
+        const raw = `Error: Failed query: insert into "users" ("email") values ($1)\nparams: a@example.test\n${FRAMES}`;
 
-        expect(eventPreview(raw)).toBe(raw.split('\n').slice(0, 5).join('\n'));
+        expect(eventPreview(raw)).toBe([
+            'Error',
+            '    at insertUser (/app/users.js:10:5)',
+            '    at register (/app/auth.js:20:7)',
+            '    at handle (/app/route.js:30:9)',
+        ].join('\n'));
     });
 });
