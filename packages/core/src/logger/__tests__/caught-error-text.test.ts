@@ -74,28 +74,15 @@ const REPOSITORY_WRITES = new Set(['create', 'insert', 'update', 'upsert']);
 const OPERATOR_TERMINALS = ['cli/src/', 'pages-next/src/cli.ts'];
 
 /**
- * Known sites outside core, fixed by #382's second PR, which empties this
- * list. `<file> <expression>` → how many times the file has that expression
- * in a sink. The list is exact: an entry whose count differs from the file's
- * — a site fixed, or one added — or whose file does not exist fails the row.
+ * Known sites outside core, still pending after #382's second PR, which
+ * emptied the list for auth, monitor, workflow and notification.
+ * `<file> <expression>` → how many times the file has that expression in a
+ * sink. The list is exact: an entry whose count differs from the file's — a
+ * site fixed, or one added — or whose file does not exist fails the row.
  */
 const PENDING_OUTSIDE_CORE = new Map<string, number>([
-    // auth — log lines
-    ['auth/src/nextjs/oauth-handlers.ts error.message', 1],
-    ['auth/src/nextjs/session-helpers.ts error.message', 2],
-    ['auth/src/nextjs/session-helpers.ts String(error)', 2],
-    ['auth/src/server/lib/config.ts (error as Error).message', 1],
-    ['auth/src/server/lib/oauth/jwks-verify.ts err.message', 1],
-    ['auth/src/server/lib/oauth/kakao-provider.ts err.message', 1],
-    ['auth/src/server/lib/oauth/naver-provider.ts err.message', 1],
-    ['auth/src/server/lib/session.ts err.message', 1],
-    ['auth/src/server/services/oauth.service.ts cause.message', 1],
-    ['auth/src/server/services/oauth.service.ts String(cause)', 1],
     // cms — an Error made from a thrown non-Error's text, then logged
     ['cms/src/server/generators/label-sync-generator.ts err (String(error))', 4],
-    // monitor — error_groups.message, error_events.stack_trace
-    ['monitor/src/server/services/error-tracking.service.ts err.message', 1],
-    ['monitor/src/server/services/error-tracking.service.ts err.stack', 1],
 ]);
 
 const TEXT_OPERATORS: ReadonlySet<ts.SyntaxKind> = new Set([

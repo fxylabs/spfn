@@ -103,9 +103,7 @@ async function verifySignature(params: VerifyIdTokenParams): Promise<JWTPayload>
     }
     catch (err)
     {
-        authLogger.service.warn('id_token signature/claims verification failed', {
-            reason: err instanceof Error ? err.message : 'unknown',
-        });
+        authLogger.service.warn('id_token signature/claims verification failed', { error: err });
         throw new InvalidSocialTokenError();
     }
 }

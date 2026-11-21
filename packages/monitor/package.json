@@ -27,6 +27,12 @@
       "require": "./dist/nextjs/client.js"
     }
   },
+  "imports": {
+    "#nextjs/client-shared": {
+      "types": "./dist/nextjs/client-shared.d.ts",
+      "default": "./dist/nextjs/client-shared.js"
+    }
+  },
   "files": [
     "dist",
     "!dist/*.metafile.json",

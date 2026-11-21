@@ -200,9 +200,7 @@ async function withKakaoVerifiedEmail(
 {
     const fetched = await fetchKakaoIdentity(accessToken).catch((err: unknown) =>
     {
-        authLogger.service.warn('Kakao user-info lookup failed; continuing without email verification', {
-            reason: err instanceof Error ? err.message : 'unknown',
-        });
+        authLogger.service.warn('Kakao user-info lookup failed; continuing without email verification', { error: err });
 
         return null;
     });

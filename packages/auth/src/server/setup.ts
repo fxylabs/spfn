@@ -275,8 +275,7 @@ export async function ensureAdminExists(): Promise<void>
         }
         catch (error)
         {
-            const err = error as Error;
-            authLogger.setup.error(`❌ Failed to create account ${account.email}:`, err);
+            authLogger.setup.error(`❌ Failed to create account ${account.email}`, { error });
             failed++;
         }
     }

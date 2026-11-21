@@ -351,6 +351,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     error's text when it has none, and carry the error under `context.error`. Database connection creation and provider close keep the error
     as their second argument — the caught value itself, not an Error made from its text.
   - A failed job's `output`: see its entry above.
+- **BREAKING: @spfn/auth: the OAuth error redirect carries a typed error's text, and a fixed
+  sentence for any other error (#382).** A sign-in callback that failed on anything but a
+  `SerializableError` meant for the client (not marked `internal`) put the error's message into the
+  redirect's `error` parameter — for a failed statement its SQL and every bound value, in the
+  browser's address bar and the app's access logs. The parameter is now `OAuth callback failed`
+  (`OAuth link failed` when the link state could not be read); `reason` is unchanged (`failed`), and
+  typed errors keep their text and their reason. A missing role (`Default user role not found…`)
+  is one of those errors: its page now shows the fixed sentence. `@spfn/auth:service` logs every
+  error the redirect answers, and every failure of a link callback (whose redirect carries only
+  `oauthLink=failed`), with its description, by core's error handler's rule (`errorLogLevel`): error
+  level for an untyped error or a typed 5xx, warn for a refusal (the fixed sentence is the line's
+  message).
+  `oauthFailureUrl(error, fallback)` from `@spfn/auth/server` builds that redirect beside
+  `buildOAuthErrorUrl`.
+- **BREAKING: @spfn/auth: log lines hand the caught error to core's logger (#382).** The context
+  key `reason` (Kakao and Naver user-info lookup, id_token verification) is now `error`, and with
+  the session-info, session and pending-session validation, OAuth provider call, Next.js OAuth
+  callback and admin-account create lines it holds the error's description, not its message. The
+  passkey boot line ("…so boot continues.") moves the error's text from the message to
+  `context.error`. Not changed here: the info-level "API access" line of
+  `@spfn/auth:middleware` logs the account's `email` on every authenticated request
+  (`authenticate.ts`, `auth-profiles.ts`).
+- **BREAKING: @spfn/monitor: groups, events and the Slack message hold the error's description, and
+  the fingerprint is the fault, not the message (#382).** `error_groups.message` stored the error's
+  message and `error_events.stack_trace` its stack, the Slack message sent both, and the group was
+  fingerprinted on the message: a failed statement's SQL and bound values were stored, sent, and
+  split one fault into a group per value. Now:
+  - `generateFingerprint(description, path)` (was `(name, message, path)`) hashes the route path,
+    each link of the cause chain by its name, code, constraint and table, and the top three stack
+    frames by the place in code they name: no line and column, a dependency's file from the last
+    `node_modules/` on (no pnpm version-and-hash directory), app code relative to the working
+    directory (a `file://` frame read as the path it names) — so a dependency bump keeps every
+    group, and a release-directory deploy does when the process's working directory is inside the
+    release directory and the code runs from it (not with a working directory of `/`, not for a
+    workspace package outside the working directory).
+  - `error_groups.name` is the description's name, `error_groups.message` one line naming the fault
+    (`Name [code=…] [constraint=…] [table=…]: message`, per link of the cause chain, the message only
+    where the description kept one).
+  - `error_events.stack_trace` is the description as indented JSON.
+  - The Slack message carries the group's line and the description's top three frames.
+
+  Existing rows are not migrated. New events of a fault tracked before this release open a new group
+  once (its fingerprint changed); the old group keeps its count and stops growing. A group an
+  operator marked `ignored` is no exception: its fault comes back once as a new `active` group and
+  sends one Slack alert. Mark that new group `ignored` again; it stays quiet from then on.
+  The dashboard's event preview shows the group's line for the event (`summarizeError` over the
+  stored description: per link of the cause chain its name, code, constraint and table, and a kept
+  message — so a wrapped database error shows its cause's code, a plain error its message, a thrown
+  non-Error value what its description holds) and its top three frames, not the first lines of the
+  stored JSON. An event stored before this release (a raw stack)
+  previews as its error's name and its V8 frame lines (indented, of the frame grammar — not every
+  line starting `at `), not its first five lines, whose header and `params:` line held a failed
+  statement's SQL and bound values. A group stored before this release keeps its `message` as
+  stored — the raw message, for a failed statement its SQL and bound values — and the list and detail
+  views show it. No new event matches an old group, so deleting the groups first seen before the
+  upgrade removes that text; their events go with them.
+- **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text
+  (#382).** `executions.error`, `step_executions.error` and the `error` of the `step.failed` and
+  `failed` events held the error's message — for a failed statement its SQL and bound values. They
+  now hold `JSON.stringify(describeError(error, { stack: false }))`; no schema change. The default
+  logger (`defaultLogger`) is core's logger as `@spfn/workflow`, not the console, which printed the
+  error object whole; the engine hands a caught error to any logger as `{ error }` (was the error as
+  the second argument), and its messages lose their trailing colon.
+- **BREAKING: @spfn/notification: the error Slack message and a failed send guard's row hold the
+  error's description (#382).** `createErrorSlackNotifier`'s default message quoted the error's
+  message and the lines after its stack header; it now quotes the description's safe fields (name,
+  a database error's code, constraint and table, a kept message, per link of the cause chain) and
+  its top frames. A scheduled notification whose send guard throws stores
+  `Send guard <name> failed: <description as JSON>` in `error_message`, not the error's message.
+- **@spfn/auth, @spfn/core: client-visible failure answers carry a fixed sentence, not a caught
+  error's text (#382).** `OAuthCallback` (and `runOAuthCallback`) showed and passed to `onError` the
+  message of an error thrown while finalizing — a fetch failure's, say; it now shows
+  `Failed to finalize OAuth`, `reason` still `failed`. The api client's `'network'` `ApiError` had the
+  fetch error's message (a server-side fetch's can name an internal host); its message is now
+  `Network error` and the fetch error is its `cause`. The RPC proxy's 502 (the backend call or a
+  response interceptor threw) and 500 (a request interceptor threw) answered the error's message; they
+  now answer `Failed to connect to backend` and `Internal server error` — the error is in the proxy's
+  log line. A `debug` proxy (`RpcProxyConfig.debug`, on by default in development and settable in
+  production) added the error's stack, whose first line is its message — for a failed statement its
+  SQL and bound values; its 500, 502 and 504 now add `description`, the error's `describeError`
+  description (the log line's value), and never `stack`.
+- **BREAKING: @spfn/core: the error handler's development answer carries the error's description,
+  not its text (#382).** Under `includeStack` (every `NODE_ENV` but `production`) a standard error
+  that is not a database error was answered with its `message`, its cause's message as `cause`, and
+  its raw `stack` — a fetch failure's internal host, a wrapped error's raw text. Its body is now
+  `{ __type: 'Error', message: 'Internal Server Error', description }` with `description` its
+  `describeError` description, as a database error's already was in `database`. A
+  `SerializableError`'s `stack` is now the description's frames, without the header line (its
+  message is in the body already). The handler owns `stack`: one a `toJSON()` override returns is
+  removed in every mode, production included, and in development only the description's frames,
+  when there are any, take its place. Production answers are otherwise unchanged.
+- **@spfn/core: `isSerializableError(error)` and `errorLogLevel(error)` from `@spfn/core/errors`
+  (#382).** The error handler's check for a typed error is now exported, and auth's OAuth error
+  redirect asks it instead of its own `instanceof`, so both give one answer. `errorLogLevel` is the
+  handler's level rule (`error` when the status — a typed error's `statusCode`, another error's
+  numeric `statusCode`, else 500 — is 5xx, `warn` otherwise), which the handler and auth's OAuth
+  failure log both read.
+- **BREAKING: @spfn/core: a typed error is known by its brand, not its shape (#382).** The error
+  handler took any object with a `toJSON()` and a numeric `statusCode` for a `SerializableError` —
+  `instanceof` fails across the two copies of the module dev can load — so a provider's or
+  library's error of that shape was answered (and put into auth's OAuth redirect) with its own
+  text. `SerializableError` now carries a brand under the global-registry symbol
+  `SERIALIZABLE_ERROR_BRAND` (`Symbol.for('spfn.core.serializableError')`, exported from
+  `@spfn/core/errors`), set by the class as a prototype getter, so a second copy's errors still
+  pass and `toJSON()` never copies it; `isSerializableError` reads only the brand. An app error
+  class that answered through the handler by shape alone must extend `SerializableError`.
+- **@spfn/auth, @spfn/monitor, @spfn/workflow, @spfn/notification need the `@spfn/core` that
+  exports `describeError` (#382)**, auth also the one that exports `isSerializableError` and
+  `errorLogLevel`. Their peer
+  range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1, which exports neither; release them together with core.
 - **BREAKING (behaviour, under `secondFactor.required: true` only): @spfn/auth: a user-verified
   passkey registration is marked as a second factor whenever the policy requires one (#399).**
   `passkeys/register/verify` marked only in the enrolment-only state, so a spare passkey added by an

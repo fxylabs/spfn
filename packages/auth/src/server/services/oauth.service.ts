@@ -8,7 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { ValidationError } from '@spfn/core/errors';
+import { errorLogLevel, isSerializableError, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
@@ -702,9 +702,7 @@ export async function fromProvider<T>(call: () => Promise<T>): Promise<T>
         .then(call)
         .catch((cause: unknown) =>
         {
-            authLogger.service.warn('OAuth provider call failed', {
-                error: cause instanceof Error ? cause.message : String(cause),
-            });
+            authLogger.service.warn('OAuth provider call failed', { error: cause });
 
             return Promise.reject(new OAuthProviderError());
         });
@@ -1119,6 +1117,41 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
 export function oauthErrorReason(error: unknown): OAuthErrorReason
 {
     return REASON_BY_ERROR.find(([type]) => error instanceof type)?.[1] ?? 'failed';
+}
+
+/**
+ * The error redirect for a caught error: its text and its reason code (#382).
+ *
+ * A typed error meant for the client — a `SerializableError` not marked
+ * `internal`, by core's own `isSerializableError`, the check its error handler
+ * makes — keeps its message, as that handler answers it. Any
+ * other error's message may carry a failed statement's SQL and bound values,
+ * so the redirect carries `fallback` instead. The reason is the error's type
+ * either way.
+ *
+ * The redirect is the answer core's error handler would otherwise have given,
+ * so the error is logged as that handler logs it (`logOAuthFailure`): a sign-in
+ * that fails on a fault — a missing default role, a database error, a typed
+ * 5xx — must still leave the operator a line.
+ */
+export function oauthFailureUrl(error: unknown, fallback: string): string
+{
+    const forClient = isSerializableError(error) && (error as { internal?: boolean }).internal !== true;
+
+    logOAuthFailure(error, fallback);
+
+    return buildOAuthErrorUrl(forClient ? error.message : fallback, oauthErrorReason(error));
+}
+
+/**
+ * Log a caught OAuth failure that is answered without core's error handler, by
+ * that handler's rule (`errorLogLevel` from `@spfn/core/errors`): `error` for a
+ * fault (5xx, an untyped error), `warn` for a refusal. The message is a fixed
+ * sentence; the error goes to the logger, which describes it.
+ */
+export function logOAuthFailure(error: unknown, message: string): void
+{
+    authLogger.service[errorLogLevel(error)](message, { error });
 }
 
 /**

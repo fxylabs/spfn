@@ -228,9 +228,9 @@ async function finishCallback(
     input: FinalizeInput & { errorUrl: string },
 ): Promise<NextResponse>
 {
-    const finalized = await postFinalize(request, input).catch((error: Error) =>
+    const finalized = await postFinalize(request, input).catch((error: unknown) =>
     {
-        logger.error('OAuth callback failed', { error: error.message });
+        logger.error('OAuth callback failed', { error });
 
         return null;
     });

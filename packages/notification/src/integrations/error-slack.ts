@@ -17,7 +17,10 @@
  */
 
 import { hostname } from 'os';
+import { describeError, type DatabaseErrorDescription, type ErrorDescription } from '@spfn/core/logger';
 import { sendSlack } from '../channels/slack';
+
+type Description = ErrorDescription | DatabaseErrorDescription;
 
 interface ErrorContext
 {
@@ -94,21 +97,43 @@ function formatQuery(query: Record<string, string>): string
 }
 
 /**
- * Extract short stack trace (first N frames)
+ * The top frames of the error's description — never its stack header,
+ * which repeats the message
  */
-function shortStack(err: Error, maxLines: number = 3): string
+function shortStack(description: Description, maxLines: number = 3): string
 {
-    if (!err.stack)
+    if (!description.stack)
     {
         return '(no stack)';
     }
 
-    const lines = err.stack.split('\n').slice(1); // skip error message line
-
-    return lines
+    return description.stack
+        .split('\n')
         .slice(0, maxLines)
         .map(line => line.trim())
         .join('\n');
+}
+
+/**
+ * The description's safe fields, one line per link of the cause chain: the
+ * name, a database error's code, constraint and table, and the message the
+ * description kept — never the error's own message, which for a failed
+ * statement carries its SQL and bound values (#382)
+ */
+function errorSummary(description: Description): string
+{
+    const fields = description.kind === 'database'
+        ? { code: description.code, constraint: description.constraint, table: description.table }
+        : { code: description.code };
+    const tags = Object.entries(fields)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => ` [${key}=${value}]`)
+        .join('');
+    const line = `${description.name}${tags}${description.message ? `: ${description.message}` : ''}`;
+
+    return description.kind === 'error' && description.cause
+        ? `${line}\n> ← ${errorSummary(description.cause)}`
+        : line;
 }
 
 // ── Throttle ────────────────────────────────────────────────
@@ -143,6 +168,7 @@ function getEnvLabel(): string
 
 function defaultFormat(err: Error, ctx: ErrorContext, suppressed: number = 0): { text: string; blocks: unknown[] }
 {
+    const description = describeError(err);
     const envLabel = getEnvLabel();
     const emoji = ctx.statusCode >= 500 ? ':rotating_light:' : ':warning:';
     const title = `${emoji} *${err.name || 'Error'}* — ${ctx.statusCode} [${envLabel}]`;
@@ -163,7 +189,7 @@ function defaultFormat(err: Error, ctx: ErrorContext, suppressed: number = 0): {
         // Error message
         {
             type: 'section',
-            text: { type: 'mrkdwn', text: `> ${err.message}` },
+            text: { type: 'mrkdwn', text: `> ${errorSummary(description)}` },
         },
         // Fields: method, path, user, requestId
         {
@@ -195,7 +221,7 @@ function defaultFormat(err: Error, ctx: ErrorContext, suppressed: number = 0): {
         // Stack trace
         {
             type: 'section',
-            text: { type: 'mrkdwn', text: `*Stack Trace*\n\`\`\`${shortStack(err)}\`\`\`` },
+            text: { type: 'mrkdwn', text: `*Stack Trace*\n\`\`\`${shortStack(description)}\`\`\`` },
         },
     ];
 

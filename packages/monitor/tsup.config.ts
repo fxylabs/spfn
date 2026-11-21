@@ -8,6 +8,8 @@ export default defineConfig({
         index: 'src/index.ts',
         server: 'src/server.ts',
         'config/index': 'src/config/index.ts',
+        // Not exported: the private `#nextjs/client-shared` of the separate `nextjs/client` build
+        'nextjs/client-shared': 'src/nextjs/client-shared.ts',
     },
     format: ['esm'],
     esbuildPlugins: [recordMetafile('main')],

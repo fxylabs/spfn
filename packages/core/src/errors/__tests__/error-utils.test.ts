@@ -7,6 +7,7 @@ import {
     isDatabaseError,
     isHttpError,
     hasStatusCode,
+    isSerializableError,
 } from '../error-utils';
 import {
     DatabaseError,
@@ -15,6 +16,8 @@ import {
     HttpError,
     UnauthorizedError,
 } from '../http-errors';
+import { SerializableError, SERIALIZABLE_ERROR_BRAND } from '../serializable-error';
+import { NotFoundError as DistNotFoundError } from '@spfn/core/errors';
 
 describe('isDatabaseError', () =>
 {
@@ -128,5 +131,46 @@ describe('hasStatusCode', () =>
         expect(hasStatusCode('string')).toBe(false);
         expect(hasStatusCode(123)).toBe(false);
         expect(hasStatusCode(true)).toBe(false);
+    });
+});
+
+describe('isSerializableError', () =>
+{
+    it('S1: is true for an instance, and for an error of a second copy of the module (#382)', () =>
+    {
+        // `@spfn/core/errors` resolves to the built package: a second copy of
+        // the class this file imports from source, as dev under tsx loads one
+        const copy = new DistNotFoundError({ message: 'no such order' });
+
+        expect(copy).not.toBeInstanceOf(SerializableError);
+        expect(isSerializableError(new UnauthorizedError({ message: 'no' }))).toBe(true);
+        expect(isSerializableError(copy)).toBe(true);
+    });
+
+    it('S2: is false for a provider error shaped like one — a numeric statusCode and a toJSON (#382)', () =>
+    {
+        const providerError = Object.assign(new Error('invalid_grant: token for internal-tenant 42 expired'), {
+            statusCode: 400,
+            toJSON: () => ({ __type: 'ProviderError', message: 'invalid_grant: token for internal-tenant 42 expired' }),
+        });
+
+        expect(isSerializableError(providerError)).toBe(false);
+        expect(isSerializableError({ statusCode: 409, toJSON: () => ({ __type: 'ConflictError', message: 'x' }) })).toBe(false);
+    });
+
+    it('is false for a plain error, a status-only object and non-objects', () =>
+    {
+        expect(isSerializableError(new Error('plain'))).toBe(false);
+        expect(isSerializableError({ statusCode: 500 })).toBe(false);
+        expect(isSerializableError(null)).toBe(false);
+        expect(isSerializableError('ConflictError')).toBe(false);
+    });
+
+    it('the brand is not an own key, so toJSON() never copies it', () =>
+    {
+        const error = new UnauthorizedError({ message: 'no' });
+
+        expect(Reflect.ownKeys(error)).not.toContain(SERIALIZABLE_ERROR_BRAND);
+        expect(Object.getOwnPropertySymbols(error.toJSON())).toEqual([]);
     });
 });

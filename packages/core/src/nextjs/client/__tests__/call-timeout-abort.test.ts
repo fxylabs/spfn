@@ -364,6 +364,21 @@ describe('api client - failures and validation', () =>
         expect(vi.getTimerCount()).toBe(0);
     });
 
+    it('row 12b: a network error\'s message is a fixed sentence, the fetch error only its cause (#382)', async () =>
+    {
+        const thrown = new TypeError('connect ECONNREFUSED 10.9.8.7:8790 secret-host.internal');
+        const failing = async () =>
+        {
+            throw thrown;
+        };
+        const api = createApi<any>({ fetch: failing as unknown as typeof fetch }) as any;
+
+        const caught = expectApiError(await settle(api.getUser.call({})), 'network', 0);
+
+        expect(caught.message).toBe('Network error');
+        expect(caught.cause).toBe(thrown);
+    });
+
     it('row 13: .timeout() of 0, -1, NaN, Infinity or 2147483648 throws a TypeError; the bounds are inclusive', () =>
     {
         const server = fakeServer();

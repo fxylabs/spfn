@@ -11,6 +11,8 @@ import type {
     RouteMapEntry,
 } from './interceptors/types';
 import type { InterceptorRegistry } from './interceptors';
+import { describeError } from '@spfn/core/logger';
+import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
 import { clientIpFromForwardedChain } from '../../security/forwarded-chain';
 
@@ -171,19 +173,35 @@ export function buildSetCookieHeader(cookie: SetCookie): string
 }
 
 /**
+ * The proxy's own failure answer
+ */
+export interface ProxyErrorResponse
+{
+    error: string;
+    message: string;
+    /** With `debug`, the caught error's description — never its message or stack */
+    description?: ErrorDescription | DatabaseErrorDescription;
+}
+
+/**
  * Build error response JSON
+ *
+ * The body takes nothing from a caught error but its description (#382): a
+ * development proxy (`debug`) adds `describeError(error)` — the value its log
+ * line carries — and never the error's message or stack, whose first line is
+ * the message and, for a failed statement, holds the bound values.
  */
 export function buildErrorResponse(
     errorType: string,
     message: string,
     debug: boolean,
-    error?: Error,
-): any
+    error?: unknown,
+): ProxyErrorResponse
 {
     return {
         error: errorType,
         message,
-        ...(debug && error?.stack && { stack: error.stack }),
+        ...(debug && error !== undefined && { description: describeError(error) }),
     };
 }
 

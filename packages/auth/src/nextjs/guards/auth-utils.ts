@@ -114,9 +114,10 @@ function isSignedOut(error: unknown): boolean
  * Matched by name as well as by class. `@spfn/auth/errors` can resolve to two
  * module instances at once — the package entry and the source tree — under a
  * test runner and in dev, and `instanceof` across them is false; core's own
- * `isSerializableError` duck-types for exactly that reason. Getting this wrong
- * fails in the direction that redirects someone to a sign-in page they do not
- * need, which is the failure this whole branch exists to remove.
+ * `isSerializableError` reads a global-registry brand for exactly that
+ * reason. Getting this wrong fails in the direction that redirects someone to
+ * a sign-in page they do not need, which is the failure this whole branch
+ * exists to remove.
  */
 function isRenewalRequired(error: unknown): boolean
 {

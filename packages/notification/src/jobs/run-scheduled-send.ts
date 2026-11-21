@@ -12,7 +12,7 @@ import {
     markNotificationSkipped,
 } from '../services/notification.service';
 import { getSendGuard, type SendGuard, type SendGuardContext } from '../services/send-guard.service';
-import { logger } from '@spfn/core/logger';
+import { describeError, logger } from '@spfn/core/logger';
 
 const log = logger.child('@spfn/notification:scheduled');
 
@@ -97,7 +97,12 @@ async function checkGuard(
 
     if ('error' in outcome)
     {
-        await markNotificationFailed(notificationId, `Send guard ${name} failed: ${outcome.error.message}`);
+        // The description, not the message: a guard that reads the database
+        // can fail with a statement's bound values in its message (#382).
+        await markNotificationFailed(
+            notificationId,
+            `Send guard ${name} failed: ${JSON.stringify(describeError(outcome.error, { stack: false }))}`,
+        );
         throw outcome.error;
     }
 

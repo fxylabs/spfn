@@ -33,7 +33,26 @@ import { registerRoutes } from '@spfn/core/route';
 const seams = vi.hoisted(() => ({
     jar: new Map<string, string>(),
     callbackFailure: null as null | (() => Error),
+    linkFailure: null as null | (() => Error),
 }));
+
+vi.mock('../../server/services/oauth-link.service', async (importActual) =>
+{
+    const actual = await importActual<typeof import('../../server/services/oauth-link.service')>();
+
+    return {
+        ...actual,
+        oauthLinkCallbackService: async (params: Parameters<typeof actual.oauthLinkCallbackService>[0]) =>
+        {
+            if (seams.linkFailure)
+            {
+                throw seams.linkFailure();
+            }
+
+            return await actual.oauthLinkCallbackService(params);
+        },
+    };
+});
 
 vi.mock('@spfn/core/db', async (importActual) => ({
     ...(await importActual<typeof import('@spfn/core/db')>()),
@@ -75,7 +94,7 @@ vi.mock('next/headers.js', () => ({
 import { NextRequest } from 'next/server';
 
 import { getOAuthProvider, registerOAuthProvider, type OAuthProvider } from '../../server/lib/oauth';
-import { createOAuthState } from '../../server/lib/oauth/state';
+import { createOAuthLinkState, createOAuthState } from '../../server/lib/oauth/state';
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
@@ -109,7 +128,7 @@ import {
     SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
-import { ValidationError } from '@spfn/core/errors';
+import { ServiceUnavailableError, ValidationError } from '@spfn/core/errors';
 import { mountProxy } from '../helpers/rpc-proxy';
 
 const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
@@ -204,6 +223,38 @@ async function pastTheGate(app: Hono): Promise<URLSearchParams>
     );
 }
 
+/** The link callback's redirect for a link state whose CSRF gate passes */
+async function linkPastTheGate(app: Hono): Promise<URLSearchParams>
+{
+    const state = await createOAuthLinkState({
+        provider: 'superself',
+        userId: '7',
+        returnUrl: '/settings',
+        nonce: NONCE,
+        startId: KEY_ID,
+        codeVerifier: 'verifier',
+        startedByKeyId: null,
+        keyEpoch: null,
+    });
+
+    return await errorRedirect(app, `code=c&state=${state}`, `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`);
+}
+
+/** The core console transport's lines at each level while `work` runs, colours stripped */
+async function levelLinesDuring(work: () => Promise<unknown>): Promise<{ error: string[]; warn: string[] }>
+{
+    const lines: string[] = [];
+    const keep = (line: unknown) =>
+    {
+        lines.push(String(line).replace(/\x1b\[[0-9;]*m/g, ''));
+    };
+    const spies = [vi.spyOn(console, 'error').mockImplementation(keep), vi.spyOn(console, 'warn').mockImplementation(keep), vi.spyOn(console, 'log').mockImplementation(keep)];
+
+    await work().finally(() => spies.forEach(spy => spy.mockRestore()));
+
+    return { error: lines.filter(line => line.includes('(ERROR)')), warn: lines.filter(line => line.includes('(WARN)')) };
+}
+
 /** A pending session sealed for `keyId`, its private key a fresh one. */
 /**
  * A callback request as the browser makes it — the jar on its `cookie` header —
@@ -295,6 +346,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         vi.unstubAllEnvs();
         exchange.failure = null;
         seams.callbackFailure = null;
+        seams.linkFailure = null;
     });
 
     it('R1: the provider returned error=access_denied — cancelled, the text unchanged', async () =>
@@ -365,14 +417,18 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         }
     });
 
-    it('R6: missing code or state, an unverified-email link refusal, a missing role, anything else — failed, the text unchanged', async () =>
+    it('R6: missing code or state, an unverified-email link refusal — failed, the text unchanged; a missing role, anything else — failed, a fixed text (#382)', async () =>
     {
         const missing = await errorRedirect(app, `state=${await stateIssued()}`);
 
         expect([missing.get('reason'), missing.get('error')]).toEqual(['failed', 'Missing authorization code or state']);
 
+        seams.callbackFailure = () => new UnverifiedEmailLinkError();
+        const typed = await pastTheGate(app);
+
+        expect([typed.get('reason'), typed.get('error')]).toEqual(['failed', new UnverifiedEmailLinkError().message]);
+
         for (const failure of [
-            () => new UnverifiedEmailLinkError(),
             () => new Error('Default user role not found. Run initializeAuth() first.'),
             () => new Error('something nobody planned for'),
         ])
@@ -381,8 +437,79 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
 
             const params = await pastTheGate(app);
 
-            expect([params.get('reason'), params.get('error')]).toEqual(['failed', failure().message]);
+            expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
         }
+    });
+
+    it('R6b: the fixed text\'s fault is in the server log at error level; a typed error meant for the client is not logged as a fault (#382)', async () =>
+    {
+        const lines: string[] = [];
+        const stderr = vi.spyOn(console, 'error').mockImplementation((line: unknown) =>
+        {
+            lines.push(String(line).replace(/\x1b\[[0-9;]*m/g, ''));
+        });
+
+        try
+        {
+            seams.callbackFailure = () => new UnverifiedEmailLinkError();
+            await pastTheGate(app);
+            seams.callbackFailure = () => new Error('Default user role not found. Run initializeAuth() first.');
+            const params = await pastTheGate(app);
+
+            await vi.waitFor(() => expect(lines.join('\n')).toContain('Default user role not found'));
+            const errorLines = lines.filter(line => line.includes('(ERROR)'));
+
+            expect(params.get('error')).toBe('OAuth callback failed');
+            expect(errorLines.filter(line => line.includes('Default user role not found'))).toHaveLength(1);
+            expect(errorLines.join('\n')).not.toContain(new UnverifiedEmailLinkError().message);
+        }
+        finally
+        {
+            stderr.mockRestore();
+        }
+    });
+
+    it('R6d: a typed 5xx is a fault — logged at error level as core\'s error handler logs it, its text kept in the redirect (#382)', async () =>
+    {
+        seams.callbackFailure = () => new ServiceUnavailableError({ message: 'Sign-in is down for maintenance' });
+        let params = new URLSearchParams();
+
+        const lines = await levelLinesDuring(async () =>
+        {
+            params = await pastTheGate(app);
+        });
+
+        expect(params.get('error')).toBe('Sign-in is down for maintenance');
+        expect(lines.error.filter(line => line.includes('OAuth callback failed'))).toHaveLength(1);
+        expect(lines.error.join('\n')).toContain('ServiceUnavailableError');
+    });
+
+    it('R6e: a link callback that fails on a fault is logged at error level, not only turned into the outcome failed (#382)', async () =>
+    {
+        vi.stubEnv('SPFN_APP_URL', 'https://app.example');
+        seams.linkFailure = () => new Error('Default user role not found. Run initializeAuth() first.');
+        let params = new URLSearchParams();
+
+        const lines = await levelLinesDuring(async () =>
+        {
+            params = await linkPastTheGate(app);
+        });
+
+        expect([params.get('oauthLink'), params.get('provider')]).toEqual(['failed', 'superself']);
+        expect(lines.error.filter(line => line.includes('OAuth link failed'))).toHaveLength(1);
+        expect(lines.error.join('\n')).toContain('Default user role not found');
+    });
+
+    it('R6c: a provider error shaped like a typed one (numeric statusCode, toJSON) redirects with the fixed text, not its own (#382)', async () =>
+    {
+        seams.callbackFailure = () => Object.assign(new Error('invalid_grant: refresh token of tenant internal-42 revoked'), {
+            statusCode: 400,
+            toJSON: () => ({ __type: 'ProviderError', message: 'invalid_grant: refresh token of tenant internal-42 revoked' }),
+        });
+
+        const params = await pastTheGate(app);
+
+        expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
     });
 });
 
@@ -573,6 +700,22 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         expect(await runOAuthCallback(`?userId=7&keyId=${keyId}`, { apiBasePath: '/api/rpc', fetch: brokenFetch }))
             .toMatchObject({ kind: 'error', reason: 'failed' });
         expect(await outcomeFor('?userId=7')).toMatchObject({ kind: 'error', reason: 'failed' });
+    });
+
+    it('R9d: a finalize whose fetch throws — failed with a fixed sentence, never the caught error\'s text (#382)', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const throwingFetch = (async () =>
+        {
+            throw new TypeError('connect ECONNREFUSED 10.9.8.7:8790 secret-host.internal');
+        }) as unknown as CallbackOptions['fetch'];
+
+        for (const search of [`?userId=7&keyId=${keyId}`, `?mfaChallenge=c-1&keyId=${keyId}`])
+        {
+            const outcome = await runOAuthCallback(search, { apiBasePath: '/api/rpc', fetch: throwingFetch });
+
+            expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+        }
     });
 
     /** The finalize a callback page posts, through the proxy rules, answered by the real route. */

@@ -2,6 +2,7 @@
  * Workflow Engine Types
  */
 
+import { logger } from '@spfn/core/logger';
 import type { WorkflowDef, WorkflowEvent } from '../builder';
 import type { WorkflowExecution, WorkflowStepExecution } from '../entities';
 
@@ -17,14 +18,13 @@ export interface WorkflowLogger
 }
 
 /**
- * Default console logger
+ * Default logger: core's, as `@spfn/workflow`
+ *
+ * The engine hands a caught error over as `{ error }`, which core's logger
+ * describes (#382). The console printed the error object whole — a failed
+ * statement's bound values with it.
  */
-export const defaultLogger: WorkflowLogger = {
-    info: (message, ...args) => console.log(message, ...args),
-    error: (message, ...args) => console.error(message, ...args),
-    warn: (message, ...args) => console.warn(message, ...args),
-    debug: (message, ...args) => console.debug(message, ...args),
-};
+export const defaultLogger: WorkflowLogger = logger.child('@spfn/workflow');
 
 /**
  * Workflow engine configuration
@@ -47,7 +47,7 @@ export interface WorkflowEngineConfig
     largeOutputThreshold?: number;
 
     /**
-     * Custom logger (optional, defaults to console)
+     * Custom logger (optional, defaults to core's logger as `@spfn/workflow`)
      */
     logger?: WorkflowLogger;
 

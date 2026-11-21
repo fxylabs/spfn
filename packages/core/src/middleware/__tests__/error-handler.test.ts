@@ -4,7 +4,7 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Hono, type Context } from 'hono';
-import { Logger } from '@spfn/core/logger';
+import { describeError, Logger } from '@spfn/core/logger';
 import { ErrorHandler, type OnErrorContext } from '../error-handler';
 import { RequestLogger } from '../request-logger';
 import { captureLoggerClass, expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
@@ -152,7 +152,8 @@ describe('ErrorHandler Middleware', () =>
 
             expect(res.status).toBe(500);
             expect(json.__type).toBe('Error');
-            expect(json.message).toBe('Something went wrong');
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toMatchObject({ kind: 'error', name: 'Error', message: 'Something went wrong' });
         });
 
         it('should handle Error with custom statusCode', async () =>
@@ -173,7 +174,8 @@ describe('ErrorHandler Middleware', () =>
 
             expect(res.status).toBe(418);
             expect(json.__type).toBe('Error');
-            expect(json.message).toBe('Custom error');
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toMatchObject({ kind: 'error', name: 'Error', message: 'Custom error' });
         });
 
         it('should provide default message for empty error', async () =>
@@ -212,8 +214,8 @@ describe('ErrorHandler Middleware', () =>
             const json: any = await res.json();
 
             expect(res.status).toBe(404);
-            expect(json.stack).toBeDefined();
-            expect(json.stack).toContain('NotFoundError');
+            expect(json.stack).toMatch(/^\s+at /);
+            expect(json.stack).not.toContain('Not found');
         });
 
         it('should exclude stack trace when includeStack is false', async () =>
@@ -234,41 +236,79 @@ describe('ErrorHandler Middleware', () =>
             expect(json.stack).toBeUndefined();
         });
 
-        it('should include stack trace for standard errors when enabled', async () =>
+        it('S1: a stack the serializer of a typed error returns is never answered, in development or production (#382)', async () =>
+        {
+            class CustomError extends NotFoundError
+            {
+                override toJSON()
+                {
+                    return { ...super.toJSON(), stack: 'CustomError: tenant-secret-value' };
+                }
+            }
+
+            const thrown = new CustomError({ message: 'Not found' });
+            thrown.stack = 'CustomError: tenant-secret-value';
+
+            for (const includeStack of [true, false])
+            {
+                const app = new Hono();
+
+                app.onError(ErrorHandler({ includeStack, enableLogging: false }));
+                app.get('/error', () =>
+                {
+                    throw thrown;
+                });
+
+                const res = await app.request('/error');
+                const json: any = await res.json();
+
+                expect(res.status).toBe(404);
+                expect(json.__type).toBe('CustomError');
+                expect(json).not.toHaveProperty('stack');
+                expect(JSON.stringify(json)).not.toContain('tenant-secret-value');
+            }
+        });
+
+        it('H1: a standard error under includeStack answers its description, never its message, cause or stack (#382)', async () =>
         {
             const app = new Hono();
+            const thrown = new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND secret-host.internal') });
 
             app.onError(ErrorHandler({ includeStack: true, enableLogging: false }));
 
             app.get('/error', () =>
             {
-                throw new Error('Standard error');
+                throw thrown;
             });
 
             const res = await app.request('/error');
             const json: any = await res.json();
 
             expect(res.status).toBe(500);
-            expect(json.stack).toBeDefined();
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toEqual(JSON.parse(JSON.stringify(describeError(thrown))));
+            expect(json.cause).toBeUndefined();
+            expect(json.stack).toBeUndefined();
+            expect(JSON.stringify(json)).not.toContain('TypeError: fetch failed');
         });
     });
 
-    describe('Duck Typing for SerializableError', () =>
+    describe('SerializableError identity', () =>
     {
-        it('should handle duck-typed SerializableError-like objects', async () =>
+        it('S3: a provider error shaped like a typed one is answered as a standard error, not with its toJSON (#382)', async () =>
         {
             const app = new Hono();
 
-            app.onError(ErrorHandler({ enableLogging: false }));
+            app.onError(ErrorHandler({ includeStack: false, enableLogging: false }));
 
             app.get('/duck', () =>
             {
-                // Create an error-like object with toJSON and statusCode
-                const error = new Error('Duck typed error') as any;
+                // A library's error with a numeric statusCode and a toJSON
+                const error = new Error('upstream said: tenant internal-42 over quota') as any;
                 error.statusCode = 403;
                 error.toJSON = () => ({
                     __type: 'CustomError',
-                    message: 'Duck typed error',
+                    message: 'upstream said: tenant internal-42 over quota',
                     customField: 'custom value',
                 });
                 throw error;
@@ -278,8 +318,9 @@ describe('ErrorHandler Middleware', () =>
             const json: any = await res.json();
 
             expect(res.status).toBe(403);
-            expect(json.__type).toBe('CustomError');
-            expect(json.customField).toBe('custom value');
+            expect(json.__type).toBe('Error');
+            expect(json.message).toBe('Internal Server Error');
+            expect(JSON.stringify(json)).not.toContain('internal-42');
         });
     });
 

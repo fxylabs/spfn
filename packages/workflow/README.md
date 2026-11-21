@@ -291,7 +291,7 @@ const engine = createWorkflowEngine({
     db: database,
     storage: s3Storage,              // Optional
     largeOutputThreshold: 1024 * 1024,  // 1MB (optional)
-    logger: customLogger,            // Optional (defaults to console)
+    logger: customLogger,            // Optional (defaults to core's logger as `@spfn/workflow`)
     validateInput: true,             // Optional (default: true)
 });
 ```
@@ -302,7 +302,7 @@ const engine = createWorkflowEngine({
 | `db` | `unknown` | (required) | Drizzle database instance |
 | `storage` | `OutputStorage` | - | External storage for large outputs |
 | `largeOutputThreshold` | `number` | `1048576` (1MB) | Byte threshold for external storage |
-| `logger` | `WorkflowLogger` | `defaultLogger` | Custom logger |
+| `logger` | `WorkflowLogger` | `defaultLogger` | Custom logger. The default is core's logger as `@spfn/workflow`; a caught error is handed over as `{ error }` |
 | `validateInput` | `boolean` | `true` | Validate input against schema |
 
 #### `engine.start(name, input)`
@@ -540,7 +540,7 @@ interface WorkflowEvent {
     stepIndex?: number;
     input?: unknown;
     output?: unknown;
-    error?: string;
+    error?: string;       // the error's description (describeError) as JSON text
     timestamp: Date;
 }
 ```
@@ -609,7 +609,7 @@ All tables are created in the `spfn_workflow` schema.
     status: WorkflowStatus;
     input: unknown;       // jsonb
     currentStep: number;
-    error?: string;
+    error?: string;       // the error's description (describeError) as JSON text
     createdAt: Date;
     updatedAt: Date;
     completedAt?: Date;
@@ -626,7 +626,7 @@ All tables are created in the `spfn_workflow` schema.
     stepIndex: number;
     status: WorkflowStepStatus;
     output?: unknown;     // jsonb or { $ref: url }
-    error?: string;
+    error?: string;       // the error's description (describeError) as JSON text
     startedAt?: Date;
     completedAt?: Date;
     createdAt: Date;

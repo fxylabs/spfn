@@ -3546,7 +3546,7 @@ const settled = !result.ok && result.retry ? await enrollPasskey(authApi, { retr
 The same holds for every other way the helper ends after the registration prompt without the
 passkey stored. A proof asked after it and dismissed is `no-credential` with `retry`. A rejection
 after it — `passkey-proof/options` refused (429, say), a refusal of the verify, or the network's
-`TypeError('fetch failed')` — stays a rejection, as every helper here rejects a failed call, and is
+failure (the api client's `ApiError` of type `'network'`) — stays a rejection, as every helper here rejects a failed call, and is
 the error as it came with `retry` on it: `enrollPasskeyRetryOf(error)` reads it, and is `undefined`
 for a rejection before the prompt, when nothing was made. A retry whose post the verify answers
 with the proof request runs the proof again, unless the app supplied it.
@@ -5126,7 +5126,13 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
 | `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written | unchanged |
-| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role | unchanged |
+| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement | a typed error's text unchanged; for any other error the fixed `OAuth callback failed` (`OAuth link failed` when the link state could not be read). The error is logged as core's error handler logs it: error level for an untyped error or a typed 5xx, warn for a refusal (#382) |
+
+The `error` text is a typed error's own message — a `SerializableError` meant for the client, not
+one marked `internal` — or a fixed sentence. Any other error's message (a failed statement's carries
+its SQL and every bound value) never reaches the redirect; `@spfn/auth:service` logs it at error
+level, the redirect's fixed sentence as the line's message and the error's description beside it.
+A typed error meant for the client is the user's answer, not a fault, and is not logged there.
 
 A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
 The callback asks the provider first, then does every write in one transaction, and builds the

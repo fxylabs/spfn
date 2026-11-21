@@ -69,7 +69,10 @@ name (two configs writing one path) or a record naming a file that is not there 
 build — clean `dist/` and build again). When it reports a module twice,
 keep `splitting: true` in the package's tsup config; a separate tsup config, such as auth's
 `'use client'` build, must reach the main build's modules by package name (or the package's private
-`imports`), never by a relative path.
+`imports`), never by a relative path. Auth and monitor do the latter: `#nextjs/client-shared` names
+a main-build entry, the vitest config aliases it to source, and the package's
+`scripts/check-bundle.mjs` calls `checkPrivateImports` (`scripts/lib/private-imports.mjs`) so that
+every `#…` import in `dist` resolves.
 
 Codegen and migrations (in packages/apps that use them):
 

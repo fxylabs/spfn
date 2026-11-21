@@ -17,7 +17,7 @@
  * | L7  | `subscription.granted` for it                          | `getRuntimeState` fetched once for the carried key; status back to `'ready'` |
  * | L8  | `write('consent', input)`                              | the write route called with the body; response applied; `current` reflects it before any frame |
  * | L9  | `get('runtime', w1)` on a client with no subscription  | fetch with `workspaceId=w1`; store entry created; no `EventSource` |
- * | L10 | fetch rejects (network) in `snapshot()`                | the promise rejects; store unchanged; listeners not called      |
+ * | L10 | fetch rejects (network) in `snapshot()`                | rejects with the api client's `'network'` error (`Network error`, the fetch error its `cause`); store unchanged; listeners not called |
  * | L11 | first `subscribe('consent')`                           | one `getStates` before any `EventSource`; its URL lists every id of the manifest |
  * | L12 | `subscribe('runtime', { teamId: 'x' })`, manifest says `['workspaceId']` | refused after the first snapshot, naming the state and the fields; no stream reopen |
  * | L13 | `write('member', …)`, manifest says `write: false`     | rejects naming the state; no fetch                              |
@@ -320,12 +320,13 @@ describe('state client — subscription lifecycle', () =>
         const before = h.client.current('consent');
         listener.mockClear();
 
+        const thrown = new TypeError('fetch failed');
         h.responders.getStates = () =>
         {
-            throw new TypeError('fetch failed');
+            throw thrown;
         };
 
-        await expect(h.client.snapshot()).rejects.toThrow('fetch failed');
+        await expect(h.client.snapshot()).rejects.toMatchObject({ message: 'Network error', errorType: 'network', cause: thrown });
         expect(h.client.current('consent')).toBe(before);
         expect(listener).not.toHaveBeenCalled();
         h.client.close();

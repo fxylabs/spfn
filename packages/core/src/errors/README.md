@@ -46,7 +46,9 @@ From `@spfn/core/errors`:
   `DeadlockError`, `DuplicateEntryError`
 - Namespaced re-exports: `HttpErrors` (`HttpErrors.NotFoundError`, …),
   `DatabaseErrors` (`DatabaseErrors.QueryError`, …)
-- Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`
+- Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`, `isSerializableError`
+- `errorLogLevel(error)`: the level the error handler logs a caught error at — `error` for a 5xx status (a typed error's `statusCode`, another error's numeric `statusCode`, else 500), `warn` otherwise
+- `SERIALIZABLE_ERROR_BRAND`: the `Symbol.for('spfn.core.serializableError')` key every `SerializableError` answers `true` under; `isSerializableError` reads it
 - Types: `SerializedError`, `SerializableErrorConstructor`, `ErrorRegistryInput`
 
 > **Every constructor takes a single object argument.** There is **no** positional form.
@@ -217,7 +219,12 @@ catch (error) { throw fromPostgresError(error); }
 `SerializableError.toJSON()` emits `{ __type: this.constructor.name, message, ...publicFields }`,
 skipping `name`, `message`, `stack`, and `statusCode`. The `ErrorHandler` middleware calls
 `toJSON()`, adds the `error` envelope, and responds with the matching status code (plus
-`stack` when `includeStack` is on).
+`stack` — the frames of `describeError(error)`, not the raw stack — when `includeStack` is on).
+
+The handler owns the answer's diagnostic key, `stack`. A `stack` returned by your own
+`toJSON()` override is removed in every mode; in development the handler then adds the
+description's frames, when the error has any. An error's serializer cannot put a stack, or
+anything else, into the answer under that key.
 
 ### Reserved field names
 
@@ -331,11 +338,12 @@ For a custom subclass to round-trip, **its constructor must accept the serialize
 ## Type guards
 
 ```typescript
-import { isHttpError, isDatabaseError, hasStatusCode } from '@spfn/core/errors';
+import { isHttpError, isDatabaseError, hasStatusCode, isSerializableError } from '@spfn/core/errors';
 
 if (isDatabaseError(error)) { /* error: DatabaseError — has .statusCode, .details */ }
 if (isHttpError(error))     { /* error: HttpError */ }
 if (hasStatusCode(error))   { /* error: { statusCode: number } */ }
+if (isSerializableError(error)) { /* error: SerializableError — read off its brand (SERIALIZABLE_ERROR_BRAND, a Symbol.for key): true for a copy of the class loaded twice in dev, false for any other object with a toJSON and a numeric statusCode */ }
 ```
 
 ---

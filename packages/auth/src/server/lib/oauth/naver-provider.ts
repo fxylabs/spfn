@@ -247,9 +247,7 @@ async function withNaverProfile(
 {
     const fetched = await fetchNaverIdentity(accessToken).catch((err: unknown) =>
     {
-        authLogger.service.warn('Naver user-info lookup failed; continuing without email', {
-            reason: err instanceof Error ? err.message : 'unknown',
-        });
+        authLogger.service.warn('Naver user-info lookup failed; continuing without email', { error: err });
 
         return null;
     });

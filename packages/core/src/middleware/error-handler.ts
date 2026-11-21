@@ -7,7 +7,8 @@ import { randomBytes } from 'node:crypto';
 
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { SerializableError, type SerializedError } from '@spfn/core/errors';
+import { errorLogLevel, isSerializableError } from '@spfn/core/errors';
+import type { SerializableError, SerializedError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
@@ -89,12 +90,6 @@ interface ErrorWithStatusCode extends Error
     details?: Record<string, unknown>;
 }
 
-interface SerializableErrorLike extends Error
-{
-    statusCode: number;
-    toJSON(): SerializedError;
-}
-
 interface ErrorLogData extends Record<string, unknown>
 {
     type: string;
@@ -109,10 +104,10 @@ interface StandardErrorResponse
 {
     __type: string;
     message: string;
-    cause?: string;
-    stack?: string;
     /** Outside production, a database error's description in place of its message, cause and stack */
     database?: Description;
+    /** Outside production, any other error's description in place of its message, cause and stack */
+    description?: Description;
 }
 
 /**
@@ -163,31 +158,6 @@ function resolveRequestId(c: Context): string
     const existing = c.get('requestId') as string | undefined;
 
     return existing ?? randomBytes(16).toString('hex');
-}
-
-/**
- * Extract root cause message from nested Error.cause chain
- */
-function extractCauseMessage(err: Error): string | undefined
-{
-    const cause = (err as any).cause;
-
-    if (!cause)
-    {
-        return undefined;
-    }
-
-    if (cause instanceof Error)
-    {
-        return cause.message;
-    }
-
-    if (typeof cause === 'string')
-    {
-        return cause;
-    }
-
-    return String(cause);
 }
 
 const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'x-auth-token']);
@@ -268,7 +238,7 @@ function logError(
     includeStack: boolean,
 ): void
 {
-    const logLevel = logData.statusCode >= 500 ? 'error' : 'warn';
+    const logLevel = errorLogLevel(err);
 
     if (includeStack)
     {
@@ -295,11 +265,11 @@ function isDatabaseDescription(description: Description): boolean
 }
 
 /**
- * The body for an error that is not a SerializableError. Its message, cause
- * and stack may carry raw SQL or driver text, so production gets a generic
- * message only. Outside production a database error is answered with its
- * description — never its message, cause or stack, which hold the bound
- * values — and any other error with its message, cause and stack.
+ * The body for an error that is not a SerializableError. Production gets a
+ * generic message only. Outside production the body carries the error's
+ * description — never its message, cause or stack, which may hold raw SQL,
+ * bound values or an internal host — in `database` for a database error and in
+ * `description` for any other.
  */
 function standardErrorResponse(err: Error, includeStack: boolean): StandardErrorResponse
 {
@@ -315,20 +285,22 @@ function standardErrorResponse(err: Error, includeStack: boolean): StandardError
         return { __type: 'Error', message: 'Database error', database: description };
     }
 
-    const response: StandardErrorResponse = { __type: 'Error', message: err.message || 'Internal Server Error' };
-    const causeMessage = extractCauseMessage(err);
+    return { __type: 'Error', message: 'Internal Server Error', description };
+}
 
-    if (causeMessage)
-    {
-        response.cause = causeMessage;
-    }
+/**
+ * The answer of a typed error: its `toJSON()` with the diagnostic keys the
+ * handler owns written by the handler alone. `stack` is such a key — a
+ * `stack` the error's own serializer returns is removed in every mode, and in
+ * development the frames of `describeError(err)` take its place when there
+ * are any, never the raw stack with its message line.
+ */
+function serializeTypedError(err: SerializableError, includeStack: boolean): SerializedError
+{
+    const { stack: _serializerStack, ...serialized }: SerializedError = err.toJSON();
+    const frames = includeStack ? describeError(err).stack : undefined;
 
-    if (err.stack)
-    {
-        response.stack = err.stack;
-    }
-
-    return response;
+    return frames ? { ...serialized, stack: frames } : serialized;
 }
 
 /**
@@ -345,18 +317,6 @@ function setRetryAfter(c: Context, err: Error): void
     {
         c.header('Retry-After', String(Math.ceil(retryAfter)));
     }
-}
-
-/**
- * Type guard for SerializableError
- *
- * Uses duck typing to handle module duplication issues in dev mode (tsx)
- */
-function isSerializableError(err: Error): err is SerializableErrorLike
-{
-    return err instanceof SerializableError ||
-        (typeof (err as any).toJSON === 'function' &&
-         typeof (err as any).statusCode === 'number');
 }
 
 /**
@@ -457,16 +417,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
 
             setRetryAfter(c, err);
 
-            // Use toJSON() for automatic serialization
-            const serialized = err.toJSON();
-
-            // Add stack trace in development
-            if (includeStack && err.stack)
-            {
-                serialized.stack = err.stack;
-            }
-
-            return respond(c, serialized, statusCode);
+            return respond(c, serializeTypedError(err, includeStack), statusCode);
         }
 
         // Handle standard errors (fallback)
