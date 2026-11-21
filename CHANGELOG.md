@@ -450,7 +450,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account may still reset to the password it had). `GET /_auth/session`, the web
   OAuth finalize answer and the native OAuth answer now carry `passwordChangeRequired`.
   `createAuthLifecycle()`'s `afterRoutes` now refuses to boot an app built by another copy of Hono
-  whatever the second-factor policy, since a flagged account's request reads its route. Mobile contract
+  whatever the second-factor policy (next entry). Mobile contract
   **0.15.0** (supported range `>=0.15.0 <0.16.0`): the new code, an optional `passwordChange` on each
   operation that can answer it, and `OauthNativeResponse.passwordChangeRequired`; `PUT /_auth/password`
   is not a contract operation — a native client clears the requirement off-contract, as it enrols a
@@ -462,6 +462,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   false WHERE id IN (…);`. Seeding sets it only on accounts it creates; `passwordChangeRequired: false`
   in `SPFN_AUTH_ADMIN_ACCOUNTS` seeds an account without it. An app that enforced the flag itself
   should stop calling its own routes from its change-password page. No schema change, no migration.
+- **BREAKING (boot): @spfn/auth: `afterRoutes` refuses another copy of Hono in every app (#362).** It
+  used to refuse an app built by a second copy of `hono` only while `secondFactor.required` was set;
+  an app with no second-factor policy booted. It now refuses that app too: seeding flags accounts in
+  any app, and a flagged account's every request — `PUT /_auth/password` included — reads which route
+  it matched, which a second copy hides, so the app would boot and answer that account 500 on the
+  change that frees it. Refusing only those requests was the alternative and was not taken: it is the
+  same 500, found by the first seeded admin rather than at deploy. **Migrate:** an app that boots on
+  two copies today (`pnpm why hono`; an app run as CommonJS beside an ESM server) resolves `hono` to
+  one install and runs as one module format. A custom `app.ts`, which core does not run this hook for,
+  still answers the flagged account's request 500 instead.
 - **BREAKING (behaviour): @spfn/auth: a password change keeps the session that made it (#372).**
   `PUT /_auth/password` used to revoke every key of the account, the caller's included, so the person
   changing their password was signed out by it — and on an enrolled account signed back in as a new
