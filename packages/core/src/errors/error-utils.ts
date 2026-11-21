@@ -56,3 +56,18 @@ export function isSerializableError(error: unknown): error is SerializableError
         && error !== null
         && (error as { [SERIALIZABLE_ERROR_BRAND]?: unknown })[SERIALIZABLE_ERROR_BRAND] === true;
 }
+
+/**
+ * The level core's error handler logs a caught error at: `error` for a fault,
+ * `warn` for a refusal. The status decides — a typed error's `statusCode`,
+ * another error's numeric `statusCode`, else 500 — so a typed 5xx is a fault
+ * like an untyped error. A package that answers a caught error itself (an
+ * OAuth redirect, a link outcome) logs it by this rule too, so the operator's
+ * trace does not depend on which code path answered.
+ */
+export function errorLogLevel(error: unknown): 'error' | 'warn'
+{
+    const status = hasStatusCode(error) && error.statusCode !== 0 ? error.statusCode : 500;
+
+    return status >= 500 ? 'error' : 'warn';
+}

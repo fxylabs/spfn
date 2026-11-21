@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { isSerializableError } from '@spfn/core/errors';
+import { errorLogLevel, isSerializableError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
@@ -229,7 +229,7 @@ function logError(
     includeStack: boolean,
 ): void
 {
-    const logLevel = logData.statusCode >= 500 ? 'error' : 'warn';
+    const logLevel = errorLogLevel(err);
 
     if (includeStack)
     {

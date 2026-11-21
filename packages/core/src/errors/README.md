@@ -47,6 +47,7 @@ From `@spfn/core/errors`:
 - Namespaced re-exports: `HttpErrors` (`HttpErrors.NotFoundError`, …),
   `DatabaseErrors` (`DatabaseErrors.QueryError`, …)
 - Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`, `isSerializableError`
+- `errorLogLevel(error)`: the level the error handler logs a caught error at — `error` for a 5xx status (a typed error's `statusCode`, another error's numeric `statusCode`, else 500), `warn` otherwise
 - `SERIALIZABLE_ERROR_BRAND`: the `Symbol.for('spfn.core.serializableError')` key every `SerializableError` answers `true` under; `isSerializableError` reads it
 - Types: `SerializedError`, `SerializableErrorConstructor`, `ErrorRegistryInput`
 

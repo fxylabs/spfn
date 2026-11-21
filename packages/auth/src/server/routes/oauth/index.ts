@@ -52,6 +52,7 @@ import {
     oauthLinkResultUrl,
     unlinkOAuthService,
 } from '../../services';
+import { logOAuthFailure } from '../../services/oauth.service';
 import { assertSignInProvider, isSignInProvider } from '../../lib/config';
 import { isGoogleOAuthEnabled, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import {
@@ -205,9 +206,15 @@ async function oauthLinkCallbackRedirect(
     return oauthLinkResultUrl(link, outcome);
 }
 
-/** A failed link's outcome, by the error's type — the same classes a sign-in's reason reads. */
+/**
+ * A failed link's outcome, by the error's type — the same classes a sign-in's
+ * reason reads. The outcome is all the redirect carries, so the error is
+ * logged here, by core's error handler's rule (#382).
+ */
 function linkOutcomeOf(err: unknown): OAuthLinkOutcome
 {
+    logOAuthFailure(err, 'OAuth link failed');
+
     if (err instanceof OAuthProviderError)
     {
         return 'provider_error';

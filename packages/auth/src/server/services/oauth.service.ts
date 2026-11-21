@@ -8,7 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { isSerializableError, ValidationError } from '@spfn/core/errors';
+import { errorLogLevel, isSerializableError, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
@@ -1126,21 +1126,32 @@ export function oauthErrorReason(error: unknown): OAuthErrorReason
  * `internal`, by core's own `isSerializableError`, the check its error handler
  * makes — keeps its message, as that handler answers it. Any
  * other error's message may carry a failed statement's SQL and bound values,
- * so the redirect carries `fallback` instead, and the error goes to the server
- * log at error level: the redirect no longer carries it, and a sign-in that
- * fails on a fault (a missing default role, a database error) must still leave
- * the operator a line. The reason is the error's type either way.
+ * so the redirect carries `fallback` instead. The reason is the error's type
+ * either way.
+ *
+ * The redirect is the answer core's error handler would otherwise have given,
+ * so the error is logged as that handler logs it (`logOAuthFailure`): a sign-in
+ * that fails on a fault — a missing default role, a database error, a typed
+ * 5xx — must still leave the operator a line.
  */
 export function oauthFailureUrl(error: unknown, fallback: string): string
 {
     const forClient = isSerializableError(error) && (error as { internal?: boolean }).internal !== true;
 
-    if (!forClient)
-    {
-        authLogger.service.error(fallback, { error });
-    }
+    logOAuthFailure(error, fallback);
 
     return buildOAuthErrorUrl(forClient ? error.message : fallback, oauthErrorReason(error));
+}
+
+/**
+ * Log a caught OAuth failure that is answered without core's error handler, by
+ * that handler's rule (`errorLogLevel` from `@spfn/core/errors`): `error` for a
+ * fault (5xx, an untyped error), `warn` for a refusal. The message is a fixed
+ * sentence; the error goes to the logger, which describes it.
+ */
+export function logOAuthFailure(error: unknown, message: string): void
+{
+    authLogger.service[errorLogLevel(error)](message, { error });
 }
 
 /**

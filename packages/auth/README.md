@@ -5120,7 +5120,7 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 | `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
 | `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written | unchanged |
-| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement | a typed error's text unchanged; for any other error the fixed `OAuth callback failed` (`OAuth link failed` when the link state could not be read) (#382) |
+| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement | a typed error's text unchanged; for any other error the fixed `OAuth callback failed` (`OAuth link failed` when the link state could not be read). The error is logged as core's error handler logs it: error level for an untyped error or a typed 5xx, warn for a refusal (#382) |
 
 The `error` text is a typed error's own message — a `SerializableError` meant for the client, not
 one marked `internal` — or a fixed sentence. Any other error's message (a failed statement's carries

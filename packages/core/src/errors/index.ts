@@ -74,6 +74,7 @@ export {
     isHttpError,
     hasStatusCode,
     isSerializableError,
+    errorLogLevel,
 } from './error-utils';
 
 export const errorRegistry = new ErrorRegistry();

@@ -315,8 +315,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser's address bar and the app's access logs. The parameter is now `OAuth callback failed`
   (`OAuth link failed` when the link state could not be read); `reason` is unchanged (`failed`), and
   typed errors keep their text and their reason. A missing role (`Default user role not found…`)
-  is one of those errors: its page now shows the fixed sentence, and `@spfn/auth:service` logs the
-  error at error level with its description (the fixed sentence is the line's message).
+  is one of those errors: its page now shows the fixed sentence. `@spfn/auth:service` logs every
+  error the redirect answers, and every failure of a link callback (whose redirect carries only
+  `oauthLink=failed`), with its description, by core's error handler's rule (`errorLogLevel`): error
+  level for an untyped error or a typed 5xx, warn for a refusal (the fixed sentence is the line's
+  message).
   `oauthFailureUrl(error, fallback)` from `@spfn/auth/server` builds that redirect beside
   `buildOAuthErrorUrl`.
 - **BREAKING: @spfn/auth: log lines hand the caught error to core's logger (#382).** The context
@@ -390,9 +393,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `describeError` description, as a database error's already was in `database`. A
   `SerializableError`'s `stack` is now the description's frames, without the header line (its
   message is in the body already). Production answers are unchanged.
-- **@spfn/core: `isSerializableError(error)` from `@spfn/core/errors` (#382).** The error
-  handler's check for a typed error is now exported, and auth's OAuth error redirect asks it instead
-  of its own `instanceof`, so both give one answer.
+- **@spfn/core: `isSerializableError(error)` and `errorLogLevel(error)` from `@spfn/core/errors`
+  (#382).** The error handler's check for a typed error is now exported, and auth's OAuth error
+  redirect asks it instead of its own `instanceof`, so both give one answer. `errorLogLevel` is the
+  handler's level rule (`error` when the status — a typed error's `statusCode`, another error's
+  numeric `statusCode`, else 500 — is 5xx, `warn` otherwise), which the handler and auth's OAuth
+  failure log both read.
 - **BREAKING: @spfn/core: a typed error is known by its brand, not its shape (#382).** The error
   handler took any object with a `toJSON()` and a numeric `statusCode` for a `SerializableError` —
   `instanceof` fails across the two copies of the module dev can load — so a provider's or
@@ -403,7 +409,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass and `toJSON()` never copies it; `isSerializableError` reads only the brand. An app error
   class that answered through the handler by shape alone must extend `SerializableError`.
 - **@spfn/auth, @spfn/monitor, @spfn/workflow, @spfn/notification need the `@spfn/core` that
-  exports `describeError` (#382)**, auth also the one that exports `isSerializableError`. Their peer
+  exports `describeError` (#382)**, auth also the one that exports `isSerializableError` and
+  `errorLogLevel`. Their peer
   range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1, which exports neither; release them together with core.
 - **BREAKING (behaviour, under `secondFactor.required: true` only): @spfn/auth: a user-verified
   passkey registration is marked as a second factor whenever the policy requires one (#399).**
