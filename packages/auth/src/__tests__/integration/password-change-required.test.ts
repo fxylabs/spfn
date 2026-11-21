@@ -38,7 +38,7 @@ import {
 } from '../helpers/oauth2';
 import { mfaTotp, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
-import { deviceLinksRepository } from '@/server/repositories';
+import { deviceLinksRepository, usersRepository } from '@/server/repositories';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { __resetChannelsForTests, configureChannels } from '@/server/lib/channels-config';
@@ -358,6 +358,22 @@ describe.skipIf(!dbAvailable)('passwordChangeRequired is a restricted session (#
         expect(whoami.status).toBe(200);
         expect(await whoami.json()).toEqual({ userId: String(userId) });
         expect(await (await request('GET', '/_auth/session', session.authorization)).json()).toMatchObject({ passwordChangeRequired: false });
+    });
+
+    it('P3c: the session read reports the flag admission read on the primary, not what a lagging replica still holds', async () =>
+    {
+        const session = await signIn();
+        expect((await changePassword(session, PASSWORD, NEW_PASSWORD)).status).toBe(204);
+        // The replica read the session route makes, answering as one that has not caught up with the change.
+        const replicaRead = usersRepository.fetchMinimalUserData.bind(usersRepository);
+        const replica = vi.spyOn(usersRepository, 'fetchMinimalUserData')
+            .mockImplementation(async id => ({ ...await replicaRead(id), passwordChangeRequired: true }));
+
+        const read = await request('GET', '/_auth/session', session.authorization);
+
+        expect(read.status).toBe(200);
+        expect(replica).toHaveBeenCalled();
+        expect(await read.json()).toMatchObject({ passwordChangeRequired: false });
     });
 
     it('P3b: a change whose transaction fails after the clear leaves the flag set and the restriction in force', async () =>

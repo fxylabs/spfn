@@ -815,7 +815,9 @@ anything else. It is a restricted session, the same mechanism as the
 [enrolment-only state](#the-enrolment-only-state), and on by default: there is no option.
 
 - Its sign-in succeeds as usual and answers **`passwordChangeRequired: true`** — the `LoginResult`,
-  `mfa/verify`, the native OAuth answer and `oauth/finalize`. So does `GET /_auth/session`.
+  `mfa/verify`, the native OAuth answer and `oauth/finalize`. So does `GET /_auth/session`, from
+  the account row admission read on the primary for that request — never a replica that may not
+  have seen the change yet.
 - Every other request is **403 `PASSWORD_CHANGE_REQUIRED`** (`PasswordChangeRequiredError`), on the
   package's routes and the app's, with `details.requirements` listing what the account still has to
   do. 403 rather than 401: the session is not gone, and the Next.js proxy keeps it.
