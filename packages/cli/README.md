@@ -203,13 +203,15 @@ Starts the SPFN server + Next.js (and a codegen watcher, which generates under
 (via a `.spfn/server-ready` signal file) before Next.js launches. Runs through `tsx`,
 no pre-build needed.
 
-The codegen watcher is run by Node under a `tsx` CLI found in a `node_modules` directory on
-the way up from the app (the app's own, which wins), else on the way up from where `spfn`
-itself is installed — the one `spfn`'s bin re-spawns under. `NODE_PATH` is not consulted. With
-neither, the watcher is not started: `spfn dev` logs `Codegen watcher not started: no tsx is
-installed for the app or for the spfn CLI. Install it in the app: pnpm add -D tsx` and goes on
-without it, as when the watcher fails to start. It is never run through `pnpm exec`/`npx`,
-which do not let `spfn dev` wait for it.
+The server and the codegen watcher each run in a Node process of their own, started by `spfn dev`
+directly as `node --import <tsx> --import <spfn's module hook> <entry>`, with the `tsx` found in a
+`node_modules` directory on the way up from the app (the app's own, which wins), else on the way
+up from where `spfn` itself is installed — the one `spfn`'s bin runs under. `NODE_PATH` is not
+consulted. With neither, `spfn dev` starts nothing and exits 1 with `tsx is not installed in this
+project, and it is what loads TypeScript. Add it: pnpm add -D tsx` (your package manager's
+command). Neither child runs through `pnpm exec`/`npx`, which exit before what they run, nor
+through the `tsx` CLI, which relays a signal its child already got. Next.js runs through your
+`spfn:next` script (`pnpm run spfn:next --port <port>`). No child gets a stdin.
 
 The watcher loads the codegen config itself and loads it again when `.spfnrc.ts` (or
 `.spfnrc.json`, or the `spfn.codegen` key of `package.json`), a custom generator file, or a
@@ -219,29 +221,6 @@ config that fails to load — at start or after an edit — does not stop the wa
 nothing until the config loads again, and regenerates everything once it does. A changed
 generator *package* (under `node_modules`, or a rebuilt workspace package) still needs a restart
 ([@spfn/core codegen](../core/src/codegen/README.md#watch-mode)).
-
-On SIGINT or SIGTERM, `spfn dev` sends the server and Next.js SIGTERM, forwards the signal to
-the codegen watcher, and exits once the watcher has: the watcher finishes the generation, or the
-codegen config load, it is running first (`Codegen watcher stopping once the running generation or
-codegen config load finishes (signal again to exit now)`). Neither can be cancelled — a config
-load is a module evaluation — so one that never settles (a top-level `await` that never resolves
-in `.spfnrc.ts` or a custom generator) holds the watcher until a second signal. A second signal is
-forwarded too, and the watcher then exits at once, mid-generation or mid-load if one is running: whatever that generation would have reported — a `✓`/`✗` line, a failure held
-back from a run whose inputs changed while it ran — is dropped. Once a
-stop has begun, `spfn dev` starts no child: not Next.js when the server becomes ready during it,
-not a server restart (it logs `Next.js not started: spfn dev is stopping`). A SIGKILL of
-`spfn dev` reaches no child.
-
-So the route map and contract never come from two generations when one SIGTERM or SIGINT is
-sent to the pid of the process that runs `spfn dev`: the tsx child when `bin/spfn.js`
-re-spawned itself under tsx, the bin's own process when it did not. That does not hold for:
-
-- **Ctrl-C in a terminal.** The terminal sends SIGINT to the whole process group, so the
-  watcher gets it twice — from the terminal and from `spfn dev`'s forward — and exits at once,
-  mid-generation if one is running (as before this change).
-- **A signal to the `bin/spfn.js` pid alone**, when the bin re-spawned itself under tsx: that
-  outer process has no signal handler, so it exits and its children run on (read from the
-  source, not run).
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -262,6 +241,109 @@ its content actually changed.
 Pending migrations stop the boot — see [Database](#spfn-db) for what the refusal looks
 like and how to override it.
 
+#### Stopping `spfn dev`: signals
+
+`spfn dev` owns its process tree. Each child — the server, Next.js (with the package manager and
+`sh -c` its script runs under), the codegen watcher — is the leader of a process group of its
+own, and `spfn dev` stops it with one SIGTERM to that group, whatever the child runs under. It exits
+only once every group is empty, with no deadline of its own.
+
+| You send | to | Each child gets | `spfn dev` exits |
+|----------|----|-----------------|------------------|
+| Ctrl-C (or Ctrl-\\) in the terminal | the terminal's foreground group: `spfn dev` alone | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| `kill <pid>` / SIGTERM, SIGINT, SIGHUP or SIGQUIT from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| the same signal again, or SIGTERM / SIGHUP / SIGQUIT after a Ctrl-C | | nothing more | unchanged |
+| a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
+| — (stopping, the launcher exited **and** the shell has the terminal: one Ctrl-C to `pnpm exec spfn dev`, `pnpm spfn dev`, `yarn spfn dev` or yarn 1's `yarn dev`, also as `cat \| pnpm exec spfn dev`, `pnpm exec spfn dev \| tee log` or after `&` and `fg`; or `kill %1` / `kill -INT %1` to such a job in the background, after Ctrl-Z and `bg` too) | | SIGKILL, to every group left | at once, 130 |
+| Ctrl-C to `pnpm exec spfn dev \| tee -i log` (or any reader that outlives the Ctrl-C): pnpm exits, the job keeps the terminal | `spfn dev`, pnpm, `tee` | one SIGTERM, from `spfn dev`; a second Ctrl-C still reaches it, and `tee` exiting (killed) before the stop ends escalates it | after the last child, 0 |
+| Ctrl-C to `spfn dev \| tee log` (`tee` dies with it) | `spfn dev` and `tee` | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| `spfn dev \| head -1`: what reads the output exits, outside a stop | `spfn dev`, when its next line fails (EPIPE) | one SIGTERM, from `spfn dev` | after the last child, 141 (as SIGPIPE's) |
+| the terminal hangs up (window closed, SSH dropped), whatever launched `spfn dev` | `spfn dev` (SIGHUP) | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| Ctrl-Z, `bg`, then `kill %1` to `spfn dev` typed directly; one Ctrl-C to `true \| spfn dev`, or to a job whose launcher left on its own while the job kept the terminal | `spfn dev` | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| Ctrl-Z in the terminal | the terminal's foreground group: `spfn dev` alone | nothing: they run on | not: it is stopped until `fg` |
+| SIGKILL | `spfn dev` | nothing | at once |
+
+- **The pid you start is `spfn dev`'s.** `bin/spfn.js` re-runs itself under tsx in its own
+  process (`process.execve`) rather than in a child, so a signal to the pid a terminal, a process
+  manager or `kill` sees reaches `spfn dev` once, and its exit status is `spfn dev`'s. (On Windows,
+  which has neither `execve` nor process groups, the CLI runs as the bin's child, and each child of
+  `spfn dev` is signalled alone.) `process.execve` is "Stability: 1 – Experimental" on every Node.js
+  line spfn supports (22, 24, 26); a relaunch that fails stops the command with the error rather
+  than run it without the module hook.
+- **A terminal's Ctrl-C reaches each child once.** The children are not in the terminal's
+  foreground group, so the terminal's SIGINT reaches `spfn dev` only, and `spfn dev`'s SIGTERM
+  is the one signal each child gets.
+- **Each child is a session of its own** (Node's `detached` is `setsid`), with no controlling
+  terminal: nothing the terminal sends — Ctrl-C, Ctrl-\\, Ctrl-Z, a hangup — reaches it but through
+  `spfn dev`. So Ctrl-Z stops `spfn dev` alone; the children run on while it is stopped. No child gets a
+  stdin: reading the terminal it inherited, it would take what you type from the shell.
+- **A second Ctrl-C escalates, and so does a launcher that exits.** SIGTERM and SIGHUP always mean
+  "stop", however often they come: `pnpm exec spfn dev` relays a Ctrl-C as a SIGINT and then a
+  SIGTERM, and a closing terminal sends SIGHUP. A SIGINT once the stop has begun — a person pressing
+  Ctrl-C again, or `kill -INT` twice — means "stop waiting": it SIGKILLs every group left, and `spfn
+  dev` exits 130. It is the way out of a server shutdown that takes too long (core's deadline is
+  `SHUTDOWN_TIMEOUT`, 280 s by default) or a generation that never settles. Next.js's own processes
+  and the server's are SIGKILLed with the rest. When that second Ctrl-C can no longer arrive, it is
+  taken as given: when **both** the launcher has exited **and** another process group has the
+  terminal. Typed directly, `spfn dev` is the process its shell started, and its parent, the
+  shell, is outside the job's process group: it has no launcher. Under a launcher, the launcher is
+  `spfn dev`'s ancestors inside its own group, from its parent up — it need not lead the group: in
+  `cat | pnpm exec spfn dev` the leader is `cat` and the launcher is pnpm; in `true | spfn dev`
+  there is none. `pnpm dev`, `npm run dev` and `npx spfn dev` wait for `spfn dev`, holding the job
+  open, so a second Ctrl-C reaches it. `pnpm exec spfn dev`, `pnpm spfn dev`, `yarn spfn dev` and
+  yarn 1's `yarn dev` exit on the first Ctrl-C (yarn 1 leaves its `sh -c` behind as `spfn dev`'s
+  parent; yarn above it exits); the shell sees its job end, takes the terminal back, and a further
+  Ctrl-C — or `fg`, or `kill %1` — goes to the shell. Each fact alone is wrong: the terminal taken
+  with no launcher exited is job control (`spfn dev`, Ctrl-Z, `bg`, `kill %1`: `fg` and Ctrl-C
+  still reach it, the graceful stop), and the launcher exited with the job still holding the
+  terminal is a pipeline whose reader outlives the Ctrl-C (`pnpm exec spfn dev | tee -i log`, the
+  graceful stop; a second Ctrl-C still reaches `spfn dev`) or a launcher that left on its own. So
+  `spfn dev` finds its launcher when it starts and, when the stop begins and every 100 ms while it
+  runs, asks whether its outermost process — the one the shell started — has exited (`kill(pid,
+  0)`; EPERM, another user's process, is there) and, once it has, where the terminal sends a
+  Ctrl-C. Only the outermost counts: the shell's job ends, and the shell takes the terminal back,
+  when that process is gone, not an inner one. In `bash -c 'pnpm exec spfn dev; sleep 20'`, pnpm
+  exits on a Ctrl-C while `bash -c` waits on: the job is still the shell's, and `fg` and a Ctrl-C
+  still reach `spfn dev`. Under yarn 1, yarn is the outermost. When the terminal sends a Ctrl-C to
+  another group, the stop
+  escalates as a second Ctrl-C does — SIGKILL to every group left, exit 130 — at once, saying `the
+  launcher that started spfn dev has exited and the shell has the terminal, so no second Ctrl-C can
+  reach it: killing what is left of …`; no process is left holding the port behind the shell's
+  prompt. If both held before `spfn dev` handled the Ctrl-C, the server gets no SIGTERM first.
+  Without a controlling terminal — a process manager, CI, a terminal that hung up — nothing has the
+  terminal, so nothing escalates (the graceful stop, as for SIGTERM). Off Linux both are `ps`'s to
+  say: the launcher by one `ps` at start, not waited for (until it answers, or when it fails or
+  does not answer within a second, no launcher is known); the terminal by a `ps` started only
+  during the stop and once the launcher has exited, one at a time and at most one a second, so no
+  answer from before the stop decides it, and one that fails or does not answer escalates nothing.
+- **What reads `spfn dev`'s output exiting is a reason to stop, once.** A line `spfn dev` writes
+  then fails: EPIPE on a pipe whose reader exited, EIO on a terminal that hung up. Outside a stop —
+  `spfn dev | head -1` — that begins the graceful stop, as a signal does (a closed pipe is what
+  SIGPIPE stands for), and `spfn dev` exits 141 after its children: what a shell reports for a
+  process SIGPIPE ended (128 + 13). It did not finish its work; its reader went away, and `set -o
+  pipefail` or `$PIPESTATUS` says so as for any producer whose reader left. Note that `spfn dev` sees it only
+  on a line of its own: what the children write meets the closed pipe in the children. During a
+  stop — `spfn dev | tee log`, whose Ctrl-C kills `tee` too, or a hang-up — the stopping lines of
+  `spfn dev` and the codegen watcher fail, and those failures change nothing. Any other error on
+  stdout or stderr still ends `spfn dev` as an uncaught exception (below). The server's own output is
+  the server's: core's shutdown lines meet the same closed pipe.
+- **The watcher finishes what it is running first.** On its SIGTERM it finishes the generation,
+  or the codegen config load, it is running (`Codegen watcher stopping once the running generation
+  or codegen config load finishes`), so the route map and contract never
+  come from two generations. Neither can be cancelled — a config load is a module evaluation — so
+  one that never settles (a top-level `await` that never resolves in `.spfnrc.ts` or a custom
+  generator) holds the watcher until a second Ctrl-C, which kills it mid-generation or mid-load:
+  whatever that generation would have reported — a `✓`/`✗` line, a failure held back from a run
+  whose inputs changed while it ran — is dropped.
+- **Once a stop has begun, `spfn dev` starts no child:** not Next.js when the server becomes ready
+  during it, not a server restart (it logs `Next.js not started: spfn dev is stopping`).
+- **`--watch` restarts the server the same way:** one SIGTERM to the server's group, then the new
+  server starts once nothing is left in it — its port is free then.
+- **Next.js exiting with an error** stops the server and the watcher, then `spfn dev`, exit 1.
+- **`spfn dev` dying stops its children**: an uncaught exception SIGTERMs every child's group not signalled yet as `spfn dev` exits. Only a SIGKILL of `spfn dev`
+  reaches no child: their groups run on. A process manager that kills by process group must kill
+  each child's group, or the cgroup (systemd's default `KillMode=control-group` does).
+
 #### Your server source runs as ESM, as it does in production
 
 `spfn build` bundles `src/server` as ESM with esbuild whatever your `package.json` says, and
@@ -276,12 +358,14 @@ itself — entities under `spfn db generate`, `db push` and `db tenant`, `drizzl
 env`, your router under codegen — load as they do under `spfn dev`. (`drizzle-kit`, which `db
 generate`, `check`, `drop` and `studio` hand a `drizzle.config.ts` to, reads that file and the
 schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs
-the command without the hook, and a command that loads your TypeScript — `spfn env`, `spfn db`
+the command without the hook — only when no `tsx` package is found (`tsx/package.json` does not
+resolve); a `tsx` package that is there but whose entry cannot be resolved (a `package.json` that
+does not parse or cannot be read, an entry file missing) stops the command with `Error: spfn could not resolve tsx, which it re-runs itself under: …`, exit 1 — and a command that loads your TypeScript — `spfn env`, `spfn db`
 (`push`, `tenant`, and `generate` with the entity registry), `spfn provision` — stops before its
 first import with `tsx is not installed in this project, and it is what loads TypeScript. Add it:
 <your package manager's add command>` and exit code 1. The cost: every `spfn` command in a project
-re-spawns itself once to get the hook, and the hook's resolve takes its own time — ~73 ms of
-self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
+re-runs itself once (in its own process) to get the hook, and the hook's resolve takes its own
+time — ~73 ms of self-time over 2,815 resolves on `spfn --version` in example 01 (measured on the dev VM, Node 22,
 hook time minus Node's own resolve). The hook states the format of every file of yours that `tsx`
 would otherwise guess from `package.json`:
 

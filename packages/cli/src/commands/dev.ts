@@ -1,14 +1,16 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, rmSync, watch } from 'fs';
 import { dirname, join, relative, sep } from 'path';
-import { fileURLToPath } from 'url';
-import { execa, type ExecaChildProcess } from 'execa';
+import { createRequire } from 'module';
+import { fileURLToPath, pathToFileURL } from 'url';
 import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
 import { getCliVersion, getCorePeerRange } from '../utils/version.js';
-import { devLoaderImport, tsxCommand } from '../utils/dev-loader.js';
+import { devLoaderImport } from '../utils/dev-loader.js';
+import { DevSupervisor, type DevChild } from '../utils/dev-supervisor.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
-import { detectPackageManager, getAddCommand, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
+import { detectPackageManager, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
+import { missingTsxMessage } from '../utils/tsx-required.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
 import { loadAppConfig, resolvePorts, resolveHost } from '@spfn/core/app-config';
 
@@ -77,6 +79,22 @@ import { existsSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// The watcher outlives what reads its output: the Ctrl-C that kills \`tee\` in
+// \`spfn dev | tee log\` (EPIPE), or the terminal hanging up (EIO), fails the
+// stopping line, and that ends nothing; spfn dev, which gets the same error
+// outside a stop, stops the watcher then (DevSupervisor). Any other error on
+// stdout or stderr is thrown, as unhandled.
+for (const stream of [process.stdout, process.stderr])
+{
+    stream.on('error', (error) =>
+    {
+        if (error.code !== 'EPIPE' && !(error.code === 'EIO' && stream.isTTY))
+        {
+            throw error;
+        }
+    });
+}
 
 // The @spfn/core installed for the app: the package.json of the
 // node_modules/@spfn/core nearest this entry, where its import resolves.
@@ -160,7 +178,9 @@ const orchestrator = new CodegenOrchestrator({
 // contract) are never left from two different generations, or once the config
 // load running has finished; then exit. Neither a generation nor a config load
 // (a module evaluation) can be cancelled, so a second signal exits at once: it
-// is the only way to stop one that never settles.
+// is the only way to stop one that never settles. Under spfn dev the watcher
+// gets one SIGTERM whatever stopped spfn dev, and a second Ctrl-C makes spfn
+// dev SIGKILL it; spfn dev says whether one can still reach it.
 let stopping = false;
 
 const stop = async (signal) =>
@@ -171,7 +191,7 @@ const stop = async (signal) =>
     }
 
     stopping = true;
-    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes (signal again to exit now)');
+    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes');
     await orchestrator.close();
     process.exit(0);
 };
@@ -193,39 +213,16 @@ catch (error)
 }
 
 /**
- * Start the codegen watcher entry: a tsx CLI run by this Node, never through
- * the package manager. `spfn dev` forwards its signals to the watcher and waits
- * for it to exit (`DevChildren`), and neither wrapper lets it: `pnpm exec`
- * forwards SIGTERM and exits at once, `npx` exits without forwarding it, and
- * the watcher is orphaned. tsx relays each signal to the entry and exits when
- * it does. With no tsx to run (`resolveTsxCli`), the watcher is not started:
- * the session goes on without it, as when the watcher exits with an error.
- * Returns the watcher process, or null when none was started.
+ * The arguments that run `entry` in a Node process of its own under the app's
+ * tsx (`--import`, as `bin/spfn.js` runs the CLI) and the `spfn dev` hook — the
+ * server and the codegen watcher. Never through a wrapper: `pnpm exec` and `npx`
+ * exit before what they run, and the tsx CLI relays a signal its child already
+ * got unless the child reports it within 30 ms, so a child busy when it arrives
+ * gets it twice. The process `spfn dev` starts is the one that runs `entry`.
  */
-function startCodegenWatcher(pm: PackageManager, cwd: string, entry: string, env: NodeJS.ProcessEnv, stopping: () => boolean): ExecaChildProcess | null
+function tsxNodeArgs(tsxLoader: string, cwd: string, entry: string): string[]
 {
-    const tsxCli = resolveTsxCli(cwd);
-
-    if (tsxCli === undefined)
-    {
-        logger.error(`[SPFN] Codegen watcher not started: no tsx is installed for the app or for the spfn CLI. Install it in the app: ${getAddCommand(pm, ['tsx'], { dev: true })}`);
-        warnCodegenWatchDisabled();
-
-        return null;
-    }
-
-    const watcher = execa(process.execPath, [tsxCli, '--import', devLoaderImport(cwd), entry], { cwd, stdio: 'inherit', reject: false, env });
-
-    watcher.then((result) =>
-    {
-        if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
-        {
-            logger.error(`Codegen watcher exited with code ${result.exitCode}`);
-            warnCodegenWatchDisabled();
-        }
-    });
-
-    return watcher;
+    return ['--import', tsxLoader, '--import', devLoaderImport(cwd), entry];
 }
 
 function warnCodegenWatchDisabled(): void
@@ -234,21 +231,24 @@ function warnCodegenWatchDisabled(): void
 }
 
 /**
- * The tsx CLI the watcher runs under: the app's, else the one installed for
- * the spfn CLI itself (the tsx `bin/spfn.js` re-spawns under), else undefined.
+ * The `--import` URL of the tsx the server and the watcher run under: the
+ * app's, else the one installed for the spfn CLI itself (the tsx `bin/spfn.js`
+ * re-spawns under), else undefined.
  */
-function resolveTsxCli(cwd: string): string | undefined
+function resolveTsxLoader(cwd: string): string | undefined
 {
-    return tsxCliFrom(cwd) ?? tsxCliFrom(dirname(fileURLToPath(import.meta.url)));
+    const tsxDir = tsxPackageFrom(cwd) ?? tsxPackageFrom(dirname(fileURLToPath(import.meta.url)));
+
+    return tsxDir && pathToFileURL(createRequire(join(tsxDir, 'package.json')).resolve('tsx')).href;
 }
 
 /**
- * The bin of the tsx in the nearest `node_modules` on the way up from `from`:
+ * The tsx package in the nearest `node_modules` on the way up from `from`:
  * Node's lookup of a package without `NODE_PATH`. Package-manager shims (a
  * pnpm bin script, npx) point `NODE_PATH` at their store, which would hand the
- * watcher a tsx nothing on that path declares.
+ * children a tsx nothing on that path declares.
  */
-function tsxCliFrom(from: string): string | undefined
+function tsxPackageFrom(from: string): string | undefined
 {
     let directory = from;
 
@@ -262,82 +262,7 @@ function tsxCliFrom(from: string): string | undefined
         directory = dirname(directory);
     }
 
-    const tsxDir = join(directory, 'node_modules/tsx');
-    const { bin } = JSON.parse(readFileSync(join(tsxDir, 'package.json'), 'utf-8'));
-
-    return join(tsxDir, typeof bin === 'string' ? bin : bin.tsx);
-}
-
-type DevChildName = 'server' | 'Next.js' | 'codegen watcher';
-
-/**
- * The children `spfn dev` runs, stopped together on SIGINT and SIGTERM. The
- * codegen watcher is sent every signal this process receives, and this process
- * exits only once the watcher has: on the first signal the watcher finishes the
- * generation running, on a second it exits at once (`watcherEntrySource`).
- * Exiting before it would leave a watcher writing into the project after
- * `spfn dev` was stopped. The server and Next.js are sent SIGTERM once and not
- * waited for: the server's shutdown deadline is core's (`SHUTDOWN_TIMEOUT`),
- * and it ignores a second signal. No child gets execa's default SIGKILL 5 s
- * after a SIGTERM: for the watcher it would kill tsx mid-generation and orphan
- * the entry tsx runs, which a SIGKILL is not relayed to. Nothing forwards a
- * SIGKILL this process gets.
- */
-class DevChildren
-{
-    private readonly children = new Map<DevChildName, ExecaChildProcess>();
-    private stopping = false;
-
-    constructor()
-    {
-        process.on('SIGINT', signal => this.stop(signal));
-        process.on('SIGTERM', signal => this.stop(signal));
-    }
-
-    /**
-     * The only way `spfn dev` starts a child: `launch` runs and its child is
-     * registered under `name`, replacing the one before (a restarted server).
-     * Once a stop has begun it says so, starts nothing, and returns null: a
-     * child started after the stop signalled the others would never be signalled.
-     */
-    start(name: DevChildName, launch: () => ExecaChildProcess | null): ExecaChildProcess | null
-    {
-        if (this.stopping)
-        {
-            logger.info(`[SPFN] ${name} not started: spfn dev is stopping`);
-
-            return null;
-        }
-
-        const child = launch();
-
-        if (child)
-        {
-            this.children.set(name, child);
-        }
-
-        return child;
-    }
-
-    /** Whether a stop has begun. */
-    readonly isStopping = (): boolean => this.stopping;
-
-    private async stop(signal: NodeJS.Signals): Promise<void>
-    {
-        const watcher = this.children.get('codegen watcher');
-
-        watcher?.kill(signal, { forceKillAfterTimeout: false });
-
-        if (this.stopping)
-        {
-            return;
-        }
-
-        this.stopping = true;
-        this.children.forEach((child, name) => name !== 'codegen watcher' && child.kill('SIGTERM', { forceKillAfterTimeout: false }));
-        await watcher;
-        process.exit(0);
-    }
+    return join(directory, 'node_modules/tsx');
 }
 
 /**
@@ -388,6 +313,10 @@ export const devCommand = new Command('dev')
         // Dev mode runs multiple concurrent processes (SPFN server, contract watcher, Next.js)
         // Each process adds event listeners (SIGTERM, SIGINT, exit, etc.)
         process.setMaxListeners(20);
+
+        // First: what stops spfn dev — a signal, its output's reader gone —
+        // stops every child it starts, from the first.
+        const children = new DevSupervisor();
 
         // Set NODE_ENV to development (Next.js style)
         if (!process.env.NODE_ENV) 
@@ -529,264 +458,153 @@ writeFileSync(${JSON.stringify(readyFile)}, String(instance.config.port));
         writeFileSync(watcherEntry, watcherEntrySource());
 
         const pm = detectPackageManager(cwd);
+        const tsxLoader = resolveTsxLoader(cwd);
 
-        // Run server only mode
-        if (options.serverOnly || !hasNext)
+        if (tsxLoader === undefined)
         {
-            const watchMode = options.watch === true;
-            logger.info(`Starting SPFN Server on http://${serverHost}:${serverPort}${watchMode ? ' (watch mode)' : ''}\n`);
+            logger.error(`[SPFN] ${missingTsxMessage(cwd)}`);
+            process.exit(1);
+        }
 
-            let serverProcess: ExecaChildProcess | null = null;
-            let isRestarting = false;
-            const children = new DevChildren();
-            const stopping = children.isStopping;
+        const withNext = hasNext && !options.serverOnly;
+        const watchMode = options.watch === true;
 
-            // Start codegen watcher
-            const startWatcher = () =>
-            {
-                children.start('codegen watcher', () => startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping));
-            };
+        logger.info(withNext
+            ? `Starting SPFN server + Next.js (Turbopack)${watchMode ? ' (watch mode)' : ''}...\n`
+            : `Starting SPFN Server on http://${serverHost}:${serverPort}${watchMode ? ' (watch mode)' : ''}\n`);
 
-            // Start server process
-            const startServer = () =>
-            {
-                const server = tsxCommand(pm, cwd, serverEntry);
+        startCodegenWatcher(children, tsxLoader, cwd, watcherEntry, watcherEnv);
 
-                serverProcess = children.start('server', () => execa(server.command, server.args, {
-                    cwd,
-                    stdio: 'inherit',
-                    reject: false,
-                    env: serverEnv,
-                }));
+        const server = serverRunner(children, tsxLoader, cwd, serverEntry, serverEnv);
 
-                // Don't await or catch - let it run independently
-            };
+        server.start();
 
-            // Restart server
-            const restartServer = async () =>
-            {
-                if (isRestarting || stopping()) return;
-                isRestarting = true;
+        if (watchMode)
+        {
+            restartOnServerChanges(serverDir, cwd, server.restart);
+        }
 
-                logger.info('[SPFN] File changed, restarting server...');
+        if (withNext)
+        {
+            // The server must be ready before Next.js starts
+            await waitForServer(readyFile);
+            startNext(children, pm, cwd, nextPort);
+        }
 
-                if (serverProcess)
-                {
-                    try
-                    {
-                        serverProcess.kill('SIGTERM');
-                        await serverProcess.catch(() => 
-                        {});
-                        // Wait for port to be released
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                    }
-                    catch (error)
-                    {
-                        // Ignore errors during kill
-                    }
-                }
+        // The supervisor exits once the children have; until then, keep the event loop alive
+        setInterval(() => undefined, 1_000_000);
+    });
 
-                startServer();
+/**
+ * Start the codegen watcher entry (`watcherEntrySource`). An exit with an error
+ * outside a stop leaves the session running without it, and says so.
+ */
+function startCodegenWatcher(children: DevSupervisor, tsxLoader: string, cwd: string, entry: string, env: NodeJS.ProcessEnv): void
+{
+    children.start('codegen watcher', process.execPath, tsxNodeArgs(tsxLoader, cwd, entry), { cwd, env })?.process.then((result) =>
+    {
+        if (!children.isStopping() && result.exitCode !== 0 && result.exitCode !== 130)
+        {
+            logger.error(`Codegen watcher exited with code ${result.exitCode}`);
+            warnCodegenWatchDisabled();
+        }
+    });
+}
 
-                isRestarting = false;
-            };
+/**
+ * The server, started and restarted (`--watch`). A restart stops the running
+ * server and waits until nothing is left in its process group — the port is
+ * free then — before starting the next one; changes during a restart are
+ * covered by it.
+ */
+function serverRunner(children: DevSupervisor, tsxLoader: string, cwd: string, entry: string, env: NodeJS.ProcessEnv)
+{
+    let current: DevChild | null = null;
+    let restarting = false;
 
-            // Setup file watcher for server files
-            if (watchMode)
-            {
-                const watcher = chokidar.watch(serverDir, {
-                    ignored: ignoreDotfilesUnder(serverDir),
-                    persistent: true,
-                    ignoreInitial: true,
-                    awaitWriteFinish: {
-                        stabilityThreshold: 100,
-                        pollInterval: 50,
-                    },
-                });
+    const start = (): void =>
+    {
+        current = children.start('server', process.execPath, tsxNodeArgs(tsxLoader, cwd, entry), { cwd, env });
+    };
 
-                watcher.on('change', (path) =>
-                {
-                    logger.info(`[SPFN] Changed: ${path.replace(cwd + '/', '')}`);
-                    restartServer();
-                });
-
-                watcher.on('add', (path) =>
-                {
-                    logger.info(`[SPFN] Added: ${path.replace(cwd + '/', '')}`);
-                    restartServer();
-                });
-
-                watcher.on('unlink', (path) =>
-                {
-                    logger.info(`[SPFN] Removed: ${path.replace(cwd + '/', '')}`);
-                    restartServer();
-                });
-            }
-
-            // Start both processes
-            startWatcher();
-            startServer();
-
-            // Keep process alive - let cleanup handlers manage exit
-            // Use setInterval to keep the event loop active without unsettled promises
-            await new Promise<void>((resolve) =>
-            {
-                const keepAlive = setInterval(() => 
-                {}, 1000000);
-                // Cleanup will handle exit, but just in case:
-                process.once('beforeExit', () => 
-                {
-                    clearInterval(keepAlive);
-                    resolve();
-                });
-            });
-
+    const restart = async (): Promise<void> =>
+    {
+        if (restarting || children.isStopping())
+        {
             return;
         }
 
-        // Run both Next.js (via spfn:next script) + Hono server + Contract watcher
-        const watchMode = options.watch === true;
-        logger.info(`Starting SPFN server + Next.js (Turbopack)${watchMode ? ' (watch mode)' : ''}...\n`);
+        restarting = true;
+        logger.info('[SPFN] File changed, restarting server...');
 
-        let serverProcess: ExecaChildProcess | null = null;
-        let isRestarting = false;
-        const children = new DevChildren();
-        const stopping = children.isStopping;
-
-        // Start codegen watcher
-        const startWatcher = () =>
+        if (current)
         {
-            children.start('codegen watcher', () => startCodegenWatcher(pm, cwd, watcherEntry, watcherEnv, stopping));
-        };
-
-        // Start Next.js
-        const startNext = () =>
-        {
-            const nextCmd = pm === 'npm' ? 'npm' : pm;
-
-            // The port is passed through rather than baked into the script, so
-            // spfn.config.js is the only place the number appears. Only npm needs a
-            // `--` to stop reading the flag as its own config; pnpm, yarn and bun
-            // forward the separator to next, which then reads `--port` as a directory.
-            const nextArgs = getRunScriptArgs(pm, 'spfn:next', ['--port', String(nextPort)]);
-
-            children.start('Next.js', () => execa(nextCmd, nextArgs, {
-                cwd,
-                stdio: 'inherit',
-                reject: false,
-            }))?.then((result) =>
-            {
-                if (!stopping() && result.exitCode !== 0 && result.exitCode !== 130)
-                {
-                    logger.error(`Next.js exited with code ${result.exitCode}`);
-                    process.exit(1);
-                }
-            });
-        };
-
-        // Start server process
-        const startServer = () =>
-        {
-            const server = tsxCommand(pm, cwd, serverEntry);
-
-            serverProcess = children.start('server', () => execa(server.command, server.args, {
-                cwd,
-                stdio: 'inherit',
-                reject: false,
-                env: serverEnv,
-            }));
-
-            // Don't await or catch - let it run independently
-        };
-
-        // Restart server
-        const restartServer = async () =>
-        {
-            if (isRestarting || stopping()) return;
-            isRestarting = true;
-
-            logger.info('[SPFN] File changed, restarting server...');
-
-            if (serverProcess)
-            {
-                try
-                {
-                    serverProcess.kill('SIGTERM');
-                    await serverProcess.catch(() => 
-                    {});
-                    // Wait for port to be released
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-                catch (error)
-                {
-                    // Ignore errors during kill
-                }
-            }
-
-            startServer();
-
-            isRestarting = false;
-        };
-
-        // Setup file watcher for server files
-        if (watchMode)
-        {
-            const watcher = chokidar.watch(serverDir, {
-                ignored: ignoreDotfilesUnder(serverDir),
-                persistent: true,
-                ignoreInitial: true,
-                awaitWriteFinish: {
-                    stabilityThreshold: 100,
-                    pollInterval: 50,
-                },
-            });
-
-            watcher.on('change', (path) =>
-            {
-                logger.info(`[SPFN] Changed: ${path.replace(cwd + '/', '')}`);
-                restartServer();
-            });
-
-            watcher.on('add', (path) =>
-            {
-                logger.info(`[SPFN] Added: ${path.replace(cwd + '/', '')}`);
-                restartServer();
-            });
-
-            watcher.on('unlink', (path) =>
-            {
-                logger.info(`[SPFN] Removed: ${path.replace(cwd + '/', '')}`);
-                restartServer();
-            });
+            await children.stopChild(current);
         }
 
-        // Start all processes — server must be ready before Next.js
-        startWatcher();
-        startServer();
+        start();
+        restarting = false;
+    };
 
-        try
-        {
-            const port = await waitForReadyFile(readyFile);
-            logger.info(`[SPFN] Server ready on port ${port}, starting Next.js...\n`);
-        }
-        catch (error)
-        {
-            logger.warn(`[SPFN] Server readiness check timed out, starting Next.js anyway...`);
-        }
+    return { start, restart };
+}
 
-        startNext();
-
-        // Keep process alive - let cleanup handlers manage exit
-        // Use setInterval to keep the event loop active without unsettled promises
-        await new Promise<void>((resolve) =>
-        {
-            const keepAlive = setInterval(() => 
-            {}, 1000000);
-            // Cleanup will handle exit, but just in case:
-            process.once('beforeExit', () => 
-            {
-                clearInterval(keepAlive);
-                resolve();
-            });
-        });
+/** Restart the server on every change under `src/server` (`--watch`). */
+function restartOnServerChanges(serverDir: string, cwd: string, restart: () => Promise<void>): void
+{
+    const watcher = chokidar.watch(serverDir, {
+        ignored: ignoreDotfilesUnder(serverDir),
+        persistent: true,
+        ignoreInitial: true,
+        awaitWriteFinish: {
+            stabilityThreshold: 100,
+            pollInterval: 50,
+        },
     });
+    const onChange = (label: string) => (path: string) =>
+    {
+        logger.info(`[SPFN] ${label}: ${path.replace(cwd + '/', '')}`);
+        void restart();
+    };
+
+    watcher.on('change', onChange('Changed'));
+    watcher.on('add', onChange('Added'));
+    watcher.on('unlink', onChange('Removed'));
+}
+
+/** Wait for the server's ready file; past the timeout, go on anyway. */
+async function waitForServer(readyFile: string): Promise<void>
+{
+    try
+    {
+        const port = await waitForReadyFile(readyFile);
+        logger.info(`[SPFN] Server ready on port ${port}, starting Next.js...\n`);
+    }
+    catch
+    {
+        logger.warn(`[SPFN] Server readiness check timed out, starting Next.js anyway...`);
+    }
+}
+
+/**
+ * Start Next.js through the app's `spfn:next` script. An exit with an error
+ * outside a stop stops the session: the server and the watcher, then
+ * `spfn dev` with exit code 1.
+ */
+function startNext(children: DevSupervisor, pm: PackageManager, cwd: string, nextPort: number): void
+{
+    // The port is passed through rather than baked into the script, so
+    // spfn.config.js is the only place the number appears. Only npm needs a
+    // `--` to stop reading the flag as its own config; pnpm, yarn and bun
+    // forward the separator to next, which then reads `--port` as a directory.
+    const nextArgs = getRunScriptArgs(pm, 'spfn:next', ['--port', String(nextPort)]);
+
+    children.start('Next.js', pm, nextArgs, { cwd })?.process.then((result) =>
+    {
+        if (!children.isStopping() && result.exitCode !== 0 && result.exitCode !== 130)
+        {
+            logger.error(`Next.js exited with code ${result.exitCode}`);
+            void children.stop(1);
+        }
+    });
+}

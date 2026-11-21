@@ -324,8 +324,9 @@ load (`src/codegen/loader/`).
   called. An orchestrator is single-use: `watch()` rejects after `close()`, while its loop runs,
   and after that loop ended by an exception. The `spfn dev` watcher calls `close()` on the
   first SIGTERM/SIGINT, saying it waits for the running generation or config load, and exits
-  when it resolves; a second signal exits at once. `spfn dev`
-  forwards each signal it gets to the watcher and exits after it.
+  when it resolves; a second signal exits at once. Under `spfn dev` the watcher gets one
+  SIGTERM, from `spfn dev`, whatever stopped it; a second Ctrl-C makes `spfn dev` SIGKILL it
+  ([`spfn dev` signals](../../../cli/README.md#stopping-spfn-dev-signals)).
 - **`settled()`** resolves once the loop is idle: nothing running, nothing dirty, no input
   directory event still settling. A chokidar event not delivered yet (it waits 100 ms for
   writes to settle) is not known to it. Once the loop has ended — by `close()` or by an

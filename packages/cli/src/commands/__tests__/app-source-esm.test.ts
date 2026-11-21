@@ -37,17 +37,24 @@
  * | R8 | the bin as its own re-spawned child, without the     | the relaunch guard gone: a child without the hook       |
  * |    | hook (`SPFN_CLI_RELAUNCHED_IN` set, no `--import`);  | re-spawns itself, without bound once the hook argument  |
  * |    | each bin process counts itself, the third exits      | goes too (773 processes in round 1)                     |
+ * | R9 | the bin whose `process.execve` throws (as Node 26.1+  | the failed relaunch taken for "no tsx": the command     |
+ * |    | does on a failed exec), replaced by a preload        | runs on without the hook, saying nothing                |
+ * | R10| a copy of the bin beside a `tsx` that is there but   | any failure to resolve tsx taken for "not installed":   |
+ * |    | broken (package.json that does not parse or cannot   | the command runs on without the hook, saying nothing    |
+ * |    | be read, an entry file missing), and beside no tsx   | (an unreadable package.json fails with "Cannot find     |
+ * |    |                                                      | module 'tsx'"); and a missing tsx no longer run without |
+ * |    |                                                      | it                                                      |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const cliRoot = join(__dirname, '../../..');
 const coreRoot = join(cliRoot, '../core');
@@ -257,4 +264,103 @@ it('R8 the bin started as its own re-spawned child without the module hook stops
     expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain('the CLI\'s module hook (dist/dev-loader/register.js) did not register in the process spfn re-spawned');
     expect(readFileSync(depthFile, 'utf8')).toBe('1\n');
+});
+
+it('R9 the bin whose relaunch fails stops with the error rather than run without the module hook', () =>
+{
+    // Node 26.1+ throws from a failed execve (E2BIG, EACCES, …); this one always does.
+    write('execve-fails.cjs', `if (require('node:worker_threads').isMainThread && process.argv[1] === ${JSON.stringify(bin)})\n{\n`
+        + '    process.execve = () => { throw Object.assign(new Error(\'E2BIG: argument list too long, execve\'), { code: \'E2BIG\' }); };\n}\n');
+
+    const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        NODE_OPTIONS: `--require ${join(appDir, 'execve-fails.cjs')}`,
+        PATH: `${join(cliRoot, 'node_modules/.bin')}:${process.env.PATH}`,
+    };
+
+    delete env.SPFN_CLI_RELAUNCHED_IN;
+
+    const result = spawnSync(process.execPath, [bin, '--version'], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+
+    expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
+    expect(result.stderr).toContain('Error: spfn could not re-run itself under tsx and its module hook:');
+    expect(result.stderr).toContain('E2BIG: argument list too long, execve');
+});
+
+describe('R10 resolving tsx for the relaunch', () =>
+{
+    /** A copy of the bin in `<appDir>/cli/bin`, so `tsx` resolves from `<appDir>/cli`; `dist/` is the built one. */
+    function binCopy(tsxFiles: Record<string, string> | null): string
+    {
+        mkdirSync(join(appDir, 'cli/bin'), { recursive: true });
+        copyFileSync(bin, join(appDir, 'cli/bin/spfn.js'));
+        write('cli/package.json', JSON.stringify({ name: 'spfn-copy', type: 'module' }));
+        symlinkSync(join(cliRoot, 'dist'), join(appDir, 'cli/dist'), 'dir');
+        Object.entries(tsxFiles ?? {}).forEach(([file, content]) => write(`cli/node_modules/tsx/${file}`, content));
+
+        return join(appDir, 'cli/bin/spfn.js');
+    }
+
+    /** The environment, without what would find a tsx elsewhere: vitest's NODE_PATH holds pnpm's store. */
+    function cleanEnv(): NodeJS.ProcessEnv
+    {
+        const env: NodeJS.ProcessEnv = { ...process.env };
+
+        delete env.SPFN_CLI_RELAUNCHED_IN;
+        delete env.NODE_OPTIONS;
+        delete env.NODE_PATH;
+
+        return env;
+    }
+
+    function version(copy: string): { status: number | null; stdout: string; stderr: string }
+    {
+        return spawnSync(process.execPath, [copy, '--version'], { cwd: appDir, env: cleanEnv(), encoding: 'utf8', timeout: 60_000 });
+    }
+
+    /** Whether `tsx` resolves from `from` in a process of its own, as the bin resolves it. */
+    function resolvable(from: string): boolean
+    {
+        return spawnSync(process.execPath, ['-e', `require('node:module').createRequire(${JSON.stringify(from)}).resolve('tsx')`], { env: cleanEnv() }).status === 0;
+    }
+
+    it.each([
+        ['a package.json that does not parse', { 'package.json': '{ "name": "tsx",' }, 'Invalid package config'],
+        ['its entry file missing', { 'package.json': JSON.stringify({ name: 'tsx', exports: { '.': './dist/loader.mjs' } }) }, 'tsx/dist/loader.mjs'],
+    ])('a tsx with %s stops the command, saying so', (_case, files, cause) =>
+    {
+        const result = version(binCopy(files));
+
+        expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
+        expect(result.stderr).toContain('Error: spfn could not resolve tsx, which it re-runs itself under:');
+        expect(result.stderr).toContain(cause);
+    });
+
+    it('a tsx whose package.json cannot be read stops the command, saying so', (context) =>
+    {
+        // root reads it anyway (CI's steps run as root).
+        context.skip(process.getuid?.() === 0, 'root reads a file of mode 000');
+
+        const copy = binCopy({ 'package.json': JSON.stringify({ name: 'tsx', exports: { '.': './dist/loader.mjs' } }), 'dist/loader.mjs': '' });
+
+        chmodSync(join(appDir, 'cli/node_modules/tsx/package.json'), 0o000);
+
+        const result = version(copy);
+
+        expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
+        expect(result.stderr).toContain('Error: spfn could not resolve tsx, which it re-runs itself under:');
+    });
+
+    it('no tsx runs the command without the hook', (context) =>
+    {
+        const copy = binCopy(null);
+
+        // A tsx in a directory above the temporary one (/tmp/node_modules) would be found instead.
+        context.skip(resolvable(copy), 'a tsx is installed above the temporary directory');
+
+        const result = version(copy);
+
+        expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+        expect(result.stdout.trim()).toBe(JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf8')).version);
+    });
 });

@@ -28,12 +28,16 @@ export function tsxApiPath(cwd: string): string | undefined
     return resolveFrom(join(cwd, 'noop.js'), 'tsx/esm/api') ?? resolveFrom(import.meta.url, 'tsx/esm/api');
 }
 
-/** The one message for an app without tsx, when no tsx is installed for the app or the CLI; else undefined. */
+/** The one message for an app without tsx, naming the app's own command to add it. */
+export function missingTsxMessage(cwd: string): string
+{
+    return `tsx is not installed in this project, and it is what loads TypeScript. Add it: ${getAddCommand(detectPackageManager(cwd), ['tsx'], { dev: true })}`;
+}
+
+/** `missingTsxMessage` when no tsx is installed for the app or the CLI; else undefined. */
 export function missingTsx(cwd: string): string | undefined
 {
-    return tsxApiPath(cwd) === undefined
-        ? `tsx is not installed in this project, and it is what loads TypeScript. Add it: ${getAddCommand(detectPackageManager(cwd), ['tsx'], { dev: true })}`
-        : undefined;
+    return tsxApiPath(cwd) === undefined ? missingTsxMessage(cwd) : undefined;
 }
 
 /**
