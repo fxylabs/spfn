@@ -19,6 +19,7 @@ import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 
 import { OWNER_URL, requireDatabase } from './helpers/test-database.js';
+import { writeFunctionPackage } from './helpers/function-package.js';
 
 vi.mock('prompts', () => ({
     default: async () =>
@@ -610,7 +611,6 @@ function sha256(content: string): string
 function writeFixtureApp(root: string, { withPackage = true } = {}): void
 {
     const entities = join(root, 'src', 'server', 'entities');
-    const migration = join(root, 'node_modules', '@spfn', 'i163fix', 'migrations', MIGRATION_NAME);
 
     mkdirSync(entities, { recursive: true });
     writeFileSync(join(entities, 'notes.entity.ts'),
@@ -624,13 +624,8 @@ function writeFixtureApp(root: string, { withPackage = true } = {}): void
         + "const STATES = ['a', 'b', 'c'] as const;\n"
         + "export const checked = app.table('checked', { state: enumText('state', STATES).notNull() }, (t) => [enumCheck(t.state, STATES)]);\n");
 
-    if (!withPackage)
+    if (withPackage)
     {
-        return;
+        writeFunctionPackage(root, MIGRATION_NAME, MIGRATION_SQL);
     }
-
-    mkdirSync(migration, { recursive: true });
-    writeFileSync(join(migration, 'migration.sql'), MIGRATION_SQL);
-    writeFileSync(join(root, 'node_modules', '@spfn', 'i163fix', 'package.json'),
-        JSON.stringify({ name: '@spfn/i163fix', version: '1.0.0', spfn: { migrations: { dir: './migrations' } } }));
 }

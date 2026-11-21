@@ -23,6 +23,7 @@ const CLASS_MESSAGES: Readonly<Record<string, string>> = {
     '08': 'Database connection failed',
     '22': 'Invalid input value',
     '23': 'Integrity constraint violated',
+    '28': 'Database authentication failed',
     '40': 'Transaction failed',
     '42': 'Invalid query',
     '53': 'Insufficient database resources',
@@ -56,6 +57,27 @@ function messageOf(error: unknown, code: unknown): string
     }
 
     return CLASS_MESSAGES[code.slice(0, 2)] ?? 'Database query failed';
+}
+
+/**
+ * The text a database error may be shown with: the driver's message where
+ * `describeError` keeps it, otherwise core's fixed text for the SQLSTATE
+ * class — the same text `fromPostgresError` gives its typed error. Never a
+ * bound value nor a rejected input. The SQLSTATE is read from the description,
+ * so a drizzle query error over a driver error has its class text too.
+ *
+ * @example
+ * ```typescript
+ * import { databaseErrorMessage } from '@spfn/core/db';
+ *
+ * databaseErrorMessage(error); // 'Invalid input value' for a 22P02
+ * ```
+ */
+export function databaseErrorMessage(error: unknown): string
+{
+    const description = describeError(error, { stack: false });
+
+    return messageOf(description, description.code);
 }
 
 /**

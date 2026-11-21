@@ -22,7 +22,8 @@ import { loadEnv } from '@spfn/core/server';
 import { ensureBackupDir } from '../utils/backup-files.js';
 import { formatTimestamp } from '../utils/formatters.js';
 import { collectMigrationInfo } from '../utils/metadata.js';
-import { describeError, openConnection, type TenantTransaction } from './connection.js';
+import { describeFailure } from '../../../utils/database-failure.js';
+import { openConnection, type TenantTransaction } from './connection.js';
 import { MANIFEST_FORMAT, parseTenantId, writeManifest, type Manifest, type ManifestTable } from './manifest.js';
 import { buildTenantPlan, columnList, qualifiedName, quoteIdent, type PlanTable, type TenantPlan } from './plan.js';
 import { fail, loadAppSchema } from './schema.js';
@@ -47,14 +48,14 @@ export async function dbTenantExport(tenantIdArg: string): Promise<void>
 
     loadEnv();
 
-    const plan = buildTenantPlanOrFail(await loadAppSchema().catch((error) => fail(describeError(error, undefined))));
+    const plan = buildTenantPlanOrFail(await loadAppSchema().catch((error) => fail(describeFailure(error, undefined))));
     const url = env.DATABASE_READ_URL ?? env.DATABASE_URL ?? fail('Neither DATABASE_READ_URL nor DATABASE_URL is set');
     const directory = path.join(await ensureBackupDir(), `tenant-${tenantId}-${formatTimestamp()}`);
 
     console.log(chalk.blue(`📤 Exporting tenant ${tenantId} (${plan.tables.length} tables)...\n`));
 
     const manifest = await exportTenant({ tenantId, plan, url, directory })
-        .catch((error) => fail(`Tenant export failed: ${describeError(error, url)}`));
+        .catch((error) => fail(`Tenant export failed: ${describeFailure(error, url)}`));
 
     for (const table of manifest.tables)
     {

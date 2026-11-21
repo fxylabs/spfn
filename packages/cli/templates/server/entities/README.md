@@ -110,10 +110,11 @@ export const products = pgTable('products', {
 ## Database Migration
 
 ```bash
-# Generate migration from your entities
-npx spfn db generate
+# Development: create or alter the tables from your entities
+npx spfn db push
 
-# Run migrations
+# Migration-based deployment: generate a migration from your entities, then apply it
+npx spfn db generate
 npx spfn db migrate
 ```
 

@@ -112,13 +112,15 @@ SPFN_AUTH_GUARD_TIMEOUT=3000    # ms the guards' session lookup may take (unset 
 >
 > SPFN runs as a separate backend process (`.env.server`), while Next.js is the frontend (`.env.local`). `SPFN_AUTH_SESSION_SECRET` must hold **the same value in both** — Next.js seals and reads the encrypted session cookie with it, and the API server unseals the OAuth `state` that Next.js sealed (and encrypts stored provider tokens) with it. Different values on the two sides break the OAuth callback.
 
-### 3. Run Migrations
+### 3. Create the Tables
 
 ```bash
-# Generate migration files (if schema changed)
-pnpm spfn db generate
+# Development: apply the auth migrations, then the app's own schema
+pnpm spfn db push
 
-# Apply migrations to database
+# Migration-based deployment: generate the app's migration files, then apply
+# them together with the auth migrations
+pnpm spfn db generate
 pnpm spfn db migrate
 ```
 
@@ -1878,7 +1880,7 @@ mobile). A production enrollment/rotation flow is tracked separately (phase 2).
 
 Auth tables are **not** created by `spfn db push`'s schema diff — package schemas are excluded
 from push on purpose. They are created by the migration files bundled inside `@spfn/auth`,
-which `spfn db migrate` (and the final step of a recent `spfn db push`) applies;
+which `spfn db migrate` and `spfn db push` apply before anything of the project schema;
 `spfn db push --dry-run` lists the pending ones by name and applies nothing:
 
 ```bash

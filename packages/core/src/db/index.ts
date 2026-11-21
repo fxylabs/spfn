@@ -79,7 +79,7 @@ export { Transactional, getTransaction, getTransactionContext, runWithTransactio
 export type { TransactionContext, TransactionDB, NestedFrameGate, TransactionalOptions, RunInTransactionOptions, BeforeCommitCallback, AfterCommitCallback, AfterRollbackCallback } from './transaction';
 
 // PostgreSQL Error Utilities
-export { fromPostgresError } from './postgres-errors';
+export { fromPostgresError, databaseErrorMessage } from './postgres-errors';
 
 // Helper Functions
 export {

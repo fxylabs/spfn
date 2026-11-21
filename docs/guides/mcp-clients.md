@@ -77,7 +77,8 @@ export default defineServerConfig()
     .build();
 ```
 
-Run the package's migrations once (`pnpm spfn db migrate`) — the server stores
+Run the package's migrations once (`pnpm spfn db push` in development, or
+`pnpm spfn db migrate` in a migration-based deployment) — the server stores
 clients, grants, codes and token hashes.
 
 The issuer is checked at boot: an absolute URL with no path, `https`, or `http`

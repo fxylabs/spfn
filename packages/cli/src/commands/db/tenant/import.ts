@@ -32,7 +32,8 @@ import { pipeline } from 'stream/promises';
 import chalk from 'chalk';
 import { loadEnv } from '@spfn/core/server';
 import { confirmDangerousTarget, OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl } from '../utils/database.js';
-import { describeError, openConnection, type TenantTransaction } from './connection.js';
+import { describeFailure, failingIn } from '../../../utils/database-failure.js';
+import { openConnection, type TenantTransaction } from './connection.js';
 import { matchPlan, readManifest, verifyChecksums, type Manifest, type ManifestTable } from './manifest.js';
 import { buildTenantPlan, columnList, qualifiedName, quoteIdent, tableKey, type PlanTable, type TenantPlan } from './plan.js';
 import { fail, loadAppSchema } from './schema.js';
@@ -72,10 +73,10 @@ export async function dbTenantImport(directory: string, options: { replace?: boo
 {
     loadEnv();
 
-    const imports = await loadAppSchema().catch((error) => fail(describeError(error, undefined)));
+    const imports = await loadAppSchema().catch((error) => fail(describeFailure(error, undefined)));
     const prepared = await Promise.resolve()
         .then(() => prepareImport(directory, buildTenantPlan(imports)))
-        .catch((error) => fail(describeError(error, undefined)));
+        .catch((error) => fail(describeFailure(error, undefined)));
     const url = ownerDatabaseUrl() ?? fail(OWNER_URL_MISSING);
     const tenantId = prepared.manifest.tenantId;
 
@@ -83,7 +84,7 @@ export async function dbTenantImport(directory: string, options: { replace?: boo
     console.log(chalk.blue(`📥 Importing tenant ${tenantId}${options.replace ? ', replacing its rows' : ''}...\n`));
 
     const imported = await importTenant(prepared, { url, replace: options.replace === true })
-        .catch((error) => fail(`Tenant import failed, nothing was written: ${describeError(error, url)}`));
+        .catch((error) => fail(`Tenant import failed, nothing was written: ${describeFailure(error, url)}`));
 
     for (const { table, rows } of imported.tables)
     {
@@ -312,7 +313,7 @@ async function stageFile(tx: TenantTransaction, prepared: PreparedImport, table:
     // sha256 was checked — with no listener yet, an uncaught error
     const copy = await tx.unsafe(`COPY ${staging} (${columnList(table)}) FROM STDIN`).writable();
 
-    await pipeline(createReadStream(path.join(prepared.directory, table.file)), copy);
+    await failingIn(`tenant file ${table.file}`, pipeline(createReadStream(path.join(prepared.directory, table.file)), copy));
 
     const [{ count }] = await tx.unsafe<{ count: number }[]>(
         `SELECT count(*)::int AS count FROM ${staging} WHERE ${quoteIdent(table.tenantColumn)} IS DISTINCT FROM $1`,

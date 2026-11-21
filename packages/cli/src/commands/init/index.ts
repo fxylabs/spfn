@@ -2,7 +2,6 @@ import { Command, Option } from 'commander';
 import chalk from 'chalk';
 import { detectPackageManager, getRunCommand, type PackageManager } from '../../utils/package-manager.js';
 import { logger } from '../../utils/logger.js';
-import { ENV_FILES_HINT } from '../../utils/messages.js';
 import { validateProject } from './steps/validate.js';
 import { setupServerStructure } from './steps/server-structure.js';
 import { setupApiProxy } from './steps/api-proxy.js';
@@ -13,6 +12,7 @@ import { setupPackageJson } from './steps/package.js';
 import { setupConfigFiles } from './steps/config-files.js';
 import { setupReadme } from './steps/readme.js';
 import { selectScaffoldMode, type ScaffoldMode } from './mode.js';
+import { printNextSteps, type NextStepsOptions } from './next-steps.js';
 
 interface InitOptions
 {
@@ -28,6 +28,19 @@ interface InitOptions
  * Initialize SPFN in a Next.js project
  */
 export async function initializeSpfn(options: InitOptions = {}): Promise<void>
+{
+    const scaffold = await scaffoldSpfn(options);
+
+    console.log('\n' + chalk.green.bold('✓ SPFN initialized successfully!\n'));
+    printNextSteps(scaffold);
+    printAvailableCommands(scaffold.pm);
+}
+
+/**
+ * Write SPFN into the Next.js project in the working directory, printing no
+ * next steps: `spfn create` prints them once, after its own steps.
+ */
+export async function scaffoldSpfn(options: InitOptions = {}): Promise<NextStepsOptions>
 {
     const cwd = process.cwd();
 
@@ -64,27 +77,11 @@ export async function initializeSpfn(options: InitOptions = {}): Promise<void>
     // Step 9: Create README.md (only when one doesn't already exist)
     await setupReadme(cwd, { pm, packageJson, mode, overwrite: options.overwriteReadme ?? false });
 
-    // Done - Show success message and next steps
-    console.log('\n' + chalk.green.bold('✓ SPFN initialized successfully!\n'));
+    return { pm, mode, appDir: cwd };
+}
 
-    console.log('Next steps:');
-    console.log('  1. Start PostgreSQL & Redis (if not installed locally):');
-    console.log('     ' + chalk.cyan('docker compose up -d'));
-    console.log('  2. Review the generated env files (.env.local, .env.server)');
-    console.log('     ' + chalk.dim(ENV_FILES_HINT));
-    if (mode === 'full')
-    {
-        const spfnCommand = pm === 'npm' ? 'npx spfn' : `${pm} spfn`;
-        console.log('  3. Apply the auth migrations: ' + chalk.cyan(`${spfnCommand} db migrate`));
-    }
-    console.log(`  ${mode === 'full' ? '4' : '3'}. Run: ` + chalk.cyan(`${getRunCommand(pm)} spfn:dev`));
-    console.log(`  ${mode === 'full' ? '5' : '4'}. Visit:`);
-    console.log('     - Next.js: ' + chalk.cyan('http://localhost:3790'));
-    console.log('     - API:     ' + chalk.cyan('http://localhost:8790/_core/health'));
-    if (mode === 'full')
-    {
-        console.log('     - MCP:     ' + chalk.cyan('http://localhost:8790/mcp'));
-    }
+function printAvailableCommands(pm: PackageManager): void
+{
     console.log('\nAvailable commands:');
     console.log('  • ' + chalk.cyan(`${getRunCommand(pm)} spfn:dev`) + '       - Start SPFN + Next.js');
     console.log('  • ' + chalk.cyan('spfn env validate') + '  - Validate environment variables');
