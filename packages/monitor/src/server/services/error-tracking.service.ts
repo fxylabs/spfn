@@ -41,9 +41,9 @@ export interface ErrorTrackingContext
  *
  * SHA-256 of what identifies the fault, first 16 hex characters: the route
  * path, each link of the cause chain by its name, code, constraint and table,
- * and the top frames of the error's stack without their line and column.
- * Never the message: a failed statement's message carries its bound values,
- * so one fault would open a group per value.
+ * and the top frames of the error's stack by the place in code they name (see
+ * `codeFrame`). Never the message: a failed statement's message carries its
+ * bound values, so one fault would open a group per value.
  */
 export function generateFingerprint(description: Description, path: string): string
 {
@@ -85,7 +85,60 @@ function topFrames(description: Description): string[]
     return (description.stack ?? '')
         .split('\n')
         .slice(0, FAULT_FRAMES)
-        .map(frame => frame.trim().replace(/:\d+:\d+(\)?)$/, '$1'));
+        .map(codeFrame);
+}
+
+/**
+ * A frame as the place in code it names, not the place on disk: no line and
+ * column, and its file as `codeLocation` names it — so a deploy to a new
+ * release directory or a dependency bump keeps every group (#382)
+ */
+function codeFrame(frame: string): string
+{
+    const line = frame.trim().replace(/:\d+:\d+(\)?)$/, '$1');
+    const call = /^(.* \()(.+)\)$/.exec(line);
+
+    if (call)
+    {
+        return `${call[1]}${codeLocation(call[2])})`;
+    }
+
+    const bare = /^(at (?:async )?)(.+)$/.exec(line);
+
+    return bare ? `${bare[1]}${codeLocation(bare[2])}` : line;
+}
+
+/**
+ * A dependency's file as its package names it — the path from the last
+ * `node_modules/` on, with no `.pnpm/<name>@<version>_<hash>` directory and no
+ * install location; app code relative to the working directory when inside it
+ */
+function codeLocation(location: string): string
+{
+    const path = location.replace(/^file:\/\//, '').replaceAll('\\', '/');
+    const dependency = path.lastIndexOf('/node_modules/');
+
+    if (dependency !== -1)
+    {
+        return path.slice(dependency + '/node_modules/'.length);
+    }
+
+    const root = workingDirectory();
+
+    return root !== null && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : location;
+}
+
+/** The process's working directory; null once it is gone, as an old release directory can be */
+function workingDirectory(): string | null
+{
+    try
+    {
+        return process.cwd().replaceAll('\\', '/');
+    }
+    catch
+    {
+        return null;
+    }
 }
 
 function linkSummary(link: Description): string

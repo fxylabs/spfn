@@ -176,11 +176,17 @@ createMonitorErrorHandler({
 
 `generateFingerprint(description, path)` takes the error's description (`describeError` from
 `@spfn/core/logger`) and hashes what identifies the fault — `SHA-256` of the route path, each link of
-the cause chain by its name, code, constraint and table, and the top three stack frames without
-their line and column — sliced to the first **16 hex chars**. Never the message: a failed
-statement's message carries its bound values, so one fault would open a group per value. The same
-fault from another route, or raised from another call site, is another group; a deploy that only
-shifts line numbers is not.
+the cause chain by its name, code, constraint and table, and the top three stack frames by the
+place in code they name — sliced to the first **16 hex chars**. A frame keeps its function and file
+but not its line and column, and not where the code is installed: a dependency's file is its path
+from the last `node_modules/` on (`drizzle-orm/pg-core/session.js`, no `.pnpm/<name>@<version>_<hash>`
+directory), and app code is relative to the process's working directory when it runs inside it.
+Never the message: a failed statement's message carries its bound values, so one fault would open a
+group per value. The same fault from another route, or raised from another call site, is another
+group; a deploy that only shifts line numbers, moves the app to a new release directory, or bumps a
+dependency is not. Two errors with different messages thrown from one function on one route share
+a group — each event row's `stack_trace` still holds its own description, message included where
+the description kept it.
 
 What is stored and sent is the description too (#382):
 

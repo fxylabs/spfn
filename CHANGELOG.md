@@ -334,7 +334,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   split one fault into a group per value. Now:
   - `generateFingerprint(description, path)` (was `(name, message, path)`) hashes the route path,
     each link of the cause chain by its name, code, constraint and table, and the top three stack
-    frames without their line and column.
+    frames by the place in code they name: no line and column, a dependency's file from the last
+    `node_modules/` on (no pnpm version-and-hash directory), app code relative to the working
+    directory — so a release-directory deploy or a dependency bump keeps every group.
   - `error_groups.name` is the description's name, `error_groups.message` one line naming the fault
     (`Name [code=…] [constraint=…] [table=…]: message`, per link of the cause chain, the message only
     where the description kept one).

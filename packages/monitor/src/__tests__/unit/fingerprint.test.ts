@@ -13,9 +13,12 @@
  * | -- | --------------------------------------------------------------------------------- |
  * | F1 | distinct faults merged into one group (constraint, path or frames dropped)        |
  * | F2 | every deploy that shifts a line opening a new group for each known fault         |
+ * | F3 | every deploy to a new release directory opening a new group for each known fault  |
+ * | F4 | every dependency bump (pnpm's `<name>@<version>_<hash>` directory) doing the same |
+ * | F5 | the location stripped too far: one function name in two files merged             |
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { describeError } from '@spfn/core/logger';
 import { DrizzleQueryError } from 'drizzle-orm';
 import { generateFingerprint } from '../../server/services/error-tracking.service';
@@ -65,5 +68,46 @@ describe('generateFingerprint', () =>
 
         expect(fingerprintOf(uniqueViolation('a@example.test', 'users_email_key', shifted)))
             .toBe(fingerprintOf(uniqueViolation('a@example.test')));
+    });
+
+    describe('where a frame is', () =>
+    {
+        afterEach(() =>
+        {
+            vi.restoreAllMocks();
+        });
+
+        /** The fingerprint of one fault raised under `root`, the process running there */
+        function deployedAt(root: string, frames = (dir: string) => `    at insertUser (${dir}/dist/users.js:10:5)\n    at async handle (file://${dir}/dist/route.mjs:30:9)`): string
+        {
+            vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+            return fingerprintOf(uniqueViolation('a@example.test', 'users_email_key', frames(root)));
+        }
+
+        it('F3: the same fault after a deploy to another release directory is one group', () =>
+        {
+            expect(deployedAt('/srv/releases/20261121')).toBe(deployedAt('/srv/releases/20261120'));
+        });
+
+        it('F4: the same fault after a dependency bump, or under npm\'s flat layout, is one group', () =>
+        {
+            const drizzle = (store: string) => (dir: string) =>
+                `    at PgPreparedQuery.execute (${dir}/node_modules/${store}drizzle-orm/pg-core/session.js:41:9)\n`
+                + `    at insertUser (${dir}/dist/users.js:10:5)`;
+            const before = deployedAt('/srv/app', drizzle('.pnpm/drizzle-orm@0.44.0_postgres@3.4.5_a1b2/node_modules/'));
+
+            expect(deployedAt('/srv/app', drizzle('.pnpm/drizzle-orm@0.45.1_postgres@3.4.7_c3d4/node_modules/'))).toBe(before);
+            expect(deployedAt('/srv/app', drizzle(''))).toBe(before);
+        });
+
+        it('F5: one function name in two files of the app, or of a dependency, is two groups', () =>
+        {
+            const at = (file: string) => (dir: string) => `    at insertUser (${dir}/${file}:10:5)`;
+
+            expect(deployedAt('/srv/app', at('dist/users.js'))).not.toBe(deployedAt('/srv/app', at('dist/admins.js')));
+            expect(deployedAt('/srv/app', at('node_modules/drizzle-orm/pg-core/session.js')))
+                .not.toBe(deployedAt('/srv/app', at('node_modules/drizzle-orm/pg-core/query.js')));
+        });
     });
 });
