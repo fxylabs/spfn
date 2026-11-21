@@ -7,6 +7,7 @@
  */
 
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { describeError } from '@spfn/core/logger';
 import { chainOf, summarizeError, type Description } from '../../error-summary';
 import { monitorLogger } from '../logger';
@@ -19,6 +20,9 @@ const logger = monitorLogger.errorTracking;
 
 /** How many of the stack's top frames name where a fault was raised */
 const FAULT_FRAMES = 3;
+
+/** A `file://` URL naming a Windows drive */
+const WINDOWS_FILE_URL = /^file:\/\/\/[A-Za-z]:/;
 
 /**
  * Context from the error handler middleware
@@ -97,7 +101,7 @@ function codeFrame(frame: string): string
  */
 function codeLocation(location: string): string
 {
-    const path = location.replace(/^file:\/\//, '').replaceAll('\\', '/');
+    const path = filePath(location).replaceAll('\\', '/');
     const dependency = path.lastIndexOf('/node_modules/');
 
     if (dependency !== -1)
@@ -107,7 +111,38 @@ function codeLocation(location: string): string
 
     const root = workingDirectory();
 
-    return root !== null && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : location;
+    if (root === null)
+    {
+        return location;
+    }
+
+    // A working directory of `/` (or `C:/`) already ends in the separator
+    const inside = root.endsWith('/') ? root : `${root}/`;
+
+    return path.startsWith(inside) ? path.slice(inside.length) : location;
+}
+
+/**
+ * A frame's location as a file path. An ESM frame names a `file://` URL:
+ * percent-encoded, and on Windows `file:///C:/…`, so it is converted, not
+ * stripped of its scheme. A drive letter marks a Windows path wherever this
+ * runs. Anything else (`node:internal/…`, `<anonymous>`) is kept as it is.
+ */
+function filePath(location: string): string
+{
+    if (!location.startsWith('file:'))
+    {
+        return location;
+    }
+
+    try
+    {
+        return fileURLToPath(location, { windows: WINDOWS_FILE_URL.test(location) });
+    }
+    catch
+    {
+        return location;
+    }
 }
 
 /** The process's working directory; null once it is gone, as an old release directory can be */

@@ -183,8 +183,11 @@ from the last `node_modules/` on (`drizzle-orm/pg-core/session.js`, no `.pnpm/<n
 directory), and app code is relative to the process's working directory when it runs inside it.
 Never the message: a failed statement's message carries its bound values, so one fault would open a
 group per value. The same fault from another route, or raised from another call site, is another
-group; a deploy that only shifts line numbers, moves the app to a new release directory, or bumps a
-dependency is not. Two errors with different messages thrown from one function on one route share
+group; a deploy that only shifts line numbers or bumps a dependency is not. A move to a new release
+directory keeps every group when the process's working directory is inside the release directory
+and the code runs from it — not with a working directory of `/`, and not for a workspace package
+outside the working directory, whose frames keep their absolute path. A frame given as a `file://`
+URL (ESM) is read as the path it names (percent-encoding and a Windows drive included). Two errors with different messages thrown from one function on one route share
 a group — each event row's `stack_trace` still holds its own description, message included where
 the description kept it.
 

@@ -16,6 +16,9 @@
  * | F3 | every deploy to a new release directory opening a new group for each known fault  |
  * | F4 | every dependency bump (pnpm's `<name>@<version>_<hash>` directory) doing the same |
  * | F5 | the location stripped too far: one function name in two files merged             |
+ * | F6 | an ESM frame (`file://` URL) under a directory with a space: percent-encoded, so never inside the working directory |
+ * | F7 | an ESM frame of a Windows process (`file:///C:/…`) kept whole: a new group per release directory |
+ * | F8 | a working directory of `/`: no frame counted inside it, so the absolute path stays (the check looked for `//`) |
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -99,6 +102,30 @@ describe('generateFingerprint', () =>
 
             expect(deployedAt('/srv/app', drizzle('.pnpm/drizzle-orm@0.45.1_postgres@3.4.7_c3d4/node_modules/'))).toBe(before);
             expect(deployedAt('/srv/app', drizzle(''))).toBe(before);
+        });
+
+        it('F6: an ESM frame under a directory with a space names the same place as its path (#382)', () =>
+        {
+            const esm = (dir: string) => `    at insertUser (file://${dir.replaceAll(' ', '%20')}/dist/users.mjs:10:5)`;
+            const plain = (dir: string) => `    at insertUser (${dir}/dist/users.mjs:10:5)`;
+
+            expect(deployedAt('/srv/my app/20261121', esm)).toBe(deployedAt('/srv/my app/20261120', esm));
+            expect(deployedAt('/srv/my app/20261121', esm)).toBe(deployedAt('/srv/my app/20261121', plain));
+        });
+
+        it('F7: a Windows process\'s ESM frame is relative to its working directory (#382)', () =>
+        {
+            const esm = (dir: string) => `    at insertUser (file:///${dir.replaceAll('\\', '/')}/dist/users.mjs:10:5)`;
+
+            expect(deployedAt('C:\\releases\\20261121', esm)).toBe(deployedAt('D:\\releases\\20261120', esm));
+        });
+
+        it('F8: under a working directory of `/` a frame is relative to it, not left absolute (#382)', () =>
+        {
+            const at = (dir: string) => `    at insertUser (${dir}/dist/users.js:10:5)`;
+            const atRoot = (frame: string) => () => `    at insertUser (${frame}:10:5)`;
+
+            expect(deployedAt('/', atRoot('/dist/users.js'))).toBe(deployedAt('/srv/app', at));
         });
 
         it('F5: one function name in two files of the app, or of a dependency, is two groups', () =>

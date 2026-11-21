@@ -336,7 +336,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     each link of the cause chain by its name, code, constraint and table, and the top three stack
     frames by the place in code they name: no line and column, a dependency's file from the last
     `node_modules/` on (no pnpm version-and-hash directory), app code relative to the working
-    directory — so a release-directory deploy or a dependency bump keeps every group.
+    directory (a `file://` frame read as the path it names) — so a dependency bump keeps every
+    group, and a release-directory deploy does when the process's working directory is inside the
+    release directory and the code runs from it (not with a working directory of `/`, not for a
+    workspace package outside the working directory).
   - `error_groups.name` is the description's name, `error_groups.message` one line naming the fault
     (`Name [code=…] [constraint=…] [table=…]: message`, per link of the cause chain, the message only
     where the description kept one).
