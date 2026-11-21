@@ -360,7 +360,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored JSON. An event stored before this release (a raw stack)
   previews as its error's name and its V8 frame lines (indented, of the frame grammar — not every
   line starting `at `), not its first five lines, whose header and `params:` line held a failed
-  statement's SQL and bound values.
+  statement's SQL and bound values. A group stored before this release keeps its `message` as
+  stored — the raw message, for a failed statement its SQL and bound values — and the list and detail
+  views show it. No new event matches an old group, so deleting the groups first seen before the
+  upgrade removes that text; their events go with them.
 - **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text
   (#382).** `executions.error`, `step_executions.error` and the `error` of the `step.failed` and
   `failed` events held the error's message — for a failed statement its SQL and bound values. They

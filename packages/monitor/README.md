@@ -206,6 +206,12 @@ Groups stored before #382 were fingerprinted on the message; new events of the s
 new group once. Old rows are not migrated. A group marked `ignored` comes back the same way — once,
 as a new `active` group with one Slack alert; mark the new group `ignored` again.
 
+Old rows keep the text they were stored with: an old group's `message` is the raw error message
+(for a failed statement its SQL and bound values), and the list and detail views show it. No new
+event matches an old group, so an operator can delete the groups first seen before the upgrade
+(`DELETE FROM spfn_monitor.error_groups WHERE first_seen_at < <upgrade time>`); their events go
+with them.
+
 ### Manual tracking
 
 ```typescript
