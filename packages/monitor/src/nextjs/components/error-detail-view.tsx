@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { monitorApi } from '@spfn/monitor';
 import type { ErrorGroupStatus } from '@spfn/monitor';
+import { eventPreview } from './event-preview';
 
 interface ErrorDetailViewProps
 {
@@ -151,7 +152,7 @@ export function ErrorDetailView({ errorId, onBack }: ErrorDetailViewProps)
                                     </div>
                                     {event.stackTrace && (
                                         <pre className="text-xs text-neutral-600 dark:text-neutral-400 overflow-x-auto whitespace-pre-wrap mt-2 bg-neutral-50 dark:bg-neutral-900 p-2 rounded">
-                                            {event.stackTrace.split('\n').slice(0, 5).join('\n')}
+                                            {eventPreview(event.stackTrace)}
                                         </pre>
                                     )}
                                 </div>

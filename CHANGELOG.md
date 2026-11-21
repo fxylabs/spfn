@@ -344,7 +344,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The Slack message carries the group's line and the description's top three frames.
 
   Existing rows are not migrated. New events of a fault tracked before this release open a new group
-  once (its fingerprint changed); the old group keeps its count and stops growing.
+  once (its fingerprint changed); the old group keeps its count and stops growing. A group an
+  operator marked `ignored` is no exception: its fault comes back once as a new `active` group and
+  sends one Slack alert. Mark that new group `ignored` again; it stays quiet from then on.
+  The dashboard's event preview shows the fault (name, code, constraint, table) and its top three
+  frames, not the first lines of the stored JSON.
 - **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text
   (#382).** `executions.error`, `step_executions.error` and the `error` of the `step.failed` and
   `failed` events held the error's message — for a failed statement its SQL and bound values. They

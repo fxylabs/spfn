@@ -200,7 +200,8 @@ What is stored and sent is the description too (#382):
 - The Slack message carries the group's line and the description's top three frames.
 
 Groups stored before #382 were fingerprinted on the message; new events of the same fault open a
-new group once. Old rows are not migrated.
+new group once. Old rows are not migrated. A group marked `ignored` comes back the same way — once,
+as a new `active` group with one Slack alert; mark the new group `ignored` again.
 
 ### Manual tracking
 

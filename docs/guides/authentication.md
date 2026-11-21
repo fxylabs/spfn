@@ -920,7 +920,10 @@ A refused sign-in writes nothing — no account, social row, key, stored token o
 asks the provider first, does every write in one transaction, and redirects only after it rolled back.
 
 For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
-fixed sentence, never a library message. Put `{reason}` in the template
+fixed sentence, never a library message. For `failed` it is a typed error's own text (a missing
+`code`/`state`, an unverified email that would link an account), and for any other error — a missing
+role, a failed statement — the fixed `OAuth callback failed` (`OAuth link failed` when the link
+state could not be read); that error is logged at error level by `@spfn/auth:service` instead (#382). Put `{reason}` in the template
 (`/auth/error?error={error}&code={reason}`) to place it yourself; without it `reason` is appended as
 a query parameter. `OAuthCallback`'s `onError(message, reason)` and `errorComponent(message, reason)`
 receive the code as well.
