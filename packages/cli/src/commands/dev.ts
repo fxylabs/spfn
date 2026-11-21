@@ -7,7 +7,7 @@ import chokidar from 'chokidar';
 import { logger } from '../utils/logger.js';
 import { getCliVersion, getCorePeerRange } from '../utils/version.js';
 import { devLoaderImport } from '../utils/dev-loader.js';
-import { DevSupervisor, type DevChild } from '../utils/dev-supervisor.js';
+import { DevSupervisor, outliveOutputReader, type DevChild } from '../utils/dev-supervisor.js';
 import { syncAgentInstructions } from '../lib/agent-instructions.js';
 import { detectPackageManager, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { missingTsxMessage } from '../utils/tsx-required.js';
@@ -79,6 +79,21 @@ import { existsSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// The watcher's stop outlives what reads its output, as spfn dev's does
+// (outliveOutputReader): the Ctrl-C that kills \`tee\` in \`spfn dev | tee log\`
+// fails the stopping line (EPIPE), and that ends nothing. Any other error on
+// stdout or stderr is thrown, as unhandled.
+for (const stream of [process.stdout, process.stderr])
+{
+    stream.on('error', (error) =>
+    {
+        if (error.code !== 'EPIPE')
+        {
+            throw error;
+        }
+    });
+}
 
 // The @spfn/core installed for the app: the package.json of the
 // node_modules/@spfn/core nearest this entry, where its import resolves.
@@ -297,6 +312,7 @@ export const devCommand = new Command('dev')
         // Dev mode runs multiple concurrent processes (SPFN server, contract watcher, Next.js)
         // Each process adds event listeners (SIGTERM, SIGINT, exit, etc.)
         process.setMaxListeners(20);
+        outliveOutputReader();
 
         // Set NODE_ENV to development (Next.js style)
         if (!process.env.NODE_ENV) 

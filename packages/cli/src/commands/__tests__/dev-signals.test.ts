@@ -3,8 +3,8 @@
  * (`bin/spfn.js`, which re-runs itself under tsx and the dev hook) runs `spfn
  * dev` in a fixture app whose `@spfn/core` is a stand-in. Its server, its
  * codegen watcher and the app's `spfn:next` script (run through `pnpm run`, as
- * `spfn dev` runs it) each log every signal they get, their pgid, and their
- * exit, with the time, to one file.
+ * `spfn dev` runs it) each log every signal they get, their pgid and parent,
+ * and their exit, with the time, to one file.
  *
  * Stand-in timings: the watcher's close takes 0.5 s, the server's shutdown 1 s
  * and ignores later signals (as core's does), Next.js 2 s — so Next.js, behind
@@ -30,12 +30,17 @@
  * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
  * | T2 | one Ctrl-C to `pnpm dev` / `spfn dev`     | over-eager killing: a launcher that waits for `spfn dev` taken  |
  * |    | typed in that bash, a slow server         | for one that left, and the server's graceful stop cut short     |
+ * | T6 | one Ctrl-C to `spfn dev \| tee log` and   | the Ctrl-C killing `tee`, and the next line (EPIPE) ending      |
+ * |    | `pnpm exec spfn dev \| tee log`           | `spfn dev` — the server unsupervised, nothing killed at once —  |
+ * |    |                                           | or the watcher, before its close                                |
+ *
+ * The non-Linux read (`ps`) is `utils/__tests__/dev-supervisor-ps.test.ts`'s.
  *
  * No process outlives a row: each stand-in exits by itself 30 s after it
  * starts, and teardown SIGKILLs every process carrying the row's environment
  * tag (`helpers/process-tree.ts`). Waits time out and fail the row rather than
  * hang it. Build the CLI first (`pnpm --filter spfn build`): the bin runs
- * `dist/`. Needs `pnpm` and Linux (`/proc`); T1 and T2 need `script`
+ * `dist/`. Needs `pnpm` and Linux (`/proc`); the T rows need `script`
  * (util-linux) for the terminal and `bash` for the shell typed in.
  */
 
@@ -59,6 +64,7 @@ interface Line
     pid: number;
     pgid: number;
     event: string;
+    ppid: number;
 }
 
 let appDir: string;
@@ -73,7 +79,7 @@ function write(path: string, content: string): void
 /** Logs every stop signal, the start and the exit; exits by itself `STUB_CAP_MS` after starting. */
 const SIGNAL_LOG = `import { appendFileSync, readFileSync } from 'node:fs';
 const pgid = () => Number(readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[2]);
-export const log = (role, event) => appendFileSync(process.env.SPFN_SIGNAL_LOG, \`\${Date.now()} \${role} \${process.pid} \${pgid()} \${event}\\n\`);
+export const log = (role, event) => appendFileSync(process.env.SPFN_SIGNAL_LOG, \`\${Date.now()} \${role} \${process.pid} \${pgid()} \${event} \${process.ppid}\\n\`);
 export function stub(role)
 {
     log(role, 'start');
@@ -152,9 +158,9 @@ function lines(): Line[]
     return existsSync(file)
         ? readFileSync(file, 'utf8').trim().split('\n').map((line) =>
         {
-            const [at, role, pid, pgid, event] = line.split(' ');
+            const [at, role, pid, pgid, event, ppid] = line.split(' ');
 
-            return { at: Number(at), role: role as Role, pid: Number(pid), pgid: Number(pgid), event };
+            return { at: Number(at), role: role as Role, pid: Number(pid), pgid: Number(pgid), event, ppid: Number(ppid) };
         })
         : [];
 }
@@ -429,6 +435,32 @@ describe.skipIf(process.platform !== 'linux')('spfn dev supervision (#358)', () 
     }, 60_000);
 });
 
+/** The server's stop as the server records it. */
+function serverStop(): { signals: string[]; ranItsStop: boolean; supervisedToTheEnd: boolean }
+{
+    const server = lines().filter(line => line.role === 'server');
+    const started = server.find(line => line.event === 'start');
+    const exited = server.find(line => line.event === 'exit');
+
+    return {
+        signals: signalsByRole().server,
+        // Its own stop run to completion: not killed.
+        ranItsStop: exited !== undefined,
+        // Its parent when it exited is the one it started under: spfn dev, still there.
+        supervisedToTheEnd: started !== undefined && exited !== undefined && exited.ppid === started.ppid,
+    };
+}
+
+/**
+ * Ends the row once no process of it is left behind the prompt (10 s when
+ * only a kill can end the server in time), failing with the list otherwise.
+ */
+async function nothingLeft(terminal: Dev, ms = 30_000): Promise<void>
+{
+    await until(terminal, 'no process left behind the prompt', () => treeLeft().length === 0, ms)
+        .catch(error => expect.fail(`${error}\n${treeLeft().join('\n')}`));
+}
+
 describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#358)', () =>
 {
     it('T1 one Ctrl-C to `pnpm exec spfn dev`, which exits on it: no second Ctrl-C can come, so spfn dev kills what is left at once', async () =>
@@ -470,5 +502,24 @@ describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#35
             killed: terminal.output().includes('killing what is left'),
             groupsLeft: groupsLeft(),
         }, terminal.output()).toEqual({ server: ['SIGTERM'], stopTookItsTime: true, killed: false, groupsLeft: [] });
+    }, 60_000);
+
+    it.each([
+        ['spfn dev | tee log', './node_modules/.bin/spfn dev --no-agent-files | tee out.log', false],
+        ['pnpm exec spfn dev | tee log', 'pnpm exec spfn dev --no-agent-files | tee out.log', true],
+    ])('T6 one Ctrl-C to `%s`, which kills tee: spfn dev outlives its output and does its duty', async (_line, line, killsAtOnce) =>
+    {
+        // When the kill is due, the server's stop outlasts the wait: only the kill ends it in time.
+        const terminal = await typeInTerminal(line, { server: killsAtOnce ? 25_000 : 3000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        terminal.child.stdin!.write('\x03');
+        await nothingLeft(terminal, killsAtOnce ? 10_000 : 30_000);
+
+        const { signals, ...stop } = serverStop();
+        const watcherRanItsStop = lines().some(line => line.role === 'watcher' && line.event === 'exit');
+
+        expect({ ...stop, watcherRanItsStop, groupsLeft: groupsLeft() }, `${terminal.output()}\n${JSON.stringify(signals)}`)
+            .toEqual({ ranItsStop: !killsAtOnce, supervisedToTheEnd: !killsAtOnce, watcherRanItsStop: !killsAtOnce, groupsLeft: [] });
     }, 60_000);
 });

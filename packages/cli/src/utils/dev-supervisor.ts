@@ -81,9 +81,9 @@ export class DevSupervisor
     constructor()
     {
         STOP_SIGNALS.forEach(signal => process.on(signal, () => this.onSignal(signal)));
-        // spfn dev exiting otherwise — an uncaught exception, a write to a closed
-        // stdout — stops each child not stopped yet. execa's own cleanup skips
-        // detached children, so this is the only one they have.
+        // spfn dev exiting otherwise — an uncaught exception — stops each child
+        // not stopped yet. execa's own cleanup skips detached children, so
+        // this is the only one they have.
         process.on('exit', () =>
         {
             this.terminal.close();
@@ -214,6 +214,30 @@ export class DevSupervisor
             this.signalled.add(child);
             signalGroup(child.process, 'SIGTERM');
         }
+    }
+}
+
+/**
+ * Keep `spfn dev` running when what reads its output has gone. In `spfn dev |
+ * tee log` the Ctrl-C that stops `spfn dev` kills `tee` too, and the next line
+ * written — `Stopping …` — fails with EPIPE, which, unhandled, ends `spfn dev`
+ * and leaves its children unsupervised. The dev command calls this first, and
+ * it holds for the rest of the process: an EPIPE on stdout or stderr closes
+ * that stream (later writes to it go nowhere); any other error on them is
+ * still thrown, an uncaught exception as without the listener. The codegen
+ * watcher's entry does the same (`watcherEntrySource`).
+ */
+export function outliveOutputReader(): void
+{
+    for (const stream of [process.stdout, process.stderr])
+    {
+        stream.on('error', (error: NodeJS.ErrnoException) =>
+        {
+            if (error.code !== 'EPIPE')
+            {
+                throw error;
+            }
+        });
     }
 }
 
