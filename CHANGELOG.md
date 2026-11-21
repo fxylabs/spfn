@@ -811,7 +811,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`/middleware`) the `TooManyRequestsError` of `@spfn/core/errors`, and `errorRegistry` is one
     registry; `OpsRouterError` is `SurfaceError`, as `src/ops/error.ts` documents; `/env/loader` and
     `/server` share the load-once state of `loadEnv`; the job, SSE and route builders are one copy
-    each between their own entry and `/server`. 34 modules before (at least 53 counted without the
+    each between their own entry and `/server`. 35 modules before (at least 54 counted without the
     rollup pass, which hid markers). Each entry still records its evaluation once (`recordEvaluation`).
   - **@spfn/notification:** configuration set through `@spfn/notification/config` is what
     `@spfn/notification/server` sends with; before, `/config` configured a copy `/server` never read.
@@ -831,7 +831,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module markers the check reads; `pnpm check:exports` fails a package whose `build` does not run
   it. Packages built with tsup's `treeshake` (core, i18n, mcp, signing, workflow) no longer are: its
   rollup pass removed those markers. esbuild still tree-shakes; `@spfn/auth`'s root browser entry
-  grows from 79,126 to 82,462 bytes minified (+0.7 KB gzipped).
+  grows from 79,563 to 82,927 bytes minified (+0.7 KB gzipped).
 - **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
   failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
   `params`, its stack header and the driver's `detail` reached the logs through the runner's
