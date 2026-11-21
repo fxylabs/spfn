@@ -26,8 +26,8 @@ long-lived feature or package branches.
 - The title follows Conventional Commits (`type(scope): subject`, `!` for a breaking
   change), because it becomes the commit on `main`.
 - The pull request pipeline (`.woodpecker/pr.yml`) builds, lints, type-checks, runs
-  `pnpm check:versions` and `pnpm check:exports` (which also holds every package's `build` to
-  running the bundle identity check), and runs the tests of the packages the change touches and
+  `pnpm check:versions`, `pnpm check:exports` and `pnpm check:bundles` (the bundle identity check
+  over every built package's `dist`), and runs the tests of the packages the change touches and
   of everything that depends on them. A change outside the workspace
   packages runs everything.
 - Every commit carries a DCO sign-off (`git commit -s`). See
