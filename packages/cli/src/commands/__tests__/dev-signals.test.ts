@@ -4,7 +4,8 @@
  * dev` in a fixture app whose `@spfn/core` is a stand-in. Its server, its
  * codegen watcher and the app's `spfn:next` script (run through `pnpm run`, as
  * `spfn dev` runs it) each log every signal they get, their pgid and parent,
- * and their exit, with the time, to one file.
+ * and their exit, with the time, to one file. A stand-in's `exit` is its own
+ * stop run to completion; killed, it logs none.
  *
  * Stand-in timings: the watcher's close takes 0.5 s, the server's shutdown 1 s
  * and ignores later signals (as core's does), Next.js 2 s — so Next.js, behind
@@ -28,6 +29,8 @@
  * | T1 | one Ctrl-C to `pnpm exec spfn dev` typed  | `spfn dev` and a slow server running on behind the shell's      |
  * |    | in an interactive bash in a terminal, the | prompt, for the server's whole stop, after the launcher exited  |
  * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
+ * |    |                                           | (the server SIGTERMed first, or not at all when the shell took  |
+ * |    |                                           | the terminal back before `spfn dev` handled the Ctrl-C)         |
  * | T2 | one Ctrl-C to `pnpm dev` / `spfn dev`     | over-eager killing: a launcher that waits for `spfn dev` taken  |
  * |    | typed in that bash, a slow server         | for one that left, and the server's graceful stop cut short     |
  * | T3 | `pnpm exec spfn dev &`, then `fg`, then   | the foreground read once, at start: `spfn dev` and the server   |
@@ -91,7 +94,7 @@ export function stub(role)
 {
     log(role, 'start');
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => log(role, signal));
-    process.on('exit', () => log(role, 'exit'));
+    process.on('exit', code => log(role, code === 0 ? 'exit' : \`exit\${code}\`));
     setTimeout(() => process.exit(99), 30_000).unref();
 }
 export const stopAfter = (ms) =>
@@ -451,7 +454,7 @@ function serverStop(): { signals: string[]; ranItsStop: boolean; supervisedToThe
 
     return {
         signals: signalsByRole().server,
-        // Its own stop run to completion: not killed.
+        // Its own stop run to completion (exit 0): not killed, not its 30 s cap.
         ranItsStop: exited !== undefined,
         // Its parent when it exited is the one it started under: spfn dev, still there.
         supervisedToTheEnd: started !== undefined && exited !== undefined && exited.ppid === started.ppid,
@@ -479,15 +482,14 @@ describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#35
 
         await until(terminal, 'server, watcher and Next.js starting', allStarted);
         terminal.child.stdin!.write('\x03');
-        await until(terminal, 'no process left behind the prompt', () => treeLeft().length === 0, 10_000)
-            .catch(error => expect.fail(`${error}\n${treeLeft().join('\n')}`));
+        await nothingLeft(terminal, 10_000);
 
-        expect({
-            server: signalsByRole().server,
-            serverStoppedGracefully: lines().some(line => line.role === 'server' && line.event === 'exit'),
-            said: terminal.output().includes('spfn dev no longer has the terminal, so no second Ctrl-C can reach it: killing what is left'),
-            groupsLeft: groupsLeft(),
-        }, terminal.output()).toEqual({ server: ['SIGTERM'], serverStoppedGracefully: false, said: true, groupsLeft: [] });
+        // spfn dev SIGTERMs the server when it still has the terminal as its
+        // stop begins, and kills it on the next read; when the shell took the
+        // terminal back first, it kills at once and sends no SIGTERM.
+        expect([[], ['SIGTERM']], terminal.output()).toContainEqual(serverStop().signals);
+        expect({ ranItsStop: serverStop().ranItsStop, said: terminal.output().includes(KILL_LINE), groupsLeft: groupsLeft() }, terminal.output())
+            .toEqual({ ranItsStop: false, said: true, groupsLeft: [] });
     }, 60_000);
 
     it.each([
@@ -499,18 +501,10 @@ describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#35
 
         await until(terminal, 'server, watcher and Next.js starting', allStarted);
         terminal.child.stdin!.write('\x03');
-        await until(terminal, 'no process left behind the prompt', () => treeLeft().length === 0);
+        await nothingLeft(terminal);
 
-        const server = lines().filter(line => line.role === 'server');
-        const signalled = server.find(line => line.event === 'SIGTERM');
-        const exited = server.find(line => line.event === 'exit');
-
-        expect({
-            server: signalsByRole().server,
-            stopTookItsTime: signalled !== undefined && exited !== undefined && exited.at - signalled.at >= 3000,
-            killed: terminal.output().includes('killing what is left'),
-            groupsLeft: groupsLeft(),
-        }, terminal.output()).toEqual({ server: ['SIGTERM'], stopTookItsTime: true, killed: false, groupsLeft: [] });
+        expect({ ...serverStop(), killed: terminal.output().includes('killing what is left'), groupsLeft: groupsLeft() }, terminal.output())
+            .toEqual({ signals: ['SIGTERM'], ranItsStop: true, supervisedToTheEnd: true, killed: false, groupsLeft: [] });
     }, 60_000);
 
     it('T3 `pnpm exec spfn dev &` brought forward with `fg`: one Ctrl-C, the launcher exits, and spfn dev kills what is left at once', async () =>
