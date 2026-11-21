@@ -919,6 +919,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     they used to run on.
   - SIGHUP (a closed terminal) stops `spfn dev` as SIGTERM does; it used to kill `spfn dev` and
     the watcher mid-generation.
+  - `spfn dev` exiting on an uncaught exception SIGTERMs every child's group it has not signalled
+    yet. execa's exit cleanup, which stopped the server and the watcher before, skips children in
+    groups of their own.
 - **spfn: without tsx, `spfn db` and `spfn provision` say what to install (#349)**, as `spfn env`
   did: `tsx is not installed in this project, and it is what loads TypeScript. Add it: <the app's
   own add command>`, exit 1. `db generate`, `push` and `tenant` stopped on Node's `Cannot find

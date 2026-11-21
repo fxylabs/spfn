@@ -20,7 +20,9 @@ import { inTerminalForeground } from './terminal-foreground.js';
  * an escalation, since `pnpm exec spfn dev` adds a SIGTERM to a Ctrl-C's
  * SIGINT, and the terminal hangs up after its job. A SIGINT once the stop has
  * begun — a person pressing Ctrl-C again — SIGKILLs every group left, and `spfn
- * dev` exits 130. A SIGKILL of `spfn dev` reaches no child.
+ * dev` exits 130. If `spfn dev` exits any other way (an uncaught exception), it
+ * SIGTERMs every group not signalled yet as it goes; only a SIGKILL of `spfn
+ * dev` reaches no child.
  *
  * A second Ctrl-C means "stop waiting", and when it can no longer arrive it is
  * taken as given. It can arrive while `spfn dev`'s group is its terminal's
@@ -72,6 +74,10 @@ export class DevSupervisor
     constructor()
     {
         STOP_SIGNALS.forEach(signal => process.on(signal, () => this.onSignal(signal)));
+        // spfn dev exiting otherwise — an uncaught exception, a write to a closed
+        // stdout — stops each child not stopped yet. execa's own cleanup skips
+        // detached children, so this is the only one they have.
+        process.on('exit', () => this.children.forEach(child => this.signalOnce(child)));
     }
 
     /** Whether a stop has begun. */

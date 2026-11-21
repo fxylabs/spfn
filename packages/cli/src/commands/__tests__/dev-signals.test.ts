@@ -24,6 +24,7 @@
  * |    | past the row                              | `pnpm run`/`sh -c` survives it, holding its port                |
  * | S5 | SIGQUIT to the bin's process group (the   | `spfn dev` killed by a Ctrl-\ the children no longer get: the   |
  * |    | terminal's Ctrl-\)                        | whole tree runs on, orphaned                                    |
+ * | S6 | an uncaught exception in `spfn dev`        | the children orphaned: execa's exit cleanup skips detached ones |
  * | T1 | one Ctrl-C to `pnpm exec spfn dev` typed  | `spfn dev` and a slow server running on behind the shell's      |
  * |    | in an interactive bash in a terminal, the | prompt, for the server's whole stop, after the launcher exited  |
  * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
@@ -94,6 +95,26 @@ export const stopAfter = (ms) =>
 };
 `;
 
+/**
+ * Preloaded into the bin (`--import`), it throws from `spfn dev` — the process
+ * the bin re-ran itself as — once the server, the watcher and Next.js have started.
+ */
+const CRASH_DEV = `import { existsSync, readFileSync } from 'node:fs';
+const started = () => existsSync(process.env.SPFN_SIGNAL_LOG)
+    && ['server', 'watcher', 'next'].every(role => readFileSync(process.env.SPFN_SIGNAL_LOG, 'utf8').includes(\` \${role} \`));
+if (process.env.SPFN_CLI_RELAUNCHED_IN !== undefined)
+{
+    const check = setInterval(() =>
+    {
+        if (started())
+        {
+            clearInterval(check);
+            throw new Error('stand-in: an uncaught exception in spfn dev');
+        }
+    }, 50);
+}
+`;
+
 function writeApp(): void
 {
     write('package.json', JSON.stringify({ name: 'dev-signals-fixture', private: true, dependencies: { next: '15.0.0' },
@@ -119,6 +140,7 @@ function writeApp(): void
         + '    close() { return new Promise(settle => setTimeout(settle, Number(process.env.WATCHER_STOP_MS))); }\n}\n'
         + 'export const loadCodegenConfig = () => ({});\nexport const createGeneratorsFromConfig = () => [];\n'
         + 'export const markAppSourceProcess = () => stub(\'watcher\');\n');
+    write('crash-dev.mjs', CRASH_DEV);
     mkdirSync(join(appDir, 'node_modules/.bin'));
     symlinkSync(bin, join(appDir, 'node_modules/.bin/spfn'));
 }
@@ -191,10 +213,10 @@ async function rowEnv(stopMs: StopMs): Promise<NodeJS.ProcessEnv>
     return env;
 }
 
-/** The bin, `spfn dev`, in a process group of its own, as a terminal or a process manager starts it. */
-async function startDev(stopMs: StopMs): Promise<Dev>
+/** The bin, `spfn dev` (under `nodeArgs`), in a process group of its own, as a terminal or a process manager starts it. */
+async function startDev(stopMs: StopMs, nodeArgs: string[] = []): Promise<Dev>
 {
-    return devOf(spawn(process.execPath, [bin, 'dev', '--no-agent-files'], { cwd: appDir, env: await rowEnv(stopMs), detached: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+    return devOf(spawn(process.execPath, [...nodeArgs, bin, 'dev', '--no-agent-files'], { cwd: appDir, env: await rowEnv(stopMs), detached: true, stdio: ['ignore', 'pipe', 'pipe'] }));
 }
 
 /**
@@ -238,6 +260,17 @@ async function until(dev: Dev, what: string, condition: () => boolean, ms = 30_0
             throw new Error(`${what} did not happen:\n${dev.output().slice(-3000)}\n${JSON.stringify(lines())}`);
         }
 
+        await new Promise(settle => setTimeout(settle, 50));
+    }
+}
+
+/** Resolves once `condition` holds or `ms` on, whichever is first: the row's assertion says which. */
+async function settled(condition: () => boolean, ms: number): Promise<void>
+{
+    const deadline = Date.now() + ms;
+
+    while (!condition() && Date.now() < deadline)
+    {
         await new Promise(settle => setTimeout(settle, 50));
     }
 }
@@ -349,6 +382,19 @@ describe.skipIf(process.platform !== 'linux')('spfn dev supervision (#358)', () 
 
         expect(signalsByRole(), dev.output()).toEqual({ server: ['SIGTERM'], watcher: ['SIGTERM'], next: ['SIGTERM'] });
         expect({ code: exit.code, groupsLeft: groupsLeft() }, dev.output()).toEqual({ code: 0, groupsLeft: [] });
+    }, 60_000);
+
+    it('S6 spfn dev dying of an uncaught exception stops each child as it goes, leaving no process', async () =>
+    {
+        const dev = await startDev({ server: 1000, watcher: 500, next: 2000 }, ['--import', join(appDir, 'crash-dev.mjs')]);
+        const exit = await exitOf(dev);
+
+        // Without the stop the stand-ins run on until their own 30 s cap.
+        await settled(() => groupsLeft().length === 0, 10_000);
+
+        expect(dev.output()).toContain('stand-in: an uncaught exception in spfn dev');
+        expect(signalsByRole(), dev.output()).toEqual({ server: ['SIGTERM'], watcher: ['SIGTERM'], next: ['SIGTERM'] });
+        expect({ code: exit.code, groupsLeft: groupsLeft() }, dev.output()).toEqual({ code: 1, groupsLeft: [] });
     }, 60_000);
 
     it('S3 a SIGTERM after a SIGINT (pnpm exec relaying a Ctrl-C) is no second Ctrl-C: the server finishes its shutdown', async () =>

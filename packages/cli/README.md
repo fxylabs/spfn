@@ -297,8 +297,9 @@ only once every group is empty, with no deadline of its own.
 - **`--watch` restarts the server the same way:** one SIGTERM to the server's group, then the new
   server starts once nothing is left in it — its port is free then.
 - **Next.js exiting with an error** stops the server and the watcher, then `spfn dev`, exit 1.
-- **A SIGKILL of `spfn dev` reaches no child**, nor does anything that kills `spfn dev` before it
-  has stopped them: their groups run on. A process manager that kills by process group must kill
+- **`spfn dev` dying stops its children**: an uncaught exception, or a write to a closed stdout,
+  SIGTERMs every child's group not signalled yet as `spfn dev` exits. Only a SIGKILL of `spfn dev`
+  reaches no child: their groups run on. A process manager that kills by process group must kill
   each child's group, or the cgroup (systemd's default `KillMode=control-group` does).
 
 #### Your server source runs as ESM, as it does in production
