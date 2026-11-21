@@ -370,7 +370,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Network error` and the fetch error is its `cause`. The RPC proxy's 502 (the backend call or a
   response interceptor threw) and 500 (a request interceptor threw) answered the error's message; they
   now answer `Failed to connect to backend` and `Internal server error` — the error is in the proxy's
-  log line, and a development proxy (`debug`) still adds the stack.
+  log line. A `debug` proxy (`RpcProxyConfig.debug`, on by default in development and settable in
+  production) added the error's stack, whose first line is its message — for a failed statement its
+  SQL and bound values; its 500, 502 and 504 now add `description`, the error's `describeError`
+  description (the log line's value), and never `stack`.
+- **BREAKING: @spfn/core: the error handler's development answer carries the error's description,
+  not its text (#382).** Under `includeStack` (every `NODE_ENV` but `production`) a standard error
+  that is not a database error was answered with its `message`, its cause's message as `cause`, and
+  its raw `stack` — a fetch failure's internal host, a wrapped error's raw text. Its body is now
+  `{ __type: 'Error', message: 'Internal Server Error', description }` with `description` its
+  `describeError` description, as a database error's already was in `database`. A
+  `SerializableError`'s `stack` is now the description's frames, without the header line (its
+  message is in the body already). Production answers are unchanged.
 - **@spfn/core: `isSerializableError(error)` from `@spfn/core/errors` (#382).** The error
   handler's check for a typed error — `instanceof SerializableError`, or `toJSON()` and a numeric
   `statusCode` for a second copy of the class loaded in dev — is now exported, and auth's OAuth error

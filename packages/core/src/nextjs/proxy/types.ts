@@ -52,7 +52,13 @@ export interface TypedProxyConfig
     apiUrl?: string;
 
     /**
-     * Enable debug logging
+     * Debug mode: log each request and response at debug level, and add to the
+     * proxy's own failure answers (500, 502, 504) a `description` of the caught
+     * error — the value its log line carries (`describeError`), never the
+     * error's message or stack. A database error's description names its code,
+     * constraint and table, not its statement or values; another error's keeps
+     * what `describeError` keeps (its message and its causes' messages), so leave
+     * `debug` off where the answer reaches someone who must not read them.
      *
      * @default process.env.NODE_ENV === 'development'
      */

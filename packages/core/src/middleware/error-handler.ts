@@ -102,10 +102,10 @@ interface StandardErrorResponse
 {
     __type: string;
     message: string;
-    cause?: string;
-    stack?: string;
     /** Outside production, a database error's description in place of its message, cause and stack */
     database?: Description;
+    /** Outside production, any other error's description in place of its message, cause and stack */
+    description?: Description;
 }
 
 /**
@@ -156,31 +156,6 @@ function resolveRequestId(c: Context): string
     const existing = c.get('requestId') as string | undefined;
 
     return existing ?? randomBytes(16).toString('hex');
-}
-
-/**
- * Extract root cause message from nested Error.cause chain
- */
-function extractCauseMessage(err: Error): string | undefined
-{
-    const cause = (err as any).cause;
-
-    if (!cause)
-    {
-        return undefined;
-    }
-
-    if (cause instanceof Error)
-    {
-        return cause.message;
-    }
-
-    if (typeof cause === 'string')
-    {
-        return cause;
-    }
-
-    return String(cause);
 }
 
 const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'x-auth-token']);
@@ -281,11 +256,11 @@ function isDatabaseDescription(description: Description): boolean
 }
 
 /**
- * The body for an error that is not a SerializableError. Its message, cause
- * and stack may carry raw SQL or driver text, so production gets a generic
- * message only. Outside production a database error is answered with its
- * description — never its message, cause or stack, which hold the bound
- * values — and any other error with its message, cause and stack.
+ * The body for an error that is not a SerializableError. Production gets a
+ * generic message only. Outside production the body carries the error's
+ * description — never its message, cause or stack, which may hold raw SQL,
+ * bound values or an internal host — in `database` for a database error and in
+ * `description` for any other.
  */
 function standardErrorResponse(err: Error, includeStack: boolean): StandardErrorResponse
 {
@@ -301,20 +276,7 @@ function standardErrorResponse(err: Error, includeStack: boolean): StandardError
         return { __type: 'Error', message: 'Database error', database: description };
     }
 
-    const response: StandardErrorResponse = { __type: 'Error', message: err.message || 'Internal Server Error' };
-    const causeMessage = extractCauseMessage(err);
-
-    if (causeMessage)
-    {
-        response.cause = causeMessage;
-    }
-
-    if (err.stack)
-    {
-        response.stack = err.stack;
-    }
-
-    return response;
+    return { __type: 'Error', message: 'Internal Server Error', description };
 }
 
 /**
@@ -434,10 +396,12 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
             // Use toJSON() for automatic serialization
             const serialized = err.toJSON();
 
-            // Add stack trace in development
-            if (includeStack && err.stack)
+            // Add the stack's frames in development: the description's, not the raw stack
+            const frames = includeStack ? describeError(err).stack : undefined;
+
+            if (frames)
             {
-                serialized.stack = err.stack;
+                serialized.stack = frames;
             }
 
             return respond(c, serialized, statusCode);

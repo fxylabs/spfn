@@ -4,7 +4,7 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Hono, type Context } from 'hono';
-import { Logger } from '@spfn/core/logger';
+import { describeError, Logger } from '@spfn/core/logger';
 import { ErrorHandler, type OnErrorContext } from '../error-handler';
 import { RequestLogger } from '../request-logger';
 import { captureLoggerClass, expectNoValues, failedInsert } from '../../logger/__tests__/helpers/leak-probe';
@@ -152,7 +152,8 @@ describe('ErrorHandler Middleware', () =>
 
             expect(res.status).toBe(500);
             expect(json.__type).toBe('Error');
-            expect(json.message).toBe('Something went wrong');
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toMatchObject({ kind: 'error', name: 'Error', message: 'Something went wrong' });
         });
 
         it('should handle Error with custom statusCode', async () =>
@@ -173,7 +174,8 @@ describe('ErrorHandler Middleware', () =>
 
             expect(res.status).toBe(418);
             expect(json.__type).toBe('Error');
-            expect(json.message).toBe('Custom error');
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toMatchObject({ kind: 'error', name: 'Error', message: 'Custom error' });
         });
 
         it('should provide default message for empty error', async () =>
@@ -212,8 +214,8 @@ describe('ErrorHandler Middleware', () =>
             const json: any = await res.json();
 
             expect(res.status).toBe(404);
-            expect(json.stack).toBeDefined();
-            expect(json.stack).toContain('NotFoundError');
+            expect(json.stack).toMatch(/^\s+at /);
+            expect(json.stack).not.toContain('Not found');
         });
 
         it('should exclude stack trace when includeStack is false', async () =>
@@ -234,22 +236,27 @@ describe('ErrorHandler Middleware', () =>
             expect(json.stack).toBeUndefined();
         });
 
-        it('should include stack trace for standard errors when enabled', async () =>
+        it('H1: a standard error under includeStack answers its description, never its message, cause or stack (#382)', async () =>
         {
             const app = new Hono();
+            const thrown = new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND secret-host.internal') });
 
             app.onError(ErrorHandler({ includeStack: true, enableLogging: false }));
 
             app.get('/error', () =>
             {
-                throw new Error('Standard error');
+                throw thrown;
             });
 
             const res = await app.request('/error');
             const json: any = await res.json();
 
             expect(res.status).toBe(500);
-            expect(json.stack).toBeDefined();
+            expect(json.message).toBe('Internal Server Error');
+            expect(json.description).toEqual(JSON.parse(JSON.stringify(describeError(thrown))));
+            expect(json.cause).toBeUndefined();
+            expect(json.stack).toBeUndefined();
+            expect(JSON.stringify(json)).not.toContain('TypeError: fetch failed');
         });
     });
 

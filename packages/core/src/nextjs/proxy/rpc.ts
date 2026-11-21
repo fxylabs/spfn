@@ -579,7 +579,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                 });
 
                 return NextResponse.json(
-                    buildErrorResponse('Bad Gateway', 'Failed to connect to backend', debug, error as Error),
+                    buildErrorResponse('Bad Gateway', 'Failed to connect to backend', debug, error),
                     { status: 502 },
                 );
             }
@@ -594,7 +594,7 @@ export function createRpcProxy(config: RpcProxyConfig)
             });
 
             return NextResponse.json(
-                buildErrorResponse('Internal Server Error', 'Internal server error', debug, error as Error),
+                buildErrorResponse('Internal Server Error', 'Internal server error', debug, error),
                 { status: 500 },
             );
         }

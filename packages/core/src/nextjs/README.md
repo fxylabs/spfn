@@ -315,7 +315,7 @@ interface RpcProxyConfig {
     routeMap: RouteMap;                         // REQUIRED — Record<routeName, { method, path }>
     apiUrl?: string;                            // default env.SPFN_API_URL || 'http://localhost:8790'
     timeout?: number;                           // default env.RPC_PROXY_TIMEOUT (120000 ms); AbortController
-    debug?: boolean;                            // default env.NODE_ENV === 'development'
+    debug?: boolean;                            // default env.NODE_ENV === 'development'; debug log lines + `description` in 500/502/504
     headers?: Record<string, string>;           // added to every forwarded request
     interceptors?: InterceptorRule[];           // inline interceptors (array, NOT { request, response })
     autoDiscoverInterceptors?: boolean;          // default true — pull from registry
@@ -326,6 +326,13 @@ interface RpcProxyConfig {
 interface RouteMapEntry { method: HttpMethod; path: string; }
 type RouteMap = Record<string, RouteMapEntry>;
 ```
+
+The proxy's own failure answers — 504 (timeout), 502 (the backend call or a response
+interceptor threw), 500 (a request interceptor threw) — are `{ error, message }` with a fixed
+sentence; the caught error goes to the proxy's log line. With `debug` the body adds
+`description`, the error's `describeError` description (the log line's value), never its
+message or stack. A description keeps a non-database error's message and its causes'
+messages, so leave `debug` off where the answer reaches someone who must not read them.
 
 ### `routeMap` — the proxy's source of truth
 

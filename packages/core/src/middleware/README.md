@@ -161,9 +161,11 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
   the error's own `statusCode` as the HTTP status. Custom fields (`resource`, `fields`, …)
   are preserved. Detection is duck-typed (`toJSON` + numeric `statusCode`) so it survives
   module duplication under tsx/dev.
-- **Standard `Error`** → falls back to `{ __type: 'Error', message }`, status from a
-  `statusCode` property on the error if present, else `500`.
-- **`cause` chain** → the root cause message is extracted and added as `cause`.
+- **Standard `Error`** → falls back to `{ __type: 'Error', message: 'Internal Server Error' }`,
+  status from a `statusCode` property on the error if present, else `500`. When `includeStack`
+  is `true` it adds `description`, the error's `describeError` description (the value the log
+  line carries) — never the error's message, `cause` or `stack` as text, which can hold an
+  internal host or a cause's raw text.
 - **Database error, outside production** → a standard error that is, or was caused by, a
   database error (a drizzle `DrizzleQueryError`, a driver `PostgresError`, a `RepositoryError`
   over one) is answered with `{ __type: 'Error', message: 'Database error', database }` when
@@ -189,7 +191,7 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `includeStack` | `boolean` | `env.NODE_ENV !== 'production'` | Add `stack` to the response body |
+| `includeStack` | `boolean` | `env.NODE_ENV !== 'production'` | Add the stack's frames (`SerializableError`) or the error's description (any other error) to the response body |
 | `enableLogging` | `boolean` | `true` | Log errors (warn 4xx / error 5xx) |
 | `onError` | `(err, ctx: OnErrorContext) => void \| Promise<void>` | — | Non-blocking side-effect callback |
 
@@ -214,7 +216,7 @@ the error's `statusCode`:
 // development (includeStack) adds:
 { "__type": "NotFoundError", "message": "User not found", "resource": "User",
   "error": { "code": "NotFoundError", "message": "User not found", "requestId": "9f2c…" },
-  "stack": "Error: User not found\n    at ..." }
+  "stack": "    at ..." }   // the frames only: describeError(err).stack
 ```
 
 Standard error fallback:
@@ -222,8 +224,8 @@ Standard error fallback:
 ```json
 { "__type": "Error", "message": "Internal Server Error",
   "error": { "code": "Error", "message": "Internal Server Error", "requestId": "9f2c…" } }
-// + "cause": "..."  when the error has a cause
-// + "stack": "..."  only when includeStack is true
+// + "description": { "kind": "error", "name": "TypeError", "message": "...", "cause": {…},
+//                    "stack": "    at ..." }  only when includeStack is true
 ```
 
 A database error when `includeStack` is true (any non-production `NODE_ENV`, staging included):

@@ -217,7 +217,7 @@ catch (error) { throw fromPostgresError(error); }
 `SerializableError.toJSON()` emits `{ __type: this.constructor.name, message, ...publicFields }`,
 skipping `name`, `message`, `stack`, and `statusCode`. The `ErrorHandler` middleware calls
 `toJSON()`, adds the `error` envelope, and responds with the matching status code (plus
-`stack` when `includeStack` is on).
+`stack` — the frames of `describeError(error)`, not the raw stack — when `includeStack` is on).
 
 ### Reserved field names
 
