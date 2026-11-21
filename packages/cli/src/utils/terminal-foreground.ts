@@ -4,9 +4,10 @@ import { readFileSync } from 'node:fs';
 /**
  * Where a Ctrl-C typed in this process's controlling terminal goes, as read now:
  * - `foreground`: to this process's group — it reaches `spfn dev`;
- * - `taken`: not to this process's group — the shell took the terminal back,
- *   or there is no terminal (a process manager, a pipe, CI);
- * - `none`: nowhere this process can tell (Windows);
+ * - `taken`: to another group — the shell took the terminal back;
+ * - `none`: nowhere — there is no controlling terminal (a process manager, a
+ *   pipe, CI, Windows), or no longer one (the terminal hung up: the kernel
+ *   removes it before the SIGHUP is handled);
  * - `unknown`: the read failed, printed something it cannot parse, or did not
  *   answer.
  */
@@ -51,7 +52,7 @@ export class TerminalWatch
     /**
      * Whether a Ctrl-C from the terminal could reach this process once, and
      * another group has the terminal now: a further Ctrl-C goes to the shell.
-     * Not when the last read cannot tell.
+     * Not when the terminal is gone, nor when the last read cannot tell.
      */
     lost(): boolean
     {
@@ -76,6 +77,11 @@ function answerOf(own: number, terminalForeground: number): TerminalAnswer
     if (!Number.isInteger(own) || !Number.isInteger(terminalForeground) || own <= 0)
     {
         return 'unknown';
+    }
+
+    if (terminalForeground <= 0)
+    {
+        return 'none';
     }
 
     return own === terminalForeground ? 'foreground' : 'taken';

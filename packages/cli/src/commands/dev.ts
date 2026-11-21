@@ -82,13 +82,13 @@ import { fileURLToPath } from 'node:url';
 
 // The watcher's stop outlives what reads its output, as spfn dev's does
 // (outliveOutputReader): the Ctrl-C that kills \`tee\` in \`spfn dev | tee log\`
-// fails the stopping line (EPIPE), and that ends nothing. Any other error on
-// stdout or stderr is thrown, as unhandled.
+// (EPIPE), or the terminal hanging up (EIO), fails the stopping line, and that
+// ends nothing. Any other error on stdout or stderr is thrown, as unhandled.
 for (const stream of [process.stdout, process.stderr])
 {
     stream.on('error', (error) =>
     {
-        if (error.code !== 'EPIPE')
+        if (error.code !== 'EPIPE' && !(error.code === 'EIO' && stream.isTTY))
         {
             throw error;
         }

@@ -34,6 +34,9 @@
  * |    | one Ctrl-C                                | left behind the prompt after the launcher exited                |
  * | T4 | `pnpm exec spfn dev &` never brought      | a job never in the foreground taken for one that lost it: a     |
  * |    | forward, then `kill -INT %1`              | `kill` of a background job SIGKILLing the server                |
+ * | T5 | the terminal hanging up (`script` killed) | a hang-up taken for the shell taking the terminal back: every   |
+ * |    | under a running `spfn dev`                | child SIGKILLed instead of its graceful stop; a write to the    |
+ * |    |                                           | hung-up terminal (EIO) ending `spfn dev` or the watcher         |
  * | T6 | one Ctrl-C to `spfn dev \| tee log` and   | the Ctrl-C killing `tee`, and the next line (EPIPE) ending      |
  * |    | `pnpm exec spfn dev \| tee log`           | `spfn dev` — the server unsupervised, nothing killed at once —  |
  * |    |                                           | or the watcher, before its close                                |
@@ -535,6 +538,26 @@ describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#35
 
         expect({ ...serverStop(), killed: terminal.output().includes('killing what is left') }, terminal.output())
             .toEqual({ signals: ['SIGTERM'], ranItsStop: true, supervisedToTheEnd: true, killed: false });
+    }, 60_000);
+
+    it('T5 the terminal hanging up under `spfn dev`: each child gets its SIGTERM and its graceful stop', async () =>
+    {
+        const terminal = await typeInTerminal('./node_modules/.bin/spfn dev --no-agent-files', { server: 3000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        // The terminal's other end closing: the kernel hangs the terminal up.
+        process.kill(terminal.child.pid!, 'SIGKILL');
+        await settled(() => treeLeft().length === 0, 30_000);
+
+        const exited = Object.fromEntries(ROLES.map(role => [role, lines().some(line => line.role === role && line.event === 'exit')]));
+
+        expect({ signals: signalsByRole(), exited, supervisedToTheEnd: serverStop().supervisedToTheEnd, left: treeLeft() })
+            .toEqual({
+                signals: { server: ['SIGTERM'], watcher: ['SIGTERM'], next: ['SIGTERM'] },
+                exited: { server: true, watcher: true, next: true },
+                supervisedToTheEnd: true,
+                left: [],
+            });
     }, 60_000);
 
     it.each([

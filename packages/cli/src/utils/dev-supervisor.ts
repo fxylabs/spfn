@@ -38,7 +38,8 @@ import { TerminalWatch } from './terminal-foreground.js';
  * escalates as a second SIGINT does as soon as a read finds another group
  * there — the moment it begins to stop, if that group took it before.
  *
- * Only that answer escalates. No terminal (a process manager, CI), a read that
+ * Only that answer escalates. No terminal (a process manager, CI), a terminal
+ * gone (a hang-up: the stop is the graceful one, as for SIGTERM), a read that
  * cannot tell (a failing or hung `ps`), and a job that was never in the
  * foreground (`spfn dev &`) escalate on no signal but a second SIGINT. A
  * launcher brought forward with `fg` and stopped by a Ctrl-C within one read
@@ -229,12 +230,13 @@ export class DevSupervisor
 /**
  * Keep `spfn dev` running when what reads its output has gone. In `spfn dev |
  * tee log` the Ctrl-C that stops `spfn dev` kills `tee` too, and the next line
- * written — `Stopping …` — fails with EPIPE, which, unhandled, ends `spfn dev`
- * and leaves its children unsupervised. The dev command calls this first, and
- * it holds for the rest of the process: an EPIPE on stdout or stderr closes
- * that stream (later writes to it go nowhere); any other error on them is
- * still thrown, an uncaught exception as without the listener. The codegen
- * watcher's entry does the same (`watcherEntrySource`).
+ * written — `Stopping …` — fails with EPIPE; when the terminal hangs up, a
+ * write to it fails with EIO. Unhandled, either ends `spfn dev` and leaves its
+ * children unsupervised. The dev command calls this first, and it holds for
+ * the rest of the process: an EPIPE on stdout or stderr, or an EIO on one that
+ * is a terminal, closes that stream (later writes to it go nowhere); any other
+ * error on them is still thrown, an uncaught exception as without the
+ * listener. The codegen watcher's entry does the same (`watcherEntrySource`).
  */
 export function outliveOutputReader(): void
 {
@@ -242,7 +244,7 @@ export function outliveOutputReader(): void
     {
         stream.on('error', (error: NodeJS.ErrnoException) =>
         {
-            if (error.code !== 'EPIPE')
+            if (error.code !== 'EPIPE' && !(error.code === 'EIO' && stream.isTTY))
             {
                 throw error;
             }
