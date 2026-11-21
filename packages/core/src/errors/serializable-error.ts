@@ -62,6 +62,12 @@ function refuseReservedKey(className: string, key: string): never | void
 }
 
 /**
+ * The key under which every `SerializableError` carries its brand — the
+ * class's identity across module copies, where `instanceof` fails (#382)
+ */
+export const SERIALIZABLE_ERROR_BRAND: unique symbol = Symbol.for('spfn.core.serializableError');
+
+/**
  * Base class for all serializable errors
  *
  * Features:
@@ -92,6 +98,17 @@ function refuseReservedKey(className: string, key: string): never | void
  */
 export abstract class SerializableError extends Error
 {
+    /**
+     * The brand `isSerializableError` reads. A global-registry symbol, so a
+     * second copy of this module (dev under tsx, a test runner) brands its
+     * errors with the same key. A prototype getter: no own key, so `toJSON()`
+     * never copies it.
+     */
+    get [SERIALIZABLE_ERROR_BRAND](): true
+    {
+        return true;
+    }
+
     /**
      * HTTP status code for this error type
      */

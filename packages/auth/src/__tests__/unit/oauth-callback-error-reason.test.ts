@@ -416,6 +416,18 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             stderr.mockRestore();
         }
     });
+
+    it('R6c: a provider error shaped like a typed one (numeric statusCode, toJSON) redirects with the fixed text, not its own (#382)', async () =>
+    {
+        seams.callbackFailure = () => Object.assign(new Error('invalid_grant: refresh token of tenant internal-42 revoked'), {
+            statusCode: 400,
+            toJSON: () => ({ __type: 'ProviderError', message: 'invalid_grant: refresh token of tenant internal-42 revoked' }),
+        });
+
+        const params = await pastTheGate(app);
+
+        expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
+    });
 });
 
 describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', () =>

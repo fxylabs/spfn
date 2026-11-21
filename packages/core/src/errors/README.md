@@ -47,6 +47,7 @@ From `@spfn/core/errors`:
 - Namespaced re-exports: `HttpErrors` (`HttpErrors.NotFoundError`, …),
   `DatabaseErrors` (`DatabaseErrors.QueryError`, …)
 - Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`, `isSerializableError`
+- `SERIALIZABLE_ERROR_BRAND`: the `Symbol.for('spfn.core.serializableError')` key every `SerializableError` answers `true` under; `isSerializableError` reads it
 - Types: `SerializedError`, `SerializableErrorConstructor`, `ErrorRegistryInput`
 
 > **Every constructor takes a single object argument.** There is **no** positional form.
@@ -336,7 +337,7 @@ import { isHttpError, isDatabaseError, hasStatusCode, isSerializableError } from
 if (isDatabaseError(error)) { /* error: DatabaseError — has .statusCode, .details */ }
 if (isHttpError(error))     { /* error: HttpError */ }
 if (hasStatusCode(error))   { /* error: { statusCode: number } */ }
-if (isSerializableError(error)) { /* error: SerializableError — also true for a copy of the class loaded twice in dev */ }
+if (isSerializableError(error)) { /* error: SerializableError — read off its brand (SERIALIZABLE_ERROR_BRAND, a Symbol.for key): true for a copy of the class loaded twice in dev, false for any other object with a toJSON and a numeric statusCode */ }
 ```
 
 ---

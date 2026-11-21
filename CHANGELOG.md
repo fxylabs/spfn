@@ -388,9 +388,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SerializableError`'s `stack` is now the description's frames, without the header line (its
   message is in the body already). Production answers are unchanged.
 - **@spfn/core: `isSerializableError(error)` from `@spfn/core/errors` (#382).** The error
-  handler's check for a typed error — `instanceof SerializableError`, or `toJSON()` and a numeric
-  `statusCode` for a second copy of the class loaded in dev — is now exported, and auth's OAuth error
-  redirect asks it instead of its own `instanceof`, so both give one answer.
+  handler's check for a typed error is now exported, and auth's OAuth error redirect asks it instead
+  of its own `instanceof`, so both give one answer.
+- **BREAKING: @spfn/core: a typed error is known by its brand, not its shape (#382).** The error
+  handler took any object with a `toJSON()` and a numeric `statusCode` for a `SerializableError` —
+  `instanceof` fails across the two copies of the module dev can load — so a provider's or
+  library's error of that shape was answered (and put into auth's OAuth redirect) with its own
+  text. `SerializableError` now carries a brand under the global-registry symbol
+  `SERIALIZABLE_ERROR_BRAND` (`Symbol.for('spfn.core.serializableError')`, exported from
+  `@spfn/core/errors`), set by the class as a prototype getter, so a second copy's errors still
+  pass and `toJSON()` never copies it; `isSerializableError` reads only the brand. An app error
+  class that answered through the handler by shape alone must extend `SerializableError`.
 - **@spfn/auth, @spfn/monitor, @spfn/workflow, @spfn/notification need the `@spfn/core` that
   exports `describeError` (#382)**, auth also the one that exports `isSerializableError`. Their peer
   range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1, which exports neither; release them together with core.

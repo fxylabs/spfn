@@ -260,22 +260,22 @@ describe('ErrorHandler Middleware', () =>
         });
     });
 
-    describe('Duck Typing for SerializableError', () =>
+    describe('SerializableError identity', () =>
     {
-        it('should handle duck-typed SerializableError-like objects', async () =>
+        it('S3: a provider error shaped like a typed one is answered as a standard error, not with its toJSON (#382)', async () =>
         {
             const app = new Hono();
 
-            app.onError(ErrorHandler({ enableLogging: false }));
+            app.onError(ErrorHandler({ includeStack: false, enableLogging: false }));
 
             app.get('/duck', () =>
             {
-                // Create an error-like object with toJSON and statusCode
-                const error = new Error('Duck typed error') as any;
+                // A library's error with a numeric statusCode and a toJSON
+                const error = new Error('upstream said: tenant internal-42 over quota') as any;
                 error.statusCode = 403;
                 error.toJSON = () => ({
                     __type: 'CustomError',
-                    message: 'Duck typed error',
+                    message: 'upstream said: tenant internal-42 over quota',
                     customField: 'custom value',
                 });
                 throw error;
@@ -285,8 +285,9 @@ describe('ErrorHandler Middleware', () =>
             const json: any = await res.json();
 
             expect(res.status).toBe(403);
-            expect(json.__type).toBe('CustomError');
-            expect(json.customField).toBe('custom value');
+            expect(json.__type).toBe('Error');
+            expect(json.message).toBe('Internal Server Error');
+            expect(JSON.stringify(json)).not.toContain('internal-42');
         });
     });
 

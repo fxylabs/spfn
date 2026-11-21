@@ -159,8 +159,9 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
 
 - **`SerializableError`** (from `@spfn/core/errors`) → serialized via its `toJSON()`, using
   the error's own `statusCode` as the HTTP status. Custom fields (`resource`, `fields`, …)
-  are preserved. Detection is duck-typed (`toJSON` + numeric `statusCode`) so it survives
-  module duplication under tsx/dev.
+  are preserved. Detection (`isSerializableError`) reads the class's brand under
+  `Symbol.for('spfn.core.serializableError')`, so it survives module duplication under
+  tsx/dev; an error that only has a `toJSON` and a numeric `statusCode` is a standard error.
 - **Standard `Error`** → falls back to `{ __type: 'Error', message: 'Internal Server Error' }`,
   status from a `statusCode` property on the error if present, else `500`. When `includeStack`
   is `true` it adds `description`, the error's `describeError` description (the value the log
