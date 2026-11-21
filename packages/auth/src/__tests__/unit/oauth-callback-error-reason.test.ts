@@ -388,6 +388,34 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
         }
     });
+
+    it('R6b: the fixed text\'s fault is in the server log at error level; a typed error meant for the client is not logged as a fault (#382)', async () =>
+    {
+        const lines: string[] = [];
+        const stderr = vi.spyOn(console, 'error').mockImplementation((line: unknown) =>
+        {
+            lines.push(String(line).replace(/\x1b\[[0-9;]*m/g, ''));
+        });
+
+        try
+        {
+            seams.callbackFailure = () => new UnverifiedEmailLinkError();
+            await pastTheGate(app);
+            seams.callbackFailure = () => new Error('Default user role not found. Run initializeAuth() first.');
+            const params = await pastTheGate(app);
+
+            await vi.waitFor(() => expect(lines.join('\n')).toContain('Default user role not found'));
+            const errorLines = lines.filter(line => line.includes('(ERROR)'));
+
+            expect(params.get('error')).toBe('OAuth callback failed');
+            expect(errorLines.filter(line => line.includes('Default user role not found'))).toHaveLength(1);
+            expect(errorLines.join('\n')).not.toContain(new UnverifiedEmailLinkError().message);
+        }
+        finally
+        {
+            stderr.mockRestore();
+        }
+    });
 });
 
 describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', () =>

@@ -1125,12 +1125,19 @@ export function oauthErrorReason(error: unknown): OAuthErrorReason
  * A typed error meant for the client — a `SerializableError` not marked
  * `internal` — keeps its message, as core's error handler answers it. Any
  * other error's message may carry a failed statement's SQL and bound values,
- * so the redirect carries `fallback` instead. The reason is the error's type
- * either way.
+ * so the redirect carries `fallback` instead, and the error goes to the server
+ * log at error level: the redirect no longer carries it, and a sign-in that
+ * fails on a fault (a missing default role, a database error) must still leave
+ * the operator a line. The reason is the error's type either way.
  */
 export function oauthFailureUrl(error: unknown, fallback: string): string
 {
     const forClient = error instanceof SerializableError && (error as { internal?: boolean }).internal !== true;
+
+    if (!forClient)
+    {
+        authLogger.service.error(fallback, { error });
+    }
 
     return buildOAuthErrorUrl(forClient ? error.message : fallback, oauthErrorReason(error));
 }

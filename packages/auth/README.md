@@ -5124,7 +5124,9 @@ type. Branch on `reason`; show `error` if you like. The codes are the closed uni
 
 The `error` text is a typed error's own message — a `SerializableError` meant for the client, not
 one marked `internal` — or a fixed sentence. Any other error's message (a failed statement's carries
-its SQL and every bound value) never reaches the redirect; the server logs the error's description.
+its SQL and every bound value) never reaches the redirect; `@spfn/auth:service` logs it at error
+level, the redirect's fixed sentence as the line's message and the error's description beside it.
+A typed error meant for the client is the user's answer, not a fault, and is not logged there.
 
 A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
 The callback asks the provider first, then does every write in one transaction, and builds the

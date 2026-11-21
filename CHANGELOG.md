@@ -315,7 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser's address bar and the app's access logs. The parameter is now `OAuth callback failed`
   (`OAuth link failed` when the link state could not be read); `reason` is unchanged (`failed`), and
   typed errors keep their text and their reason. A missing role (`Default user role not found…`)
-  is one of those errors: its page now shows the fixed sentence, its text stays in the server log.
+  is one of those errors: its page now shows the fixed sentence, and `@spfn/auth:service` logs the
+  error at error level with its description (the fixed sentence is the line's message).
   `oauthFailureUrl(error, fallback)` from `@spfn/auth/server` builds that redirect beside
   `buildOAuthErrorUrl`.
 - **BREAKING: @spfn/auth: log lines hand the caught error to core's logger (#382).** The context
