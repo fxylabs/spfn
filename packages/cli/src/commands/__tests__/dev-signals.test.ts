@@ -30,6 +30,10 @@
  * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
  * | T2 | one Ctrl-C to `pnpm dev` / `spfn dev`     | over-eager killing: a launcher that waits for `spfn dev` taken  |
  * |    | typed in that bash, a slow server         | for one that left, and the server's graceful stop cut short     |
+ * | T3 | `pnpm exec spfn dev &`, then `fg`, then   | the foreground read once, at start: `spfn dev` and the server   |
+ * |    | one Ctrl-C                                | left behind the prompt after the launcher exited                |
+ * | T4 | `pnpm exec spfn dev &` never brought      | a job never in the foreground taken for one that lost it: a     |
+ * |    | forward, then `kill -INT %1`              | `kill` of a background job SIGKILLing the server                |
  * | T6 | one Ctrl-C to `spfn dev \| tee log` and   | the Ctrl-C killing `tee`, and the next line (EPIPE) ending      |
  * |    | `pnpm exec spfn dev \| tee log`           | `spfn dev` — the server unsupervised, nothing killed at once —  |
  * |    |                                           | or the watcher, before its close                                |
@@ -451,6 +455,8 @@ function serverStop(): { signals: string[]; ranItsStop: boolean; supervisedToThe
     };
 }
 
+const KILL_LINE = 'spfn dev no longer has the terminal, so no second Ctrl-C can reach it: killing what is left';
+
 /**
  * Ends the row once no process of it is left behind the prompt (10 s when
  * only a kill can end the server in time), failing with the list otherwise.
@@ -502,6 +508,33 @@ describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#35
             killed: terminal.output().includes('killing what is left'),
             groupsLeft: groupsLeft(),
         }, terminal.output()).toEqual({ server: ['SIGTERM'], stopTookItsTime: true, killed: false, groupsLeft: [] });
+    }, 60_000);
+
+    it('T3 `pnpm exec spfn dev &` brought forward with `fg`: one Ctrl-C, the launcher exits, and spfn dev kills what is left at once', async () =>
+    {
+        const terminal = await typeInTerminal('pnpm exec spfn dev --no-agent-files &', { server: 25_000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        terminal.child.stdin!.write('fg\n');
+        // spfn dev reads the terminal every 100 ms: a person's Ctrl-C after `fg` comes later than that.
+        await new Promise(settle => setTimeout(settle, 1000));
+        terminal.child.stdin!.write('\x03');
+        await nothingLeft(terminal, 10_000);
+
+        expect({ ranItsStop: serverStop().ranItsStop, said: terminal.output().includes(KILL_LINE), groupsLeft: groupsLeft() }, terminal.output())
+            .toEqual({ ranItsStop: false, said: true, groupsLeft: [] });
+    }, 60_000);
+
+    it('T4 `pnpm exec spfn dev &` never brought forward, then `kill -INT %1`: the graceful stop', async () =>
+    {
+        const terminal = await typeInTerminal('pnpm exec spfn dev --no-agent-files &', { server: 3000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        terminal.child.stdin!.write('kill -INT %1\n');
+        await nothingLeft(terminal);
+
+        expect({ ...serverStop(), killed: terminal.output().includes('killing what is left') }, terminal.output())
+            .toEqual({ signals: ['SIGTERM'], ranItsStop: true, supervisedToTheEnd: true, killed: false });
     }, 60_000);
 
     it.each([

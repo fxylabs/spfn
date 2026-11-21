@@ -30,12 +30,21 @@ import { TerminalWatch } from './terminal-foreground.js';
  * `pnpm run`, `npm run` or `npx`, which share the group and wait for `spfn dev`.
  * `pnpm exec`, `pnpm <bin>` and yarn 1 exit on the first Ctrl-C; the shell then
  * sees its job end and takes the terminal back, and a further Ctrl-C goes to
- * the shell. So while stopping, `spfn dev`, if it had the terminal's
- * foreground when it started, escalates as a second SIGINT does as soon as a
- * read (`TerminalWatch`, every `TERMINAL_READ_MS`) finds another group there —
- * the moment it begins to stop, if that group took it before. A read that
- * cannot tell (a failing or hung `ps`) does not escalate. Without a terminal
- * (a process manager, CI) nothing but a signal escalates.
+ * the shell. So `spfn dev` reads its terminal's foreground group while it runs
+ * (`TerminalWatch`: at start, every `TERMINAL_READ_MS`, and when the stop
+ * begins), and remembers whether it ever saw its own group there — a job
+ * started in the background and brought forward with `fg` counts from the
+ * read after `fg`. While stopping, once it has seen the foreground, it
+ * escalates as a second SIGINT does as soon as a read finds another group
+ * there — the moment it begins to stop, if that group took it before.
+ *
+ * Only that answer escalates. No terminal (a process manager, CI), a read that
+ * cannot tell (a failing or hung `ps`), and a job that was never in the
+ * foreground (`spfn dev &`) escalate on no signal but a second SIGINT. A
+ * launcher brought forward with `fg` and stopped by a Ctrl-C within one read
+ * of it — the shell back at its prompt before `spfn dev` saw the foreground —
+ * gets the graceful stop: nothing seen tells that stop from a `kill -INT` to a
+ * job still in the background.
  *
  * Each child is a session of its own (`detached` is `setsid`): it has no
  * controlling terminal, so job control does not touch it. A Ctrl-Z stops
@@ -64,8 +73,9 @@ type StopSignal = typeof STOP_SIGNALS[number];
 
 const PROCESS_GROUPS = process.platform !== 'win32';
 const GROUP_POLL_MS = 100;
-/** How often the terminal is read while stopping. */
+/** How often the terminal is read: `/proc` costs nothing; a `ps` is a process, so once a second until the stop begins. */
 const TERMINAL_READ_MS = 100;
+const TERMINAL_READ_BY_PS_MS = 1000;
 const KILLING = 'killing what is left of the server, Next.js and the codegen watcher';
 const TERMINAL_LOST = 'spfn dev no longer has the terminal, so no second Ctrl-C can reach it';
 
@@ -89,7 +99,7 @@ export class DevSupervisor
             this.terminal.close();
             this.children.forEach(child => this.signalOnce(child));
         });
-        this.terminal.read();
+        this.watchTerminal();
     }
 
     /** Whether a stop has begun. */
@@ -158,7 +168,6 @@ export class DevSupervisor
         {
             logger.info('[SPFN] Stopping the server, Next.js and the codegen watcher (Ctrl-C again to kill them now)');
             children.forEach(child => this.signalOnce(child));
-            this.watchTerminal();
         }
 
         await Promise.all(children.map(child => child.ended));
@@ -186,24 +195,24 @@ export class DevSupervisor
         this.children.forEach(child => signalGroup(child.process, 'SIGKILL'));
     }
 
-    /** While stopping, read the terminal until something escalated or the stop is done; escalate once it is found lost. */
+    /** Read the terminal until something escalated or the stop is done; while stopping, escalate once it is found lost. */
     private watchTerminal(): void
     {
-        if (this.killing || this.children.size === 0)
+        if (this.killing || (this.stopping && this.children.size === 0))
         {
             return;
         }
 
         this.terminal.read();
 
-        if (this.terminal.lost())
+        if (this.stopping && this.terminal.lost())
         {
             this.killAll(TERMINAL_LOST);
 
             return;
         }
 
-        setTimeout(() => this.watchTerminal(), TERMINAL_READ_MS).unref();
+        setTimeout(() => this.watchTerminal(), process.platform === 'linux' || this.stopping ? TERMINAL_READ_MS : TERMINAL_READ_BY_PS_MS).unref();
     }
 
     /** SIGTERM the child's group, unless it was already sent one or has ended. */
