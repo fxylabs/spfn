@@ -392,7 +392,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{ __type: 'Error', message: 'Internal Server Error', description }` with `description` its
   `describeError` description, as a database error's already was in `database`. A
   `SerializableError`'s `stack` is now the description's frames, without the header line (its
-  message is in the body already). Production answers are unchanged.
+  message is in the body already). The handler owns `stack`: one a `toJSON()` override returns is
+  removed in every mode, production included, and in development only the description's frames,
+  when there are any, take its place. Production answers are otherwise unchanged.
 - **@spfn/core: `isSerializableError(error)` and `errorLogLevel(error)` from `@spfn/core/errors`
   (#382).** The error handler's check for a typed error is now exported, and auth's OAuth error
   redirect asks it instead of its own `instanceof`, so both give one answer. `errorLogLevel` is the

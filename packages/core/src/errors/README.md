@@ -221,6 +221,11 @@ skipping `name`, `message`, `stack`, and `statusCode`. The `ErrorHandler` middle
 `toJSON()`, adds the `error` envelope, and responds with the matching status code (plus
 `stack` — the frames of `describeError(error)`, not the raw stack — when `includeStack` is on).
 
+The handler owns the answer's diagnostic key, `stack`. A `stack` returned by your own
+`toJSON()` override is removed in every mode; in development the handler then adds the
+description's frames, when the error has any. An error's serializer cannot put a stack, or
+anything else, into the answer under that key.
+
 ### Reserved field names
 
 `__type`, `message` and `error` are reserved. They are the slots the response shape itself

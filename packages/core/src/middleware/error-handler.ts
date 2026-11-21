@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { errorLogLevel, isSerializableError } from '@spfn/core/errors';
+import type { SerializableError, SerializedError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
@@ -280,6 +281,21 @@ function standardErrorResponse(err: Error, includeStack: boolean): StandardError
 }
 
 /**
+ * The answer of a typed error: its `toJSON()` with the diagnostic keys the
+ * handler owns written by the handler alone. `stack` is such a key — a
+ * `stack` the error's own serializer returns is removed in every mode, and in
+ * development the frames of `describeError(err)` take its place when there
+ * are any, never the raw stack with its message line.
+ */
+function serializeTypedError(err: SerializableError, includeStack: boolean): SerializedError
+{
+    const { stack: _serializerStack, ...serialized }: SerializedError = err.toJSON();
+    const frames = includeStack ? describeError(err).stack : undefined;
+
+    return frames ? { ...serialized, stack: frames } : serialized;
+}
+
+/**
  * `Retry-After` for an error that says when to send the request again —
  * `TooManyRequestsError` and `ServiceUnavailableError` carry `retryAfter` in
  * seconds — so a client reads it where HTTP puts it for a 429 or a 503, not
@@ -393,18 +409,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
 
             setRetryAfter(c, err);
 
-            // Use toJSON() for automatic serialization
-            const serialized = err.toJSON();
-
-            // Add the stack's frames in development: the description's, not the raw stack
-            const frames = includeStack ? describeError(err).stack : undefined;
-
-            if (frames)
-            {
-                serialized.stack = frames;
-            }
-
-            return respond(c, serialized, statusCode);
+            return respond(c, serializeTypedError(err, includeStack), statusCode);
         }
 
         // Handle standard errors (fallback)

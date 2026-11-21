@@ -236,6 +236,39 @@ describe('ErrorHandler Middleware', () =>
             expect(json.stack).toBeUndefined();
         });
 
+        it('S1: a stack the serializer of a typed error returns is never answered, in development or production (#382)', async () =>
+        {
+            class CustomError extends NotFoundError
+            {
+                override toJSON()
+                {
+                    return { ...super.toJSON(), stack: 'CustomError: tenant-secret-value' };
+                }
+            }
+
+            const thrown = new CustomError({ message: 'Not found' });
+            thrown.stack = 'CustomError: tenant-secret-value';
+
+            for (const includeStack of [true, false])
+            {
+                const app = new Hono();
+
+                app.onError(ErrorHandler({ includeStack, enableLogging: false }));
+                app.get('/error', () =>
+                {
+                    throw thrown;
+                });
+
+                const res = await app.request('/error');
+                const json: any = await res.json();
+
+                expect(res.status).toBe(404);
+                expect(json.__type).toBe('CustomError');
+                expect(json).not.toHaveProperty('stack');
+                expect(JSON.stringify(json)).not.toContain('tenant-secret-value');
+            }
+        });
+
         it('H1: a standard error under includeStack answers its description, never its message, cause or stack (#382)', async () =>
         {
             const app = new Hono();
