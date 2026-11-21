@@ -78,6 +78,12 @@ import { createClientProofDevHandler } from '@spfn/auth/client-proof';  // SERVE
 > Database entities (`users`, `userPublicKeys`, …) and all services/repositories are exported
 > from `@spfn/auth/server`, **not** from the root `@spfn/auth`.
 
+Each class exists once, whichever entry you import it from. An error `authApi` throws is
+`instanceof` the class you import from `@spfn/auth/errors`, and what two entries both export
+(`SessionUnsealError`, `isSafeReturnPath`, …) is the same object in both. The entries
+share their code through `dist/chunk-*.js` files, which are not entry points: import only the
+paths above.
+
 ## How do I add auth to an SPFN app?
 
 Four edits in the consuming app. All four are required for the flow to work end to end.

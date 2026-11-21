@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
-import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { execa } from 'execa';
 
@@ -93,11 +93,12 @@ describe('spfn provision runner', () =>
 
     it('refuses a second copy of @spfn/core that server.config brings in', () =>
     {
-        const secondInstall = join(app, 'node_modules', 'second-core', 'dist', 'logger');
-
-        mkdirSync(secondInstall, { recursive: true });
+        // The entry with the chunks it imports: the build shares modules between entries (#398)
+        cpSync(join(PACKAGE_DIR, 'node_modules', '@spfn', 'core', 'dist'), join(app, 'node_modules', 'second-core', 'dist'), {
+            recursive: true,
+            filter: source => !/\.(d\.ts|map)$/.test(source),
+        });
         writeFileSync(join(app, 'node_modules', 'second-core', 'package.json'), JSON.stringify({ type: 'module' }));
-        copyFileSync(join(PACKAGE_DIR, 'node_modules', '@spfn', 'core', 'dist', 'logger', 'index.js'), join(secondInstall, 'index.js'));
         writeCompiledConfig('import \'../../node_modules/second-core/dist/logger/index.js\';\nexport default {};');
 
         const { status, stderr } = runProvision();

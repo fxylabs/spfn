@@ -12,10 +12,11 @@
     },
     "files": [
         "dist",
+        "!dist/*.metafile.json",
         "README.md"
     ],
     "scripts": {
-        "build": "tsup",
+        "build": "tsup && node ../../scripts/check-bundle-identity.mjs",
         "dev": "tsup --watch",
         "type-check": "tsc --noEmit",
         "db:generate": "drizzle-kit generate",

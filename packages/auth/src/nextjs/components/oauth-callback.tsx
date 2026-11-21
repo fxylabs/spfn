@@ -22,8 +22,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { runOAuthCallback } from './oauth-callback-flow';
-import type { OAuthErrorReason } from '../../lib/oauth-error-reason';
+import { runOAuthCallback, type OAuthErrorReason } from '#nextjs/client-shared';
 
 export interface OAuthCallbackProps
 {

@@ -22,10 +22,11 @@
   },
   "files": [
     "dist",
+    "!dist/*.metafile.json",
     "bin"
   ],
   "scripts": {
-    "build": "tsup && node scripts/copy-templates.js",
+    "build": "tsup && node scripts/copy-templates.js && node ../../scripts/check-bundle-identity.mjs",
     "test": "vitest run",
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
     "dev": "tsup --watch",

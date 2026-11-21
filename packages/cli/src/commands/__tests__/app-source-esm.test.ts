@@ -161,9 +161,12 @@ it('R2 spfn db generate loads an entity with top-level await', () =>
 
 it('R4 spfn db generate refuses a second install of @spfn/core', () =>
 {
-    mkdirSync(join(appDir, 'node_modules/second-core/dist/logger'), { recursive: true });
+    // The entry with the chunks it imports: the build shares modules between entries (#398)
+    cpSync(join(coreRoot, 'dist'), join(appDir, 'node_modules/second-core/dist'), {
+        recursive: true,
+        filter: source => !/\.(d\.ts|map)$/.test(source),
+    });
     write('node_modules/second-core/package.json', JSON.stringify({ name: 'second-core', type: 'module' }));
-    copyFileSync(join(coreRoot, 'dist/logger/index.js'), join(appDir, 'node_modules/second-core/dist/logger/index.js'));
     writeEntity('import \'second-core/dist/logger/index.js\';\n');
 
     const { status, output } = dbGenerate();

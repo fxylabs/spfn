@@ -839,6 +839,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spfn db push` wherever the scaffold holds an entity or `@spfn/auth`. The generated README, the
   entities README, the auth and MCP guides say `db push` for development and keep
   `db generate` + `db migrate` for a migration-based deployment.
+- **Every package: each source module is emitted once, so a class, a singleton or a configuration is
+  the same object whichever entry point it is imported from (#398).** Every multi-entry build now
+  splits shared code into chunks (`dist/chunk-*.js`, not exported); before, a module two entries
+  reached by a relative import was inlined into both. `exports`, the `'use client'` / `'use server'`
+  files and the declarations' public names are unchanged. What is now one object:
+  - **@spfn/auth:** a refusal `authApi` restores (`RecentAuthenticationRequiredError`, the
+    `mfa/step-up` errors, every class in `authErrorRegistry`) is `instanceof` the class from
+    `@spfn/auth/errors`; before, `@spfn/auth` restored its own copy of every auth error class, and
+    passing `authErrorRegistry` to `createAuthApi` did not help. `CanonicalJsonError` and
+    `ProofInputError` are one class across `/client-proof` and `/server`, `SessionUnsealError` across
+    `/nextjs/api`, `/nextjs/server` and `/server`. 61 modules were in more than one file.
+  - **@spfn/core:** `requireOwner` (`/authz`) throws the `NotFoundError` and the rate limiter
+    (`/middleware`) the `TooManyRequestsError` of `@spfn/core/errors`, and `errorRegistry` is one
+    registry; `OpsRouterError` is `SurfaceError`, as `src/ops/error.ts` documents; `/env/loader` and
+    `/server` share the load-once state of `loadEnv`; the job, SSE and route builders are one copy
+    each between their own entry and `/server`. 53 modules were in more than one file (56 in esbuild's
+    record; the rollup pass removed 3 copies). Each entry still records its evaluation once
+    (`recordEvaluation`).
+  - **@spfn/notification:** configuration set through `@spfn/notification/config` is what
+    `@spfn/notification/server` sends with; before, `/config` configured a copy `/server` never read.
+  - **@spfn/pages:** `/server` throws the `PagesError`, `SiteConfigError` and `FrontmatterError` that
+    `@spfn/pages` exports.
+  - **@spfn/mcp:** `McpError` and the dispatcher are one copy across the four entries (the
+    `Symbol.hasInstance` brand stays, for two installed versions).
+  - **spfn:** `SurfaceManifestError` is one class across `spfn` and `spfn/surface`.
+  - **@spfn/monitor, @spfn/workflow:** the drizzle schema and table objects are one object across
+    `/` and `/server` (monitor) and across the two entity entries (workflow).
+  - **@spfn/signing, @spfn/pages-next, @spfn/i18n, @spfn/cms:** shared helpers, one copy each (no class
+    or state was affected).
+
+  A build check, `scripts/check-bundle-identity.mjs`, runs after `tsup` in every package's `build`.
+  It reads esbuild's own record of which modules each output file holds (its metafile, which
+  every tsup config writes to `dist/*.metafile.json`; `files` keeps it out of the package) and
+  fails when one module — the package's own or a dependency it bundles, such as
+  `@sinclair/typebox` — is in two output files, or when an output file is in no record. CI's verify
+  step also runs it over every built package's `dist` (`pnpm check:bundles`), whatever a package's
+  `build` script runs. Packages built with tsup's `treeshake` (core, i18n, mcp, signing, workflow)
+  no longer are: its rollup pass rewrites the files after esbuild recorded them, and dropped chunk
+  imports esbuild writes to keep evaluation order. esbuild still tree-shakes; `@spfn/auth`'s root
+  browser entry grows from 79,563 to 82,927 bytes minified (+0.7 KB gzipped).
 - **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
   failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
   `params`, its stack header and the driver's `detail` reached the logs through the runner's

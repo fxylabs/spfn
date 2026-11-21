@@ -214,6 +214,19 @@ steps:
             - pnpm check:versions
             - pnpm check:exports
 
+            # Each source module once per package (#398), checked on every built
+            # package's dist as it stands: each package's `build` runs the same
+            # check, but what a build script runs is its own text, and a later
+            # step (a `postbuild`, a second script) could bundle after it. This
+            # reads the output whatever produced it. `--built` lists the
+            # directories turbo's `build` ran in with the same $FILTERS (turbo's
+            # dry run, from ci-scope): a listed package without dist or without a
+            # build record fails; one the scope did not build is named as skipped.
+            # An assignment of its own, so a failing ci-scope fails the step
+            # rather than leaving an empty list.
+            - BUILT="$(node scripts/ci-scope.mjs built)"
+            - pnpm check:bundles --built $BUILT
+
             # The publish order, checked without a registry. `publish-changed.mjs`
             # decides what goes out and in what order, and a registry version is
             # immutable — so the one place that logic can be wrong for free is

@@ -28,12 +28,13 @@
     },
     "files": [
         "dist",
+        "!dist/*.metafile.json",
         "examples",
         "README.md",
         "LICENSE"
     ],
     "scripts": {
-        "build": "pnpm check:circular && tsup",
+        "build": "pnpm check:circular && tsup && node ../../scripts/check-bundle-identity.mjs",
         "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
         "prepublishOnly": "pnpm type-check && pnpm build && pnpm test",
         "dev": "tsup --watch",

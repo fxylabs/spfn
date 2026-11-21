@@ -19,7 +19,7 @@
 
 import type { CompleteMfaValue, PasskeyResult } from '@spfn/auth/client';
 
-import { toSafeReturnPath } from '../../lib/return-path';
+import { toSafeReturnPath } from '#nextjs/client-shared';
 
 export type MfaConfirmState = 'idle' | 'submitting' | 'wrong' | 'expired' | 'failed';
 

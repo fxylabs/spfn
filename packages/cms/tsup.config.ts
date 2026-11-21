@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
@@ -9,10 +10,12 @@ export default defineConfig({
         errors: 'src/errors/index.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: [
         // Internal entrypoints (prevent bundling into each other)
         '@spfn/cms',

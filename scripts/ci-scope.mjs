@@ -14,7 +14,12 @@
  *       1 when it does not, and 2 on any error — so a step can tell "skip"
  *       apart from "the check itself broke".
  *
- * Both print the decision as one line on stderr, for the log.
+ *   node scripts/ci-scope.mjs built
+ *       Prints the directory of every package whose `build` turbo runs with
+ *       those filters (`turbo run build --dry=json`, dependencies included),
+ *       space-separated — what the build step built, for the bundle check.
+ *
+ * All three print the decision as one line on stderr, for the log.
  *
  * The selection for `includes` comes from turbo's own graph (`turbo ls`), the
  * same graph `turbo run` will use with the same filters. A second, hand-written
@@ -57,6 +62,20 @@ function selectedPackages(filters)
     return JSON.parse(listing).packages.items.map((item) => item.name);
 }
 
+/** The directories of the packages whose `build` task `turbo run build` runs with these filters. */
+function builtDirectories(filters)
+{
+    const plan = execFileSync("pnpm", ["exec", "turbo", "run", "build", ...filters, "--dry=json"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "inherit"],
+    });
+
+    return JSON.parse(plan).tasks
+        .filter((task) => task.task === "build" && task.command !== "<NONEXISTENT>")
+        .map((task) => task.directory);
+}
+
 function includes(scope, name)
 {
     return scope.all || selectedPackages(turboFilters(scope)).includes(name);
@@ -75,12 +94,19 @@ function main([command, name])
         return 0;
     }
 
+    if (command === "built")
+    {
+        process.stdout.write(`${builtDirectories(turboFilters(scope)).join(" ")}\n`);
+
+        return 0;
+    }
+
     if (command === "includes" && name)
     {
         return includes(scope, name) ? 0 : 1;
     }
 
-    console.error("usage: node scripts/ci-scope.mjs filters | includes <package-name>");
+    console.error("usage: node scripts/ci-scope.mjs filters | built | includes <package-name>");
 
     return 2;
 }

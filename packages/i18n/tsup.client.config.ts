@@ -1,10 +1,12 @@
 import { defineConfig } from 'tsup';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
         'client': 'src/client.tsx',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('client')],
     dts: true,
     sourcemap: true,
     splitting: false,

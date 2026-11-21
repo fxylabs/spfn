@@ -1,6 +1,7 @@
 import { defineConfig } from 'tsup';
 
 import { sharedExternal } from './tsup.shared';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
@@ -9,9 +10,11 @@ export default defineConfig({
         'config/index': 'src/config/index.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     sourcemap: true,
     clean: true,
-    splitting: false,
+    // Entries share chunks, so each module is emitted once (scripts/check-bundle-identity.mjs, #398)
+    splitting: true,
     external: sharedExternal,
 });

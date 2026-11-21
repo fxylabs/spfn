@@ -5,8 +5,9 @@
  * from and what evaluated it. The build adds the call to each entry it emits,
  * with the entry's own `import.meta.url` and the version from `package.json`
  * (`tsup.config.ts`), so an entry added later records by construction. The
- * code below is inlined into every entry — each copy of an entry carries its
- * own — which is what lets a copy name its own evaluator.
+ * code below is one chunk every entry imports, evaluated by whatever evaluates
+ * the entry — each copy of the package carries its own — which is what lets a
+ * copy name its own evaluator.
  *
  * An evaluation's identity is its file path and its evaluator, and each one
  * counts how many times it was evaluated. To the server, the same path
@@ -105,8 +106,8 @@ function registry(): Registry
 /**
  * The parts of `node:fs` and `node:path` the requirer is found with, taken by
  * `process.getBuiltinModule` (the `@types/node` this package builds with
- * predates it) and only in a CommonJS evaluation: every entry inlines this
- * file, and a bundled one must not import Node's modules.
+ * predates it) and only in a CommonJS evaluation: every entry, a browser one
+ * too, imports this file, and a bundled one must not import Node's modules.
  */
 interface NodeBuiltins
 {
