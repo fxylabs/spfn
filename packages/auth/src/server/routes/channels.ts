@@ -1,5 +1,5 @@
 /**
- * @spfn/auth - Which sign-in channel each route belongs to
+ * @spfn/auth - Which channel each route belongs to
  *
  * `ROUTE_CHANNELS` is the one list: every key of `mainAuthRouter` names its
  * channel, or `'always'`. `gateChannels` is handed it to put the channel check
@@ -97,7 +97,7 @@ export const ROUTE_CHANNELS = {
     sessionRenewOptions: 'always',
     sessionRenewVerify: 'always',
     issueOneTimeToken: 'always',
-    requestAccountDeletion: 'always',
+    requestAccountDeletion: 'selfDeletion',
     cancelAccountDeletion: 'always',
     oauthGoogleStart: 'always',
     oauthGoogleCallback: 'always',
@@ -116,13 +116,13 @@ export const ROUTE_CHANNELS = {
     oauthLinkStart: 'always',
     oauthUnlink: 'always',
     androidAssetLinks: 'always',
-    getInvitation: 'always',
-    acceptInvitation: 'always',
-    createInvitation: 'always',
-    listInvitations: 'always',
-    cancelInvitation: 'always',
-    resendInvitation: 'always',
-    deleteInvitation: 'always',
+    getInvitation: 'invitations',
+    acceptInvitation: 'invitations',
+    createInvitation: 'invitations',
+    listInvitations: 'invitations',
+    cancelInvitation: 'invitations',
+    resendInvitation: 'invitations',
+    deleteInvitation: 'invitations',
     getUserProfile: 'always',
     updateUserProfile: 'always',
     checkUsername: 'always',

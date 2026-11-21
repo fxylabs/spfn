@@ -104,6 +104,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   button that would answer 404 `CHANNEL_DISABLED` — a passkey button under `passkeyLogin: false`,
   say. Public like `GET /_auth/oauth/providers`: no session, no rate limit, no cache headers; not a
   mobile contract operation. A channel added later appears in the answer with it.
+- **@spfn/auth: channels `invitations` and `selfDeletion` (#381).** Two new
+  `createAuthLifecycle({ channels })` keys, both `true` by default, so an app that sets neither sees
+  no change. `invitations: false` closes all seven invitation routes — create, list, resend, cancel,
+  delete, and the public `GET /_auth/invitations/:token` and `POST /_auth/invitations/accept` — with
+  404 `CHANNEL_DISABLED` before any rate limit, permission check or transaction; pending invitations
+  stay pending and are settled by the `cancelInvitation` / `deleteInvitation` services.
+  `selfDeletion: false` closes `POST /_auth/deletion/request` only: `deletion/cancel` and the
+  `account_deletion` code stay on, since a pending deletion blocks every sign-in. Beside
+  `deletion.allowSelfImmediate: true` it refuses boot. Service functions stay callable. Not breaking,
+  but `AuthChannel`, `details.channel` of `ChannelDisabledError` and the answer of
+  `GET /_auth/channels` each gain the two values; a client that switches exhaustively on
+  `details.channel` meets them. No mobile contract change: no invitation or deletion route is a
+  contract operation.
 - **@spfn/auth: the README says what `secondFactor.required` takes (#373).** It means a factor on a
   new device, not the password on every sign-in: social sign-in, a password reset and a recovery code
   each get in without the password. A new recipe, "password and passkey on a device not signed in",

@@ -2,7 +2,7 @@
  * @spfn/auth - An app chooses which sign-in channels exist (#308)
  *
  * One test per row C2–C12 of the #308 case table, and R1 for passkey sign-in
- * (#330). C1 is every other suite staying green; C13 and the option's own
+ * (#330), I1–I4, I6–I8, I11 and I12 for invitations and self-deletion (#381). C1 is every other suite staying green; C13 and the option's own
  * validation are in unit/auth-channels.test.ts.
  *
  * Driven against the mounted auth router with `authenticate` as the
@@ -16,7 +16,7 @@
  * setting left behind would close a channel under the next file.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import type { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
@@ -30,6 +30,7 @@ import {
     signIn,
 } from '../helpers/oauth2';
 import {
+    accountDeletionRequests,
     deviceAuthorizations,
     deviceLinks,
     passwordResetTokens,
@@ -70,6 +71,10 @@ const { issueDeviceLinkService } = await import('@/server/services/device-link.s
 const { requestSignupLinkService } = await import('@/server/services/signup-link.service');
 const { requestPasswordResetService } = await import('@/server/services/password-reset.service');
 const { sendVerificationCodeService } = await import('@/server/services/verification.service');
+const { createInvitation, acceptInvitation } = await import('@/server/services/invitation.service');
+const { requestAccountDeletionService, sweepDuePurges } = await import('@/server/services/account-deletion.service');
+const { invitationCreatedEvent } = await import('@/server/events');
+const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -124,6 +129,8 @@ interface GroupRoute
     body: Record<string, unknown>;
     /** Behind the global `auth` middleware, which answers an anonymous caller first. */
     signedIn: boolean;
+    /** POST unless said otherwise. */
+    method?: 'GET';
 }
 
 const DEVICE_CODE_ROUTES: GroupRoute[] = [
@@ -144,6 +151,17 @@ const DEVICE_LINK_ROUTES: GroupRoute[] = [
     { key: 'denyDeviceLink', path: '/_auth/device/link/deny', body: { linkId: UNKNOWN_LINK_ID }, signedIn: true },
     { key: 'cancelDeviceLink', path: '/_auth/device/link/cancel', body: { linkId: UNKNOWN_LINK_ID }, signedIn: true },
     { key: 'pollDeviceLink', path: '/_auth/device/link/poll', body: { deviceCode: 'unknown-device-code' }, signedIn: false },
+];
+
+/** The seven invitation routes; the ids name no invitation, so an open route could only answer its own refusal. */
+const INVITATION_ROUTES: GroupRoute[] = [
+    { key: 'getInvitation', path: `/_auth/invitations/${INVITATION_TOKEN}`, body: {}, signedIn: false, method: 'GET' },
+    { key: 'acceptInvitation', path: '/_auth/invitations/accept', body: { token: INVITATION_TOKEN, password: TEST_PASSWORD, ...deviceKeyBody() }, signedIn: false },
+    { key: 'createInvitation', path: '/_auth/invitations', body: { email: 'i1@ch381.test', roleId: 1 }, signedIn: true },
+    { key: 'listInvitations', path: '/_auth/invitations', body: {}, signedIn: true, method: 'GET' },
+    { key: 'cancelInvitation', path: '/_auth/invitations/cancel', body: { id: 1 }, signedIn: true },
+    { key: 'resendInvitation', path: '/_auth/invitations/resend', body: { id: 1 }, signedIn: true },
+    { key: 'deleteInvitation', path: '/_auth/invitations/delete', body: { id: 1 }, signedIn: true },
 ];
 
 describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308)', () =>
@@ -177,8 +195,11 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         sendEmail.mockClear();
     });
 
-    afterEach(() =>
+    afterEach(async () =>
     {
+        // A send a row started by calling a service directly, so none lands
+        // in the next row's sendEmail count
+        await settleLinkMail();
         __resetChannelsForTests();
         vi.unstubAllEnvs();
     });
@@ -194,7 +215,12 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
         return `198.51.100.${ipCounter % 250 + 1}`;
     }
 
-    function post(path: string, body: unknown, authorization?: string, ip = nextIp()): Promise<Response>
+    /**
+     * One POST, answered and its mail settled: a verification code or a link
+     * mail leaves after the response, not before it, so a row that counts
+     * `sendEmail` right after the answer would race the send.
+     */
+    async function post(path: string, body: unknown, authorization?: string, ip = nextIp()): Promise<Response>
     {
         const headers: Record<string, string> = { ...JSON_HEADERS, 'x-forwarded-for': ip };
 
@@ -203,7 +229,28 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             headers.Authorization = authorization;
         }
 
-        return Promise.resolve(app.request(path, { method: 'POST', headers, body: JSON.stringify(body) }));
+        const response = await app.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+        await settleLinkMail();
+
+        return response;
+    }
+
+    /** One request of a group route, anonymous unless `authorization` is given. */
+    function send(route: GroupRoute, authorization?: string): Promise<Response>
+    {
+        if (route.method !== 'GET')
+        {
+            return post(route.path, route.body, authorization);
+        }
+
+        const headers: Record<string, string> = { 'x-forwarded-for': nextIp() };
+
+        if (authorization)
+        {
+            headers.Authorization = authorization;
+        }
+
+        return Promise.resolve(app.request(route.path, { headers }));
     }
 
     async function userRoleId(): Promise<number>
@@ -543,6 +590,163 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     });
 
     // ========================================================================
+    // I1–I3, I6, I7, I11, I12: invitations and self-deletion (#381); I4/I8 under C12
+    // ========================================================================
+
+    describe('invitations: false', () =>
+    {
+        /** A pending invitation issued by the service, from an inviter who outranks the role, as acceptance re-checks. */
+        async function issuedInvitation(email: string): Promise<{ id: number; token: string }>
+        {
+            const inviterId = await createTestUser(`inviter-${email}`, (await getRoleByName('admin'))!.id);
+            const { invitation, token } = await createInvitation({ email, roleId: await userRoleId(), invitedBy: inviterId });
+
+            return { id: Number(invitation.id), token };
+        }
+
+        async function invitationStatus(id: number): Promise<string>
+        {
+            return (await getTestDb().select().from(userInvitations).where(eq(userInvitations.id, id)))[0]!.status;
+        }
+
+        it.each(INVITATION_ROUTES)('I1: $key refuses an anonymous caller (404, or 401 when signed in) and answers a signed-in caller without user:invite 404, not 403', async (route) =>
+        {
+            const authorization = await signedInCaller();
+            configureChannels({ invitations: false });
+
+            await expectAnonymousRefused(await send(route), route, 'invitations');
+            await expectChannelClosed(await send(route, authorization), 'invitations', `${route.key} signed in`);
+            expect(await getTestDb().select().from(userInvitations)).toHaveLength(0);
+        });
+
+        it('I2: a pending invitation is neither read nor accepted, spends no rate-limit token and stays pending; the first accept after reopening creates the account', async () =>
+        {
+            const { id, token } = await issuedInvitation('i2@ch381.test');
+            const ip = nextIp();
+            const accept = () => post('/_auth/invitations/accept', { token, password: TEST_PASSWORD, ...deviceKeyBody() }, undefined, ip);
+            configureChannels({ invitations: false });
+
+            for (let attempt = 0; attempt < 11; attempt += 1)
+            {
+                await expectChannelClosed(await accept(), 'invitations', `accept ${attempt}`);
+            }
+            await expectChannelClosed(await app.request(`/_auth/invitations/${token}`), 'invitations', 'getInvitation');
+
+            expect(await getTestDb().select().from(users).where(eq(users.email, 'i2@ch381.test'))).toHaveLength(0);
+            expect(await invitationStatus(id)).toBe('pending');
+
+            __resetChannelsForTests();
+
+            const response = await accept();
+            expect(response.status, await response.clone().text()).toBe(200);
+            expect(await getTestDb().select().from(users).where(eq(users.email, 'i2@ch381.test'))).toHaveLength(1);
+            expect(await invitationStatus(id)).toBe('accepted');
+        });
+
+        it('I3: a superadmin, who holds user:invite, is answered 404 on every signed-in route; nothing is issued, changed or announced', async () =>
+        {
+            const { id } = await issuedInvitation('i3-pending@ch381.test');
+            const before = await getTestDb().select().from(userInvitations);
+            await createTestUser('i3@ch381.test', (await getRoleByName('superadmin'))!.id);
+            const authorization = await signIn(app, 'i3@ch381.test', nextIp());
+            const announced: unknown[] = [];
+            onTestFinished(invitationCreatedEvent.subscribe(payload => void announced.push(payload)));
+            configureChannels({ invitations: false });
+
+            await expectChannelClosed(await post('/_auth/invitations', { email: 'i3-new@ch381.test', roleId: await userRoleId() }, authorization), 'invitations', 'createInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/resend', { id }, authorization), 'invitations', 'resendInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/cancel', { id }, authorization), 'invitations', 'cancelInvitation');
+            await expectChannelClosed(await post('/_auth/invitations/delete', { id }, authorization), 'invitations', 'deleteInvitation');
+            await expectChannelClosed(await app.request('/_auth/invitations', { headers: { Authorization: authorization } }), 'invitations', 'listInvitations');
+
+            expect(await getTestDb().select().from(userInvitations)).toEqual(before);
+            expect(announced).toEqual([]);
+        });
+    });
+
+    describe('selfDeletion: false', () =>
+    {
+        async function deletionState(userId: number)
+        {
+            const [user] = await getTestDb().select().from(users).where(eq(users.id, userId));
+
+            return { deletion: user!.deletion, requests: (await getTestDb().select().from(accountDeletionRequests)).length };
+        }
+
+        it('I6: the deletion request answers 404 naming selfDeletion, records nothing, and the caller\'s key still works', async () =>
+        {
+            const email = 'i6@ch381.test';
+            const userId = await createTestUser(email, await userRoleId());
+            const authorization = await signIn(app, email, nextIp());
+            configureChannels({ selfDeletion: false });
+
+            expect((await post('/_auth/deletion/request', { password: TEST_PASSWORD })).status).toBe(401);
+            await expectChannelClosed(await post('/_auth/deletion/request', { password: TEST_PASSWORD }, authorization), 'selfDeletion', 'requestAccountDeletion');
+
+            expect(await deletionState(userId)).toEqual({ deletion: null, requests: 0 });
+            expect((await post('/_auth/keys/list', {}, authorization)).status).toBe(200);
+        });
+
+        it('I11: a refused deletion request spends no rate-limit token — the first request after reopening is served', async () =>
+        {
+            const email = 'i9@ch381.test';
+            const userId = await createTestUser(email, await userRoleId());
+            const ip = nextIp();
+            const authorization = await signIn(app, email, ip);
+            const request = () => post('/_auth/deletion/request', { password: TEST_PASSWORD }, authorization, ip);
+            configureChannels({ selfDeletion: false });
+
+            for (let attempt = 0; attempt < 6; attempt += 1)
+            {
+                await expectChannelClosed(await request(), 'selfDeletion', `attempt ${attempt}`);
+            }
+
+            __resetChannelsForTests();
+
+            const response = await request();
+            expect(response.status, await response.clone().text()).toBe(200);
+            expect((await deletionState(userId)).requests).toBe(1);
+        });
+
+        it('I7: a pending deletion an operator requested is still cancelled, by the password and by an account_deletion code', async () =>
+        {
+            const email = 'i7@ch381.test';
+            const userId = await createTestUser(email, await userRoleId());
+            vi.stubEnv('SPFN_AUTH_VERIFICATION_TOKEN_SECRET', 'test-verification-token-secret-min-32-chars');
+            configureChannels({ selfDeletion: false });
+
+            await requestAccountDeletionService(userId, { requestedBy: 'admin' });
+            const byPassword = await post('/_auth/deletion/cancel', { email, password: TEST_PASSWORD });
+            expect(byPassword.status, await byPassword.clone().text()).toBe(204);
+            expect((await deletionState(userId)).deletion).toBeNull();
+
+            await requestAccountDeletionService(userId, { requestedBy: 'admin' });
+            const sent = await post('/_auth/codes', { target: email, targetType: 'email', purpose: 'account_deletion' });
+            expect(sent.status, await sent.clone().text()).toBe(200);
+            const [code] = await codeRows('account_deletion');
+            const verified = await post('/_auth/codes/verify', { target: email, targetType: 'email', code: code!.code, purpose: 'account_deletion' });
+            expect(verified.status, await verified.clone().text()).toBe(200);
+            const byCode = await post('/_auth/deletion/cancel', { email, verificationToken: (await verified.json()).verificationToken });
+            expect(byCode.status, await byCode.clone().text()).toBe(204);
+            expect((await deletionState(userId)).deletion).toBeNull();
+        });
+
+        it('I12: the purge sweep still purges an operator-requested deletion once it is due', async () =>
+        {
+            const userId = await createTestUser('i10@ch381.test', await userRoleId());
+            configureChannels({ selfDeletion: false });
+            await requestAccountDeletionService(userId, { requestedBy: 'admin' });
+            await getTestDb().update(accountDeletionRequests)
+                .set({ purgeScheduledAt: new Date(Date.now() - 1000) })
+                .where(eq(accountDeletionRequests.userId, userId));
+
+            expect(await sweepDuePurges()).toMatchObject({ processed: 1, purged: 1 });
+            const [user] = await getTestDb().select().from(users).where(eq(users.id, userId));
+            expect(user!.email).not.toBe('i10@ch381.test');
+        });
+    });
+
+    // ========================================================================
     // The mobile contract declares what a closed channel answers
     // ========================================================================
 
@@ -636,6 +840,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
     {
         const ALL_OFF: Record<AuthChannel, false> = {
             signup: false, passwordReset: false, deviceCode: false, deviceLink: false, passkeyLogin: false,
+            invitations: false, selfDeletion: false,
         };
 
         it('C12: each group\'s service function, called directly, still works', async () =>
@@ -657,6 +862,24 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             expect(await getTestDb().select().from(signupLinkTokens)).toHaveLength(1);
             expect(await getTestDb().select().from(passwordResetTokens)).toHaveLength(1);
             expect(await codeRows('registration')).toHaveLength(1);
+        });
+
+        it('I4/I8: the invitation services issue and accept an invitation, and the deletion service takes a self request', async () =>
+        {
+            const inviterId = await createTestUser('c12-inviter@ch381.test', (await getRoleByName('admin'))!.id);
+            const selfId = await createTestUser('c12-self@ch381.test', await userRoleId());
+            await signIn(app, 'c12-self@ch381.test', nextIp());
+            const [key] = await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.userId, selfId));
+            configureChannels(ALL_OFF);
+
+            const { token } = await createInvitation({ email: 'c12-invitee@ch381.test', roleId: await userRoleId(), invitedBy: inviterId });
+            await acceptInvitation({ token, password: TEST_PASSWORD, ...deviceKeyBody() });
+            await runInTransaction(() => requestAccountDeletionService(selfId, {
+                requestedBy: 'self', credential: { kind: 'deviceKey', keyId: key!.keyId }, password: TEST_PASSWORD,
+            }));
+
+            expect(await getTestDb().select().from(users).where(eq(users.email, 'c12-invitee@ch381.test'))).toHaveLength(1);
+            expect(await getTestDb().select().from(accountDeletionRequests)).toHaveLength(1);
         });
     });
 });

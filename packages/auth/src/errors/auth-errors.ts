@@ -1456,12 +1456,12 @@ export class SignupDisabledError extends ForbiddenError
 /**
  * Channel Disabled Error (404)
  *
- * A route of a sign-in channel the app turned off
- * (`createAuthLifecycle({ channels })`): sign-up, password reset, device-code
- * login or device link. Not found rather than forbidden — to every caller the
- * route is not there — but its own code, so a client can tell "this app does
- * not offer this" from an unknown device code or link. `details.channel` names
- * the channel. Clients branch on `code`.
+ * A route of a channel the app turned off (`createAuthLifecycle({ channels })`):
+ * sign-up, password reset, device-code login, device link, passkey sign-in,
+ * invitations or the self-deletion request. Not found rather than forbidden —
+ * to every caller the route is not there — but its own code, so a client can
+ * tell "this app does not offer this" from an unknown device code or link.
+ * `details.channel` names the channel. Clients branch on `code`.
  */
 export class ChannelDisabledError extends NotFoundError
 {
@@ -1470,7 +1470,7 @@ export class ChannelDisabledError extends NotFoundError
     constructor(data: { message?: string; details?: Record<string, any> } = {})
     {
         super({
-            message: data.message || 'This application does not offer this sign-in channel',
+            message: data.message || 'This application does not offer this channel',
             details: data.details,
         });
         this.name = 'ChannelDisabledError';
