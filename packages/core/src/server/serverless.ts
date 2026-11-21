@@ -30,6 +30,7 @@ import { initDatabase } from '@spfn/core/db';
 import { loadEnv } from '../env/loader';
 import { createServer } from './create-server';
 import { runEnvBootCheck } from './env-boot-check';
+import { discardInheritedOwnerCredentials } from './owner-credentials';
 import { serverLogger } from './logger';
 import type { ServerConfig } from './types';
 
@@ -119,6 +120,7 @@ export function createServerlessApp(config?: ServerConfig): Promise<Hono>
 
 async function buildServerlessApp(rawConfig?: ServerConfig): Promise<Hono>
 {
+    discardInheritedOwnerCredentials();
     loadEnv();
 
     // The same gate as startServer, but thrown rather than exited: a serverless
@@ -157,6 +159,8 @@ export function resetServerlessApp(): void
  */
 export async function provisionInfrastructure(config?: ServerConfig): Promise<void>
 {
+    // Its hooks run app code as the app: the owner's URL goes first.
+    discardInheritedOwnerCredentials();
     loadEnv();
 
     if (config?.lifecycle?.beforeInfrastructure)

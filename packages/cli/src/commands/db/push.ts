@@ -1,12 +1,10 @@
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { env } from '@spfn/core/config';
-import { loadEnv } from '@spfn/core/server';
 import { sql } from 'drizzle-orm';
-import { pendingFunctionMigrations } from '@spfn/core/db';
+import { packageNameToSchema, pendingFunctionMigrations, type PendingFunctionMigrations } from '@spfn/core/db';
 
 import {
-    validateDatabasePrerequisites,
     loadSchemaImports,
     createPushConnection,
     resolvePushSchemaSource,
@@ -32,7 +30,10 @@ import {
     executeFunctionMigrations,
     type FunctionMigrationPlan,
 } from '../../utils/function-migrations.js';
-import { describeFailure } from '../../utils/database-failure.js';
+import { describeFailure, failedStatementOf, sqlStateOf } from '../../utils/database-failure.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
+import { OWNER_URL_MISSING } from './utils/database.js';
+import { ownershipRemedy } from './utils/foreign-owners.js';
 
 export interface PushHint
 {
@@ -130,7 +131,12 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  * statements are settled next. Then each function package's pending migrations
  * apply (one committed transaction per package, as `db migrate`), then the
  * project statements (one transaction), so a project table may reference a
- * package table on an empty database.
+ * package table on an empty database. A database error at any of these stages
+ * — planning, a package's migrations, the project statements — ends push the
+ * same way: exit 1, the stage named, the error as `describeFailure` prints it,
+ * and the ownership remedy when the catalog shows it. So does a connection
+ * that cannot be opened, the dry run's read of `transaction_read_only` included
+ * (the `connect` stage, with no remedy: there is no session to ask the catalog).
  *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
@@ -160,15 +166,16 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
-    // 1. Prerequisites
-    validateDatabasePrerequisites();
-    loadEnv();
+    // 1. Prerequisites: the owner's connection, for the plan as for the writes
+    loadEnvFor('db push');
+    const databaseUrl = databaseUrlFor('db push') ?? exitWithoutDatabaseUrl();
 
     // 2. Get drizzle config (schema file list + schemaFilter)
     const source = await loadSchemaSourceOrExit(options.schema);
     const { getDrizzleConfig } = await import('@spfn/core/db');
     const config = getDrizzleConfig({
         cwd: process.cwd(),
+        databaseUrl,
         schema: source?.schema,
         expandGlobs: true,
         disablePackageDiscovery: true,
@@ -207,15 +214,14 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     // 4. Connect. A dry run runs each plan query in a read-only transaction
     //    of its own, so PostgreSQL refuses any write attempted on it.
-    const connection = await openPushConnectionOrExit(options.dryRun);
+    const connection = await openPushConnectionOrExit(databaseUrl, options.dryRun);
+    const target: PushTarget = { db: connection.db, databaseUrl, schemas: managedSchemas(schemaFilter, functionPlans) };
 
     try
     {
-        // 5. Plan, reading only: the project diff via pushSchema, the checks it
-        //    leaves as they are, and each function package's pending migrations
-        const plan = await resolvePushPlan(imports, connection.db, schemaFilter);
+        // 5. Plan, reading only
+        const { plan, pending } = await planOrExit(imports, schemaFilter, functionPlans, target);
         const { statements } = plan;
-        const pending = await pendingFunctionMigrations(connection.db, functionPlans);
         const result = classifyStatements(statements);
 
         // 6. Display in apply order. Function package lines only when a package
@@ -243,8 +249,8 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
         // 9. Apply the function package migrations, then the project statements:
         //    a project table may reference a package table
-        const packageMigrationsApplied = await applyFunctionMigrations(functionPlans);
-        await applyProjectStatements(connection.db, selection, packageMigrationsApplied > 0);
+        const packageMigrationsApplied = await applyFunctionMigrations(functionPlans, target);
+        await applyProjectStatements(target, selection, packageMigrationsApplied > 0);
     }
     finally
     {
@@ -253,14 +259,95 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 }
 
 /**
- * Connect for the plan. Each query of a dry run's plan runs inside
+ * Where push writes, as its failure lines need it: the connection (the owner's),
+ * its URL to keep out of the output, and the PostgreSQL schemas push manages.
+ */
+interface PushTarget
+{
+    db: PushConnection['db'];
+    databaseUrl: string;
+    schemas: string[];
+}
+
+/** The schemas push changes: the project's, each function package's, and `drizzle`, where the bookkeeping lives. */
+function managedSchemas(schemaFilter: string[], functionPlans: FunctionMigrationPlan[]): string[]
+{
+    return [...new Set([...schemaFilter, ...functionPlans.map(plan => packageNameToSchema(plan.packageName)), 'drizzle'])];
+}
+
+/**
+ * Plan both halves, reading only: the project diff via pushSchema, the checks
+ * it leaves as they are, and each function package's pending migrations.
+ * drizzle-kit reads each table it would drop a column of, or drop, for its
+ * data-loss check, so a table the owner may not read fails here, before any
+ * write — and ends push as a failed write does.
+ */
+async function planOrExit(
+    imports: Record<string, unknown>,
+    schemaFilter: string[],
+    functionPlans: FunctionMigrationPlan[],
+    target: PushTarget,
+): Promise<{ plan: PushPlan; pending: PendingFunctionMigrations[] }>
+{
+    try
+    {
+        return {
+            plan: await resolvePushPlan(imports, target.db, schemaFilter),
+            pending: await pendingFunctionMigrations(target.db, functionPlans),
+        };
+    }
+    catch (error)
+    {
+        return exitOnFailure('plan', error, target);
+    }
+}
+
+/** Each stage of push a database error can end, and what its failure leaves behind. */
+const FAILED_STAGES = {
+    connect: 'Could not connect to the database — nothing was planned or applied',
+    plan: 'Planning failed — nothing was applied',
+    packages: 'Failed to apply function package migrations — nothing of the project schema was applied',
+    project: 'The project statements were rolled back',
+} as const;
+
+/**
+ * End push on a failure at `stage` — the one way every stage ends: exit 1, the
+ * stage's line with the error as `describeFailure` prints it (core's fields,
+ * never a bound parameter or the URL), the ownership remedy when the catalog
+ * shows another role owns what push manages, then `note`.
+ */
+async function exitOnFailure(stage: keyof typeof FAILED_STAGES, error: unknown, target: PushTarget, note?: string): Promise<never>
+{
+    printStageFailure(stage, error, target.databaseUrl);
+    await printOwnershipRemedy(error, target);
+    if (note)
+    {
+        console.error(chalk.yellow(note));
+    }
+    process.exit(1);
+}
+
+/** The line a failure at `stage` prints: the stage, then the error as `describeFailure` prints it. */
+function printStageFailure(stage: keyof typeof FAILED_STAGES, error: unknown, databaseUrl: string): void
+{
+    console.error(chalk.red(`\n❌ ${FAILED_STAGES[stage]}: ${describeFailure(error, databaseUrl)}`));
+}
+
+/**
+ * Connect for the plan, ending push at the `connect` stage when the connection
+ * or the dry run's first read fails. Each query of a dry run's plan runs inside
  * `BEGIN READ ONLY`; when the server does not report such a transaction
  * read-only, the command ends before planning rather than preview on a
  * session that could write.
  */
-async function openPushConnectionOrExit(dryRun?: boolean): Promise<PushConnection>
+async function openPushConnectionOrExit(databaseUrl: string, dryRun?: boolean): Promise<PushConnection>
 {
-    const connection = await createPushConnection({ readOnly: dryRun });
+    const connection = await createPushConnection(databaseUrl, { readOnly: dryRun }).catch((error: unknown) =>
+    {
+        printStageFailure('connect', error, databaseUrl);
+
+        return process.exit(1);
+    });
 
     if (!dryRun || connection.transactionReadOnly === 'on')
     {
@@ -347,7 +434,7 @@ async function selectProjectStatements(
  * rolls back and exits 1; function package migrations this run committed stay.
  */
 async function applyProjectStatements(
-    db: PushConnection['db'],
+    target: PushTarget,
     { statements, skipped }: ProjectSelection,
     packageMigrationsApplied: boolean,
 ): Promise<void>
@@ -356,33 +443,20 @@ async function applyProjectStatements(
     {
         if (statements.length > 0)
         {
-            await applyStatements(db, statements);
+            await applyStatements(target.db, statements);
         }
     }
     catch (error)
     {
-        exitOnProjectFailure(error, packageMigrationsApplied);
+        await exitOnFailure('project', error, target, packageMigrationsApplied
+            ? 'Function package migrations applied above stay applied; fix the schema and run spfn db push again.'
+            : undefined);
     }
 
     if (statements.length > 0 || skipped > 0)
     {
         displayApplySummary(statements.length, skipped);
     }
-}
-
-/**
- * Print a failed project statement and exit 1, as `describeFailure` prints it:
- * the error, then the statement's own SQL — the operator's schema, which the
- * plan printed already.
- */
-function exitOnProjectFailure(error: unknown, packageMigrationsApplied: boolean): never
-{
-    console.error(chalk.red(`\n❌ The project statements were rolled back: ${describeFailure(error, env.DATABASE_URL)}`));
-    if (packageMigrationsApplied)
-    {
-        console.error(chalk.yellow('Function package migrations applied above stay applied; fix the schema and run spfn db push again.'));
-    }
-    process.exit(1);
 }
 
 /**
@@ -445,7 +519,7 @@ function loadFunctionPlansOrExit(): FunctionMigrationPlan[]
 /**
  * Run function package migrations (e.g., @spfn/cms); returns how many applied.
  */
-async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<number>
+async function applyFunctionMigrations(plans: FunctionMigrationPlan[], target: PushTarget): Promise<number>
 {
     if (plans.length === 0)
     {
@@ -457,15 +531,43 @@ async function applyFunctionMigrations(plans: FunctionMigrationPlan[]): Promise<
 
     try
     {
-        const applied = await executeFunctionMigrations(plans);
+        const applied = await executeFunctionMigrations(plans, target.databaseUrl);
         console.log(chalk.green('\n✅ All function migrations applied\n'));
 
         return applied;
     }
     catch (error)
     {
-        console.error(chalk.red('\n❌ Failed to apply function package migrations — nothing of the project schema was applied'));
-        console.error(chalk.red(describeFailure(error, env.DATABASE_URL)));
-        process.exit(1);
+        return exitOnFailure('packages', error, target);
+    }
+}
+
+function exitWithoutDatabaseUrl(): never
+{
+    console.error(chalk.red(OWNER_URL_MISSING));
+    console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL (and DATABASE_OWNER_URL for the table owner) to your .env file'));
+    process.exit(1);
+}
+
+/**
+ * Say what to do when PostgreSQL refused push a privilege (SQLSTATE 42501)
+ * because objects push manages belong to another role — a database pushed
+ * through DATABASE_URL before push connected as the owner. Only with an owner
+ * URL of its own can another role own them, and only the catalog can say they
+ * do: it is asked on the owner's connection once the failed transaction is
+ * over. Any other 42501, or a catalog that cannot be read, adds nothing.
+ */
+async function printOwnershipRemedy(error: unknown, target: PushTarget): Promise<void>
+{
+    if (sqlStateOf(error) !== '42501' || !env.DATABASE_OWNER_URL || env.DATABASE_OWNER_URL === env.DATABASE_URL)
+    {
+        return;
+    }
+
+    const remedy = await ownershipRemedy(target.db, target.schemas, failedStatementOf(error));
+
+    if (remedy)
+    {
+        console.error(chalk.yellow(remedy));
     }
 }

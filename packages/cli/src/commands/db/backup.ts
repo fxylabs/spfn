@@ -3,7 +3,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
-import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl } from './utils/database.js';
+import { OWNER_URL_MISSING, parseDatabaseUrl } from './utils/database.js';
 import { formatBytes, formatTimestamp } from './utils/formatters.js';
 import { ensureBackupDir } from './utils/backup-files.js';
 import {
@@ -12,7 +12,7 @@ import {
     saveBackupMetadata,
     type BackupMetadata,
 } from './utils/metadata.js';
-import { loadEnv } from '@spfn/core/server';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Backup database to file
@@ -33,8 +33,8 @@ export async function dbBackup(options: {
 {
     console.log(chalk.blue('💾 Creating database backup...\n'));
 
-    loadEnv();
-    const dbUrl = ownerDatabaseUrl();
+    loadEnvFor('db backup');
+    const dbUrl = databaseUrlFor('db backup');
     if (!dbUrl)
     {
         console.error(chalk.red(OWNER_URL_MISSING));

@@ -31,6 +31,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 import { logger } from '@spfn/core/logger';
+import { DATABASE_OWNER_URL } from '../config/schema';
 
 const envLogger = logger.child('@spfn/core:env-loader');
 
@@ -68,6 +69,18 @@ export interface LoadEnvOptions
      * @default false
      */
     override?: boolean;
+
+    /**
+     * Load `DATABASE_OWNER_URL` from the files too. The table owner's URL is
+     * for the spfn commands that change the schema, and only they pass this;
+     * every other caller — the server, its provisioning, app code, a later
+     * reload — leaves the key out of `process.env`, and the first such load in
+     * a process logs one `debug` line naming the file (never the value). A
+     * value the process inherited is not this loader's: the server entries
+     * remove that.
+     * @default false
+     */
+    ownerCredentials?: boolean;
 }
 
 /**
@@ -85,6 +98,9 @@ export interface LoadEnvResult
      */
     loadedKeys: string[];
 }
+
+/** Whether this process has said that a file's `DATABASE_OWNER_URL` was left out. */
+let ownerUrlSkipReported = false;
 
 /**
  * NODE_ENV에 따른 .env 파일 목록 생성 (우선순위 낮음 -> 높음)
@@ -151,6 +167,7 @@ export function loadEnv(options: LoadEnvOptions = {}): LoadEnvResult
         server = true,
         debug = false,
         override = false,
+        ownerCredentials = false,
     } = options;
 
     const envFiles = getEnvFiles(nodeEnv, server);
@@ -161,6 +178,7 @@ export function loadEnv(options: LoadEnvOptions = {}): LoadEnvResult
 
     // 2) 모든 .env 파일 파싱 후 머지 (나중 파일이 승리)
     const merged: Record<string, string> = {};
+    let ownerUrlFile: string | undefined;
 
     for (const fileName of envFiles)
     {
@@ -174,6 +192,17 @@ export function loadEnv(options: LoadEnvOptions = {}): LoadEnvResult
 
         loadedFiles.push(fileName);
         Object.assign(merged, parsed);
+
+        if (DATABASE_OWNER_URL in parsed)
+        {
+            ownerUrlFile = fileName;
+        }
+    }
+
+    if (!ownerCredentials && ownerUrlFile !== undefined)
+    {
+        delete merged[DATABASE_OWNER_URL];
+        reportOwnerUrlSkipped(ownerUrlFile, override || !existingKeys.has(DATABASE_OWNER_URL));
     }
 
     // 3) 머지된 결과를 process.env에 적용
@@ -200,6 +229,34 @@ export function loadEnv(options: LoadEnvOptions = {}): LoadEnvResult
     warnIfEnvGuessCostSomething(cwd, nodeEnvAtEntry, options.nodeEnv, nodeEnv);
 
     return { loadedFiles, loadedKeys };
+}
+
+/**
+ * Say, once per process, that `file`'s `DATABASE_OWNER_URL` was left out.
+ *
+ * Logged at `debug`: nothing is wrong and nothing is to do — keeping the
+ * owner's URL in a file the CLI reads is how local development gives it to the
+ * schema commands — so a correct configuration boots without a line, and the
+ * line is there for whoever wonders why the server does not hold the variable
+ * (`SPFN_LOG_LEVEL=debug`; the env README states the behaviour). Silent when the
+ * file's value would not have applied anyway — the process already holds the
+ * variable (an owner command's earlier load), which is not this file's doing.
+ *
+ * @param file - the last file that sets the key
+ * @param wouldHaveApplied - whether the value would have reached `process.env`
+ */
+function reportOwnerUrlSkipped(file: string, wouldHaveApplied: boolean): void
+{
+    if (ownerUrlSkipReported || !wouldHaveApplied)
+    {
+        return;
+    }
+
+    ownerUrlSkipReported = true;
+    envLogger.debug(
+        `${DATABASE_OWNER_URL} is in ${file}; the server does not load it;`
+        + ' spfn db commands that change the schema do.',
+    );
 }
 
 /**
@@ -291,4 +348,5 @@ export function loadEnvOnce(options: LoadEnvOptions = {}): LoadEnvResult
 export function resetEnvLoadState(): void
 {
     isEnvLoaded = false;
+    ownerUrlSkipReported = false;
 }

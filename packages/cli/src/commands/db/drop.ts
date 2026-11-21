@@ -1,8 +1,8 @@
 import chalk from 'chalk';
 import prompts from 'prompts';
-import { loadEnv } from '@spfn/core/server';
 import { runWithSpinner } from './utils/drizzle.js';
-import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
+import { OWNER_URL_MISSING, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Drop all database tables (dangerous!)
@@ -12,9 +12,9 @@ import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl, confirmDangerous
  */
 export async function dbDrop(): Promise<void>
 {
-    loadEnv();
+    loadEnvFor('db drop');
 
-    const databaseUrl = ownerDatabaseUrl();
+    const databaseUrl = databaseUrlFor('db drop');
 
     if (!databaseUrl)
     {

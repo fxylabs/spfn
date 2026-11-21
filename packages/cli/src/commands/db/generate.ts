@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import { runDrizzleCommand } from './utils/drizzle.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Generate database migrations from schema changes
@@ -9,7 +10,8 @@ export async function dbGenerate(): Promise<void>
 {
     try
     {
-        await runDrizzleCommand('generate');
+        loadEnvFor('db generate');
+        await runDrizzleCommand('generate', databaseUrlFor('db generate'));
         console.log(chalk.green('\n✅ Migrations generated successfully'));
     }
     catch (error)

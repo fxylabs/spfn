@@ -79,14 +79,16 @@ async function addPackage(packageName: string): Promise<void>
     {
         console.log(chalk.blue(`\n🗄️  Setting up database for ${packageName}...\n`));
 
-        // Load environment first
-        const { env } = await import('@spfn/core/config');
+        // The owner's connection: the package's migrations create its tables
+        const { databaseUrlFor, loadEnvFor } = await import('../utils/database-connection.js');
+        loadEnvFor('add');
+        const databaseUrl = databaseUrlFor('add');
 
-        if (!env.DATABASE_URL)
+        if (!databaseUrl)
         {
-            console.log(chalk.yellow('⚠️  DATABASE_URL not found — skipping database setup.'));
+            console.log(chalk.yellow('⚠️  Neither DATABASE_OWNER_URL nor DATABASE_URL is set — skipping database setup.'));
             console.log(chalk.yellow(`   ${packageName} tables are created by its bundled migrations, not by schema push.`));
-            console.log(chalk.cyan('   Once DATABASE_URL is set, run: pnpm spfn db migrate'));
+            console.log(chalk.cyan('   Once DATABASE_URL (and DATABASE_OWNER_URL for the table owner) is set, run: pnpm spfn db migrate'));
             console.log(chalk.gray('   (check state anytime with: pnpm spfn db status)\n'));
         }
         else
@@ -104,7 +106,7 @@ async function addPackage(packageName: string): Promise<void>
 
                 try
                 {
-                    await executeFunctionMigrations(loadFunctionMigrationPlans([targetFunction]));
+                    await executeFunctionMigrations(loadFunctionMigrationPlans([targetFunction]), databaseUrl);
                     spinner.succeed('Migrations applied');
                 }
                 catch (error)

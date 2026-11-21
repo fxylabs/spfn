@@ -131,7 +131,7 @@ validator **throw on access** if the value is present but malformed.
 | `DATABASE_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_WRITE_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_READ_URL` | `string` | No | `parsePostgresUrl` |
-| `DATABASE_OWNER_URL` | `string` | No | `parsePostgresUrl` — the table owner, used only by `spfn db migrate` / `backup` / `restore` / `drop`; falls back to `DATABASE_URL` |
+| `DATABASE_OWNER_URL` | `string` | No | `parsePostgresUrl` — the table owner, used only by the spfn commands that change the schema (`db push`, its dry run too, `db migrate`, `add`) and by `db backup` / `restore` / `drop` / `tenant import`; falls back to `DATABASE_URL`. The server never uses it and must not hold it: `loadEnv()` loads it from an `.env` file only with `ownerCredentials: true`, which only those commands pass (keep it in `.env.server` locally; in production only in the migrate job's environment), and every other load logs one info line naming the file instead. A server entry (`startServer`, `createServer`, the serverless app, `provisionInfrastructure`) started with it in its environment removes it and logs one warning |
 
 ### Database — connection pool
 

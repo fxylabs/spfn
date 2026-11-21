@@ -5,6 +5,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 import { logger } from '../utils/logger.js';
 import { detectPackageManager } from '../utils/package-manager.js';
+import { databaseUrlFor, enterCommand } from '../utils/database-connection.js';
 import { loadAppConfig, resolvePorts } from '@spfn/core/app-config';
 
 interface StartOptions
@@ -29,6 +30,11 @@ export const startCommand = new Command('start')
     .option('--allow-pending-migrations', 'Start even when migrations are pending (they are listed as a warning)')
     .action(async (options: StartOptions) =>
     {
+        // An app command: an inherited owner URL leaves this process — and so
+        // every child, which inherits its environment — before the pre-start
+        // check or any child runs.
+        enterCommand('spfn start');
+
         // Set NODE_ENV to production (Next.js style)
         if (!process.env.NODE_ENV) 
         {
@@ -103,7 +109,7 @@ export const startCommand = new Command('start')
             const { checkPendingMigrationsBeforeStart } = await import('../utils/migration-status.js');
             const migrationCheck = await checkPendingMigrationsBeforeStart(
                 cwd,
-                process.env.DATABASE_URL,
+                databaseUrlFor('pre-start check', process.env),
                 options.allowPendingMigrations === true,
             );
 

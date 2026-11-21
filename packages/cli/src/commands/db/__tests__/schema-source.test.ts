@@ -349,7 +349,7 @@ describe('generateTempConfig', () =>
         writeFileSync(join(entities, 'config.ts'),
             "export * from '../moved/profile.entity';\nexport { users } from '../../../node_modules/@spfn/mockfn/entities.js';\n");
 
-        await expect(generateTempConfig({ reconcile: true }))
+        await expect(generateTempConfig({ reconcile: true, databaseUrl: DB }))
             .rejects.toThrow(/reaches users \(@spfn\/mockfn\), which the package migrates itself/);
     });
 
@@ -360,7 +360,7 @@ describe('generateTempConfig', () =>
             "export * from '../moved/profile.entity';\n"
             + "export { mockSchema } from '../../../node_modules/@spfn/mockfn/entities.js';\n");
 
-        await expect(generateTempConfig({ reconcile: true }))
+        await expect(generateTempConfig({ reconcile: true, databaseUrl: DB }))
             .rejects.toThrow(/reaches schema spfn_mockfn \(@spfn\/mockfn\)/);
     });
 
@@ -369,7 +369,7 @@ describe('generateTempConfig', () =>
         writeFileSync(join(entities, 'a.entity.ts'), table('a'));
         writeFileSync(join(entities, 'config.ts'), "export * from './a.entity';\n");
 
-        const rendered = await generateTempConfig({ reconcile: true });
+        const rendered = await generateTempConfig({ reconcile: true, databaseUrl: DB });
 
         expect(rendered).toContain(join(entities, 'a.entity.ts'));
         expect(rendered).not.toContain('config.ts');
@@ -383,6 +383,6 @@ describe('generateTempConfig', () =>
             + "export const invoices = billing.table('invoices', { id: integer('id') });\n");
         writeFileSync(join(entities, 'config.ts'), "export * from '../moved/billing.entity';\n");
 
-        expect(await generateTempConfig({ reconcile: true })).toContain(join(entities, 'config.ts'));
+        expect(await generateTempConfig({ reconcile: true, databaseUrl: DB })).toContain(join(entities, 'config.ts'));
     });
 });

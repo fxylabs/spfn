@@ -47,3 +47,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# spfn db temporary drizzle config (holds a database URL; a SIGKILL leaves one behind)
+drizzle.config.*.temp.ts

@@ -17,8 +17,7 @@ import { finished, pipeline } from 'stream/promises';
 import type { Readable } from 'stream';
 import { createHash } from 'crypto';
 import chalk from 'chalk';
-import { env } from '@spfn/core/config';
-import { loadEnv } from '@spfn/core/server';
+import { databaseUrlFor, loadEnvFor } from '../../../utils/database-connection.js';
 import { ensureBackupDir } from '../utils/backup-files.js';
 import { formatTimestamp } from '../utils/formatters.js';
 import { collectMigrationInfo } from '../utils/metadata.js';
@@ -46,10 +45,10 @@ export async function dbTenantExport(tenantIdArg: string): Promise<void>
 {
     const tenantId = withFailure(() => parseTenantId(tenantIdArg));
 
-    loadEnv();
+    loadEnvFor('db tenant export');
 
-    const plan = buildTenantPlanOrFail(await loadAppSchema().catch((error) => fail(describeFailure(error, undefined))));
-    const url = env.DATABASE_READ_URL ?? env.DATABASE_URL ?? fail('Neither DATABASE_READ_URL nor DATABASE_URL is set');
+    const plan = buildTenantPlanOrFail(await loadAppSchema(databaseUrlFor('db tenant export')).catch((error) => fail(describeFailure(error, undefined))));
+    const url = databaseUrlFor('db tenant export') ?? fail('Neither DATABASE_READ_URL nor DATABASE_URL is set');
     const directory = path.join(await ensureBackupDir(), `tenant-${tenantId}-${formatTimestamp()}`);
 
     console.log(chalk.blue(`📤 Exporting tenant ${tenantId} (${plan.tables.length} tables)...\n`));

@@ -24,6 +24,7 @@ import { missingTsx } from '../utils/tsx-required.js';
 import { redactUrls } from '../utils/redact-urls.js';
 import { detectPackageManager } from '../utils/package-manager.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
+import { dropOwnerCredentials, enterCommand } from '../utils/database-connection.js';
 
 /**
  * The runner `spfn provision` spawns under tsx.
@@ -97,6 +98,9 @@ export const provisionCommand = new Command('provision')
     .description('Run deploy-time provisioning (seed/RBAC lifecycle hooks) — once per deploy, not per cold start')
     .action(async () =>
     {
+        // An app command: an inherited owner URL leaves this process first
+        enterCommand('spfn provision');
+
         if (!process.env.NODE_ENV)
         {
             process.env.NODE_ENV = 'production';
@@ -139,11 +143,16 @@ export const provisionCommand = new Command('provision')
 
         const runner = tsxCommand(detectPackageManager(cwd), cwd, runnerEntry);
 
+        // The runner loads server.config and runs its hooks as the app: without
+        // the owner's credentials, which the keychain could otherwise hand it.
+        const runnerEnv: NodeJS.ProcessEnv = { ...process.env, ...keychainEnv };
+        dropOwnerCredentials(runnerEnv);
+
         const result = await execa(runner.command, runner.args, {
             cwd,
             stdio: 'inherit',
             reject: false,
-            env: { ...process.env, ...keychainEnv },
+            env: runnerEnv,
         });
 
         if (result.exitCode !== 0)

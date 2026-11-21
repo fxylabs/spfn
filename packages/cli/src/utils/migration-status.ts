@@ -22,6 +22,7 @@ import {
 } from '@spfn/core/db';
 import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
+import { databaseUrlFor } from './database-connection.js';
 
 export {
     functionMigrationsTable,
@@ -41,7 +42,7 @@ export async function getMigrationStatus(
 ): Promise<MigrationStatus>
 {
     loadEnv();
-    const url = databaseUrl ?? env.DATABASE_URL;
+    const url = databaseUrl ?? databaseUrlFor('db status');
 
     if (!url)
     {
@@ -152,7 +153,9 @@ export async function checkPendingMigrationsBeforeStart(
 
     const allowPending = flagAllowsPending || env.SPFN_ALLOW_PENDING_MIGRATIONS === true;
 
-    if (!(databaseUrl ?? env.DATABASE_URL))
+    const url = databaseUrl ?? databaseUrlFor('pre-start check');
+
+    if (!url)
     {
         return { block: false, allowPending };
     }
@@ -161,7 +164,7 @@ export async function checkPendingMigrationsBeforeStart(
 
     try
     {
-        status = await getMigrationStatus(cwd, databaseUrl);
+        status = await getMigrationStatus(cwd, url);
     }
     catch (error)
     {

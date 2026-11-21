@@ -20,6 +20,15 @@ import {
 } from '@spfn/core/env';
 
 /**
+ * The table owner's URL: the variable's one name. The schema declares it
+ * below; the env loader keeps it out of `process.env` unless a schema command
+ * asks, the server entries remove an inherited one, and the CLI's connection
+ * table hands it to the commands that change the schema — each through this
+ * constant.
+ */
+export const DATABASE_OWNER_URL = 'DATABASE_OWNER_URL';
+
+/**
  * Core package environment variable schema
  *
  * Defines all environment variables with:
@@ -76,8 +85,8 @@ export const coreEnvSchema = defineEnvSchema({
         examples: ['postgresql://user:password@replica:5432/dbname'],
     }),
 
-    DATABASE_OWNER_URL: envString({
-        description: 'Owner role URL for `spfn db migrate`, `backup`, `restore` and `drop` (falls back to DATABASE_URL). The app itself never uses it: the app role must not own the tables, or row-level security does not apply to it',
+    [DATABASE_OWNER_URL]: envString({
+        description: 'Owner role URL for every spfn command that changes the schema — `spfn db push` (its dry run too), `db migrate`, `spfn add` — and for `db backup`, `restore`, `drop`, `tenant import` (falls back to DATABASE_URL). The app itself never uses it and must not hold it: the app role must not own the tables, or row-level security does not apply to it. Only those commands load it from an .env file (keep it in .env.server locally; in production only in the migrate job\'s environment); the server and every other loadEnv() caller leave it out, and a server entry started with it in its environment removes it and logs a warning',
         required: false,
         sensitive: true,
         validator: parsePostgresUrl,

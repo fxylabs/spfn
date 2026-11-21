@@ -9,13 +9,18 @@
 import chalk from 'chalk';
 import { loadSchemaImports, resolvePushSchemaSource, resolveSchemaFiles } from '../utils/drizzle.js';
 
-/** Every export of the app's schema files, merged. */
-export async function loadAppSchema(): Promise<Record<string, unknown>>
+/**
+ * Every export of the app's schema files, merged. `databaseUrl` is the
+ * command's connection, for core's config; the schema is read before the
+ * command requires one, so a plan error comes first.
+ */
+export async function loadAppSchema(databaseUrl: string | undefined): Promise<Record<string, unknown>>
 {
     const source = await resolvePushSchemaSource();
     const { getDrizzleConfig } = await import('@spfn/core/db');
     const config = getDrizzleConfig({
         cwd: process.cwd(),
+        databaseUrl,
         schema: source?.schema,
         expandGlobs: true,
         disablePackageDiscovery: true,

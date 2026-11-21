@@ -206,6 +206,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (two-role databases): spfn: every command that changes the schema connects as the
+  table owner (#405).** `spfn db push` — its `--dry-run` and the function package migrations it
+  applies too — and `spfn add` connect with `DATABASE_OWNER_URL`, else `DATABASE_URL`, as `db
+  migrate`, `backup`, `restore`, `drop` and `tenant import` already did. Without
+  `DATABASE_OWNER_URL` nothing changes. The dry run plans as the role that will apply the plan:
+  drizzle-kit sees only the schemas its role may use. A database whose tables were pushed the old
+  way, through `DATABASE_URL` as the app role, has them owned by the app role, and `db push` now
+  fails with `Invalid query (42501)` — already while it plans, when drizzle-kit's data-loss check
+  reads a table it drops a column of, or at the first statement that alters one. A database error
+  at any stage of push — planning, a package's migrations, the project statements — now ends the
+  same way: exit 1, the stage named, the error as the CLI prints every database error; one raised
+  while planning was thrown raw, with the driver's `Failed query: … params:` line. When `DATABASE_OWNER_URL` is set apart from `DATABASE_URL`, push then
+  asks the catalog which schemas and tables it manages another role owns, and if any prints the
+  remedy under the failed line with the role names and the objects, first the relation the failed
+  statement acts on (the table after `ALTER TABLE`, `CREATE INDEX … ON`, never a column or a
+  referenced table), then `REASSIGN OWNED BY <their owner> TO <connected role>`, and for each object
+  the bootstrap superuser owns — tables created through a superuser's URL, which `REASSIGN OWNED`
+  refuses — `ALTER TABLE|SEQUENCE|VIEW|… <object> OWNER TO <connected role>;`, to run as a
+  superuser. Extension members, sequences a column owns (they follow their table) and initdb's
+  objects are left out. Any other 42501 adds nothing.
+  Move them to the owner once, as a superuser or
+  a role that is a member of both: `REASSIGN OWNED BY <app role> TO <owner role>` (the `@spfn/core`
+  db README, "Database roles"). Which connection each command uses is one table in the CLI
+  (`src/utils/database-connection.ts`; the CLI README, "Which connection each command uses"):
+  every command that opens a connection or writes a drizzle config reads its URL through it —
+  `db status`, `db generate`/`check` and `db studio` included — so `db push` and `db tenant
+  import`/`export` also build their schema config with their own URL and work with
+  `DATABASE_OWNER_URL` (or `DATABASE_READ_URL`) alone. `db studio` loads the `.env` files before
+  it checks for a URL. `executeFunctionMigrations(plans, url)` and
+  `createPushConnection(url, options)` take the URL as a required argument.
+- **spfn: only the commands that connect as the owner load `DATABASE_OWNER_URL` from an `.env`
+  file (#405).** Each command in the connection table loads the files through it, and only the
+  `owner` rows pass `loadEnv({ ownerCredentials: true })`: `db status`, the `spfn dev`/`start`
+  pre-start check and every other command see it only when the shell exports it. `spfn add` now
+  loads the `.env` files before it looks for a URL; it read only the shell's before. Every command
+  the table lists as `app` — `db status`, `generate`, `check`, `studio`, `tenant export`, `spfn
+  dev`, `spfn start`, `spfn provision` — removes an inherited `DATABASE_OWNER_URL` from its own
+  process at its entry, silently, so the `spfn dev`/`start` pre-start check and every process they
+  start (the server, Next.js, the codegen watcher, the provisioning runner) run without it; `spfn
+  dev` and `spfn provision` also keep a keychain reference to it in `.env.server` out of their
+  children's environment. For local development keep it in
+  `.env.server`, which Next.js never reads, or export it; in production give it only to the
+  migrate job.
+- **spfn: the temporary drizzle config is readable by its owner only and never outlives the
+  command (#405).** `db generate`, `db check`, `db drop` and `db studio` still write
+  `drizzle.config.<pid>.<time>.temp.ts` when the project has no `drizzle.config.ts`, with a
+  database URL in it. It is now created exclusively with mode 0600 and removed when drizzle-kit
+  exits, when the CLI process exits, and on SIGINT, SIGTERM and SIGHUP (the process still ends by
+  the signal). It was world-readable under the usual umask and survived a crash or a signal. A
+  SIGKILL still leaves it behind, so `spfn init`/`spfn create` add `drizzle.config.*.temp.ts` to
+  the app's `.gitignore` and to the `.dockerignore` it writes, as do the repository's and the
+  examples' own `.gitignore`.
+- **@spfn/core: the server never holds `DATABASE_OWNER_URL` (#405).** `loadEnv()` no longer loads
+  it from an `.env` file unless the caller passes `ownerCredentials: true`, which only the spfn
+  schema commands do: the server, `createServer`, the serverless app, `provisionInfrastructure`, a
+  later `loadEnv()` and app code leave it out of `process.env`, and the first such load in a
+  process writes one line naming the file, never the value, to stderr (`DATABASE_OWNER_URL is in
+  .env.server; the server does not load it; spfn db commands that change the schema do.`): a
+  loader's diagnostic, logged at `warn` because core's logger writes `info` to stdout, which is a
+  command's output — `spfn db status --json` prints one object there and nothing else.
+  `@spfn/core/config` exports the variable's name, `DATABASE_OWNER_URL`, for the loader, the
+  server entries and the CLI. Inherited from the environment the process was started with, it is
+  removed at the start of
+  `startServer`, `createServer`, the serverless app and `provisionInfrastructure`, before any app
+  code runs, with one warning about that environment.
 - **BREAKING: @spfn/core: the Next.js API client's and RPC proxy's failure lines no longer carry the
   URL (spfn/spfn#164).** A GET call's URL holds its whole input in `?input=` — params, query and
   body — and the proxy's target URL the forwarded query, and the lines are written at error level.

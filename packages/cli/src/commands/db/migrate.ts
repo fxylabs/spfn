@@ -2,9 +2,9 @@ import chalk from 'chalk';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { dbBackup } from './backup.js';
-import { OWNER_URL_MISSING, ownerDatabaseUrl } from './utils/database.js';
+import { OWNER_URL_MISSING } from './utils/database.js';
 
-import { loadEnv } from '@spfn/core/server';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Project migrations use the default drizzle migrations table.
@@ -23,8 +23,8 @@ const PROJECT_MIGRATIONS_TABLE = '__drizzle_migrations';
 export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise<void>
 {
     // Validate prerequisites before starting any migrations
-    loadEnv();
-    const databaseUrl = ownerDatabaseUrl();
+    loadEnvFor('db migrate');
+    const databaseUrl = databaseUrlFor('db migrate');
 
     if (!databaseUrl)
     {

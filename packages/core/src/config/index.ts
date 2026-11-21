@@ -21,6 +21,11 @@ import { coreEnvSchema } from './schema';
 export { coreEnvSchema as envSchema } from './schema';
 
 /**
+ * The table owner's URL variable's name (see the schema)
+ */
+export { DATABASE_OWNER_URL } from './schema';
+
+/**
  * Environment registry
  *
  * @example

@@ -64,6 +64,30 @@ export async function requireDatabase(sql: postgres.Sql, label: string): Promise
 }
 
 /**
+ * Why rows needing both roles cannot run here, or undefined when they can: the
+ * owner must answer and the app role connect. Under CI it throws instead, as
+ * core's tenancy harness does: CI's PostgreSQL has both roles, so a skip there
+ * would mean the rows stopped running.
+ */
+export async function twoRoleUnavailability(owner: postgres.Sql, app: postgres.Sql): Promise<string | undefined>
+{
+    const reason = await owner`select 1`.then(
+        () => app`select 1`.then(
+            () => undefined,
+            () => `the app role cannot connect (set TEST_APP_DATABASE_URL, or create ${TEST_ROLES.map((role) => role.user).join('/')})`,
+        ),
+        () => 'PostgreSQL not available at TEST_DATABASE_URL',
+    );
+
+    if (reason !== undefined && runsInCi())
+    {
+        throw new Error(`${reason}, and CI provides both roles — failing instead of skipping`);
+    }
+
+    return reason;
+}
+
+/**
  * `CI` set to anything but nothing, `false` or `0`: the definition core's test
  * helpers use (`src/db/__tests__/helpers/ci.ts`). A truthiness test took
  * `CI=false` for CI and turned a skip into a failure.

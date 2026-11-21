@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import { runDrizzleCommand } from './utils/drizzle.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Check migration file consistency (drizzle-kit check).
@@ -12,7 +13,8 @@ export async function dbCheck(): Promise<void>
 
     try
     {
-        await runDrizzleCommand('check');
+        loadEnvFor('db check');
+        await runDrizzleCommand('check', databaseUrlFor('db check'));
         spinner.succeed('Migration files consistent');
     }
     catch (error)

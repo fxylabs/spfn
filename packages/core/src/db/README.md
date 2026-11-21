@@ -796,12 +796,14 @@ transaction is bound to the guard's tenant before the handler runs (see R1–R6 
 
 | Role | URL | Used by | Owns the tables |
 |------|-----|---------|-----------------|
-| owner | `DATABASE_OWNER_URL` | `spfn db migrate`, `backup`, `restore`, `drop`, `tenant import` | yes — row-level security does not apply to it |
-| app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app, `spfn db tenant export` | no; not superuser, not `BYPASSRLS` |
+| owner | `DATABASE_OWNER_URL` | every command that changes the schema or the migration bookkeeping: `spfn db push` (its `--dry-run` and the function package migrations it applies too), `db migrate`, `spfn add`; and `db backup`, `restore`, `drop`, `tenant import` | yes — row-level security does not apply to it |
+| app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app; `spfn db status`, the `spfn dev`/`start` pre-start check, `db studio`, `db tenant export`, `spfn provision` | no; not superuser, not `BYPASSRLS` |
 
 PostgreSQL skips row-level security for a table's owner (and roles inheriting its
-privileges), superusers and `BYPASSRLS` roles. Without `DATABASE_OWNER_URL` the four commands
-use `DATABASE_URL`, as before. `pg_dump` stops with an error on a table whose policy applies
+privileges), superusers and `BYPASSRLS` roles. Without `DATABASE_OWNER_URL` the owner's
+commands use `DATABASE_URL`, as before: one role. The CLI README's
+[Which connection each command uses](../../../cli/README.md#which-connection-each-command-uses)
+has the full table. `pg_dump` stops with an error on a table whose policy applies
 to its role, and PostgreSQL refuses `COPY FROM` into one — so backup and restore need the
 owner too. `FORCE ROW LEVEL SECURITY` is not used: it would subject the owner, and break
 both, and any data migration across tenants.
@@ -885,14 +887,39 @@ A folder renamed after it was applied is the one pending case `spfn db migrate` 
 it would run the applied SQL again. Rename the folder back, or set the row's `name` to the new
 folder name, then check `spfn db status`.
 
-An app already deployed with the app role as owner moves the tables once (nothing does it
-automatically), as a superuser or the current owner:
+**`DATABASE_OWNER_URL` never reaches the server.** The server needs only the app role, and the
+owner's credentials are the ones row-level security does not apply to. For local development keep
+it in `.env.server`, which Next.js never reads, or export it in the shell you run `spfn db`
+commands from. `loadEnv()` loads it from a file only for the spfn commands that change the schema
+(the `owner` rows of the CLI README's "Which connection each command uses", through
+`loadEnv({ ownerCredentials: true })`); the server, `provisionInfrastructure`, every other spfn
+command and app code that calls `loadEnv()` leave it out, and the first such load logs one line
+at `debug` (`SPFN_LOG_LEVEL=debug`): `` DATABASE_OWNER_URL is in .env.server; the server does not load it; spfn db commands that
+change the schema do. `` In production give it to the migrate job's environment alone. A server
+entry started with it in its environment — `startServer`, `createServer`, the serverless app,
+`provisionInfrastructure` — removes it before any app code runs and logs one warning about that
+environment (never the value); `spfn dev`, `spfn start`, `spfn provision` and every other spfn
+command that does not change the schema remove it from their own process at their entry.
+
+An app already deployed with the app role as owner — its tables created by `spfn db push`
+before push connected as the owner, or by `spfn add` — moves them to the owner once (nothing does
+it automatically). Until then `spfn db push` fails on the first statement that alters one of
+them, PostgreSQL's `must be owner of table` (printed as `Invalid query (42501)`; under it this
+remedy, with the role names and the objects another role owns, which push reads from the catalog
+on the owner's connection). Run it as a superuser, or as a role that is a member of both roles (PostgreSQL requires
+that for `REASSIGN OWNED`, and membership in the new owner for `ALTER … OWNER TO`):
 
 ```sql
 ALTER TABLE acme_notes.notes OWNER TO app_owner;   -- per table, sequences follow their table
 -- or everything app_user owns in this database:
 REASSIGN OWNED BY app_user TO app_owner;
 ```
+
+`REASSIGN OWNED` moves every object the role owns in the current database — schemas included —
+so run it in each database the app role pushed to. Tables created through a superuser's URL —
+often `postgres`, the bootstrap superuser — are the exception: PostgreSQL refuses `REASSIGN OWNED
+BY` that role, so push prints one `ALTER … OWNER TO <owner role>;` for each of its objects
+instead, to run as a superuser.
 
 **One tenant at a time.** `spfn db tenant export <id>` writes one tenant's rows of every
 tenant table to a folder, in one snapshot, as the app role — so the policy admits that

@@ -1,10 +1,10 @@
 import chalk from 'chalk';
-import { existsSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { findAvailablePort } from './utils/database.js';
 import { shouldRelaxDbTls, generateTempConfigOrExit } from './utils/drizzle.js';
-
-import { env } from '@spfn/core/config';
+import { writeTempDrizzleConfig, type TempDrizzleConfig } from './utils/temp-config.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 
 /**
  * Open Drizzle Studio (database GUI)
@@ -34,46 +34,39 @@ export async function dbStudio(requestedPort?: number): Promise<void>
         process.exit(1);
     }
 
-    const hasUserConfig = existsSync('./drizzle.config.ts');
-    const tempConfigPath = `./drizzle.config.${process.pid}.${Date.now()}.temp.ts`;
+    loadEnvFor('db studio');
+
+    const databaseUrl = databaseUrlFor('db studio');
+    let tempConfig: TempDrizzleConfig | undefined;
 
     try
     {
-        const configPath = hasUserConfig ? './drizzle.config.ts' : tempConfigPath;
-
-        if (!hasUserConfig)
+        if (!existsSync('./drizzle.config.ts'))
         {
-            if (!env.DATABASE_URL)
+            if (!databaseUrl)
             {
                 console.error(chalk.red('❌ DATABASE_URL not found in environment'));
                 console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
                 process.exit(1);
             }
 
-            writeFileSync(tempConfigPath, await generateTempConfigOrExit({ reconcile: true }));
+            tempConfig = writeTempDrizzleConfig(await generateTempConfigOrExit({ reconcile: true, databaseUrl }));
         }
+
+        const configPath = tempConfig?.path ?? './drizzle.config.ts';
 
         // Spawn drizzle-kit studio process
         const studioProcess = spawn('drizzle-kit', ['studio', `--port=${port}`, `--config=${configPath}`], {
             stdio: 'inherit',
             shell: true,
-            env: shouldRelaxDbTls(env.DATABASE_URL)
+            env: shouldRelaxDbTls(databaseUrl)
                 ? { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' }
                 : { ...process.env },
         });
 
-        // Handle process termination
-        const cleanup = () =>
-        {
-            if (!hasUserConfig && existsSync(tempConfigPath))
-            {
-                unlinkSync(tempConfigPath);
-            }
-        };
-
         studioProcess.on('exit', (code) =>
         {
-            cleanup();
+            tempConfig?.remove();
             if (code !== 0 && code !== null)
             {
                 console.error(chalk.red(`\n❌ Drizzle Studio exited with code ${code}`));
@@ -83,7 +76,7 @@ export async function dbStudio(requestedPort?: number): Promise<void>
 
         studioProcess.on('error', (error) =>
         {
-            cleanup();
+            tempConfig?.remove();
             console.error(chalk.red('❌ Failed to start Drizzle Studio'));
             console.error(chalk.red(error.message));
             process.exit(1);
@@ -94,24 +87,20 @@ export async function dbStudio(requestedPort?: number): Promise<void>
         {
             console.log(chalk.yellow('\n\n👋 Shutting down Drizzle Studio...'));
             studioProcess.kill('SIGTERM');
-            cleanup();
+            tempConfig?.remove();
             process.exit(0);
         });
 
         process.on('SIGTERM', () =>
         {
             studioProcess.kill('SIGTERM');
-            cleanup();
+            tempConfig?.remove();
             process.exit(0);
         });
     }
     catch (error)
     {
-        // Clean up temp config on error
-        if (!hasUserConfig && existsSync(tempConfigPath))
-        {
-            unlinkSync(tempConfigPath);
-        }
+        tempConfig?.remove();
 
         console.error(chalk.red('❌ Failed to start Drizzle Studio'));
         console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));

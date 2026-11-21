@@ -16,6 +16,9 @@ dist
 .env*.local
 .env.server
 
+# The temporary drizzle config spfn db writes holds a database URL
+drizzle.config.*.temp.ts
+
 # Git
 .git
 .gitignore

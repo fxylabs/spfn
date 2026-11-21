@@ -435,10 +435,20 @@ loadEnv({
     server: true,            // include .env.server  (default: true; set false for Next.js client builds)
     debug: true,             // log loaded files     (default: false)
     override: false,         // overwrite existing process.env keys (default: false)
+    ownerCredentials: false, // load DATABASE_OWNER_URL from the files too (default: false)
 });
 ```
 
 `loadEnv` returns `LoadEnvResult` = `{ loadedFiles: string[]; loadedKeys: string[] }`.
+
+**`DATABASE_OWNER_URL` is not loaded from a file by default.** It is the table owner's URL, for
+the spfn commands that change the schema; only they pass `ownerCredentials: true`. Every other
+caller — the server, `provisionInfrastructure`, app code, a later reload — leaves the key out of
+`process.env` (and out of `loadedKeys`), and the first such load in a process logs one line at
+`debug` — nothing is wrong, so a correct configuration boots without it; `SPFN_LOG_LEVEL=debug`
+shows it — naming the file, never the value: `` DATABASE_OWNER_URL is in .env.server; the server
+does not load it; spfn db commands that change the schema do. `` A value already in `process.env` (the
+shell's) is left as it is and draws no line; the server entries remove that one themselves.
 
 ### `loadEnvOnce()` / `resetEnvLoadState()`
 

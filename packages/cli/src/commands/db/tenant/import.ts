@@ -30,13 +30,13 @@ import { createReadStream } from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
 import chalk from 'chalk';
-import { loadEnv } from '@spfn/core/server';
-import { confirmDangerousTarget, OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl } from '../utils/database.js';
+import { confirmDangerousTarget, OWNER_URL_MISSING, parseDatabaseUrl } from '../utils/database.js';
 import { describeFailure, failingIn } from '../../../utils/database-failure.js';
 import { openConnection, type TenantTransaction } from './connection.js';
 import { matchPlan, readManifest, verifyChecksums, type Manifest, type ManifestTable } from './manifest.js';
 import { buildTenantPlan, columnList, qualifiedName, quoteIdent, tableKey, type PlanTable, type TenantPlan } from './plan.js';
 import { fail, loadAppSchema } from './schema.js';
+import { databaseUrlFor, loadEnvFor } from '../../../utils/database-connection.js';
 
 /** A folder that passed every check that needs no database. */
 export interface PreparedImport
@@ -71,13 +71,13 @@ export interface ImportResult
 /** The command: check the folder, connect as the owner, confirm a remote target, import, report. */
 export async function dbTenantImport(directory: string, options: { replace?: boolean } = {}): Promise<void>
 {
-    loadEnv();
+    loadEnvFor('db tenant import');
 
-    const imports = await loadAppSchema().catch((error) => fail(describeFailure(error, undefined)));
+    const imports = await loadAppSchema(databaseUrlFor('db tenant import')).catch((error) => fail(describeFailure(error, undefined)));
     const prepared = await Promise.resolve()
         .then(() => prepareImport(directory, buildTenantPlan(imports)))
         .catch((error) => fail(describeFailure(error, undefined)));
-    const url = ownerDatabaseUrl() ?? fail(OWNER_URL_MISSING);
+    const url = databaseUrlFor('db tenant import') ?? fail(OWNER_URL_MISSING);
     const tenantId = prepared.manifest.tenantId;
 
     await confirmDangerousTarget(parseDatabaseUrl(url));

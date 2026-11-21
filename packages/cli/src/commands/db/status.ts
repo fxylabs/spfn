@@ -123,7 +123,7 @@ export async function dbStatus(options: { json?: boolean } = {}): Promise<void>
 
     try
     {
-        validateDatabasePrerequisites();
+        validateDatabasePrerequisites('db status');
     }
     catch (error)
     {

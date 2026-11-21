@@ -69,6 +69,25 @@ export function describeFailure(error: unknown, url: string | undefined): string
     return redact(lines.filter(Boolean).join('\n   '), url);
 }
 
+/** The SQLSTATE of a failed statement, as `describeFailure` reads it; undefined for any other failure. */
+export function sqlStateOf(error: unknown): string | undefined
+{
+    return databaseDescriptionOf(error)?.code;
+}
+
+/** The failed statement's text, as `describeFailure` prints it; undefined when the error carries none. */
+export function failedStatementOf(error: unknown): string | undefined
+{
+    return databaseDescriptionOf(error)?.sql;
+}
+
+function databaseDescriptionOf(error: unknown): DatabaseErrorDescription | undefined
+{
+    const description = describeCaught(error instanceof StatementSourceError ? error.cause : error, { stack: false });
+
+    return description.kind === 'database' ? description : undefined;
+}
+
 function describeOtherError(error: unknown, description: ErrorDescription): string
 {
     if (typeof description.code === 'string' && !isFileError(error))

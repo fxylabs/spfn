@@ -24,6 +24,7 @@ import { createHealthCheckHandler, resolveEndpointMiddlewares, resolveStreamToke
 import { CORE_NAMESPACE, CORE_HEALTH_PATH, CORE_TIME_PATH, LEGACY_HEALTH_PATH } from './namespace';
 import { createCoreTimeRouter } from './server-time';
 import { serverLogger } from './logger';
+import { discardInheritedOwnerCredentials } from './owner-credentials';
 
 import type { ServerConfig, AppFactory } from './types';
 import type { EventRouterContract } from '../event/router';
@@ -52,6 +53,9 @@ declare module 'hono'
  */
 export async function createServer(config?: ServerConfig): Promise<Hono>
 {
+    // Before the app's code runs: it connects as the app role only.
+    discardInheritedOwnerCredentials();
+
     // Publish the outbound SSRF policy before any route or handler can call safeFetch.
     applyOutboundFetch(config);
 

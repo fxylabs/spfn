@@ -41,9 +41,9 @@ vi.mock('../utils/drizzle.js', async (importOriginal) =>
 
     return {
         ...actual,
-        createPushConnection: async (options?: { readOnly?: boolean }) =>
+        createPushConnection: async (databaseUrl: string, options?: { readOnly?: boolean }) =>
         {
-            const connection = await actual.createPushConnection(options);
+            const connection = await actual.createPushConnection(databaseUrl, options);
 
             if (writeAttempts.enabled)
             {

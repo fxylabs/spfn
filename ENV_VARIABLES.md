@@ -108,7 +108,7 @@ Verified against the source on 2026-08-05. The authoritative definition is
 - **Type**: `string` (PostgreSQL connection URL)
 - **Required**: No
 - **Default**: `DATABASE_URL`
-- **Description**: The table owner's URL. `spfn db migrate`, `backup`, `restore` and `drop` connect with it; the app never does. With `defineTenancy` tables the app must connect as a role that owns no table, because PostgreSQL skips row-level security for the owner
+- **Description**: The table owner's URL. Every spfn command that changes the schema connects with it — `spfn db push` (its dry run and package migrations too), `db migrate`, `spfn add` — and so do `db backup`, `restore`, `drop` and `tenant import`; the app never does, and must not hold it. With `defineTenancy` tables the app must connect as a role that owns no table, because PostgreSQL skips row-level security for the owner. Only those commands load it from an `.env` file — keep it in `.env.server` locally, and in production only in the migrate job's environment; the server, `spfn provision` and every other `loadEnv()` caller leave it out (one info line names the file). `spfn dev`/`start`/`provision` strip an inherited one from the processes they start, and a server entry started with it in its environment removes it with one warning
 - **Location**: `packages/core/src/config/schema.ts:78`
 
 ### `DRIZZLE_SCHEMA_PATH`

@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, isAbsolute } from 'path';
 import { spawn } from 'child_process';
 import { pathToFileURL } from 'url';
@@ -17,11 +17,12 @@ import {
     isPgMaterializedView,
     isPgSequence,
 } from 'drizzle-orm/pg-core';
-import { env } from '@spfn/core/config';
 import { getDrizzleConfig, renderDrizzleConfig, discoverFunctionMigrations, packageNameToSchema } from '@spfn/core/db';
 import { loadEnv } from '@spfn/core/server';
 import { assertTypeScriptLoadable } from '../../../utils/tsx-required.js';
 import { redactUrls } from '../../../utils/redact-urls.js';
+import { writeTempDrizzleConfig, type TempDrizzleConfig } from './temp-config.js';
+import { databaseUrlFor, loadEnvFor, type DatabaseCommand } from '../../../utils/database-connection.js';
 
 const TLS_SSL_MODES = new Set(['no-verify', 'prefer', 'require', 'verify-ca', 'verify-full']);
 
@@ -133,14 +134,14 @@ export function resolvePushConnectionConfig(databaseUrl: string): PushConnection
 }
 
 /**
- * Validate prerequisites for database operations
- * Ensures DATABASE_URL is available
- * @throws Error if DATABASE_URL is not found
+ * Validate prerequisites for database operations: load the environment and
+ * ensure `command`'s connection is configured
+ * @throws Error if its URL is not set
  */
-export function validateDatabasePrerequisites(): void
+export function validateDatabasePrerequisites(command: DatabaseCommand): void
 {
-    loadEnv();
-    if (!env.DATABASE_URL)
+    loadEnvFor(command);
+    if (!databaseUrlFor(command))
     {
         console.error(chalk.red('❌ DATABASE_URL not found in environment'));
         console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
@@ -151,26 +152,27 @@ export function validateDatabasePrerequisites(): void
 /**
  * Generate temporary drizzle.config.ts and run drizzle-kit command
  * Uses spawn to support interactive prompts from drizzle-kit
+ *
+ * `databaseUrl` is the command's connection (`databaseUrlFor`), written into
+ * the generated config; a project's own drizzle.config.ts names its own.
  */
-export async function runDrizzleCommand(command: string, databaseUrl?: string): Promise<void>
+export async function runDrizzleCommand(command: string, databaseUrl: string | undefined): Promise<void>
 {
-    const hasUserConfig = existsSync('./drizzle.config.ts');
-    const tempConfigPath = `./drizzle.config.${process.pid}.${Date.now()}.temp.ts`;
+    let tempConfig: TempDrizzleConfig | undefined;
 
-    const configPath = hasUserConfig ? './drizzle.config.ts' : tempConfigPath;
-
-    if (!hasUserConfig)
+    if (!existsSync('./drizzle.config.ts'))
     {
-        loadEnv();
-        if (!env.DATABASE_URL)
+        if (!databaseUrl)
         {
             console.error(chalk.red('❌ DATABASE_URL not found in environment'));
             console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL to your .env file'));
             process.exit(1);
         }
 
-        writeFileSync(tempConfigPath, await generateTempConfigOrExit({ reconcile: command === 'generate', databaseUrl }));
+        tempConfig = writeTempDrizzleConfig(await generateTempConfigOrExit({ reconcile: command === 'generate', databaseUrl }));
     }
+
+    const configPath = tempConfig?.path ?? './drizzle.config.ts';
 
     // Run drizzle-kit command with spawn to support interactive prompts
     const args = command.split(' ');
@@ -181,23 +183,14 @@ export async function runDrizzleCommand(command: string, databaseUrl?: string): 
         const drizzleProcess = spawn('drizzle-kit', args, {
             stdio: 'inherit', // Allow interactive input
             shell: true,
-            env: shouldRelaxDbTls(databaseUrl ?? env.DATABASE_URL)
+            env: shouldRelaxDbTls(databaseUrl)
                 ? { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' }
                 : { ...process.env },
         });
 
-        const cleanup = () =>
-        {
-            // Clean up temp config
-            if (!hasUserConfig && existsSync(tempConfigPath))
-            {
-                unlinkSync(tempConfigPath);
-            }
-        };
-
         drizzleProcess.on('close', (code) =>
         {
-            cleanup();
+            tempConfig?.remove();
             if (code === 0)
             {
                 resolve();
@@ -210,7 +203,7 @@ export async function runDrizzleCommand(command: string, databaseUrl?: string): 
 
         drizzleProcess.on('error', (error) =>
         {
-            cleanup();
+            tempConfig?.remove();
             reject(error);
         });
     });
@@ -219,15 +212,14 @@ export async function runDrizzleCommand(command: string, databaseUrl?: string): 
 /**
  * Helper: Run drizzle command with spinner
  *
- * `databaseUrl` replaces DATABASE_URL in the generated config — the owner
- * connection, for a command that needs it.
+ * `databaseUrl` is the command's connection, written into the generated config.
  */
 export async function runWithSpinner(
     spinnerText: string,
     command: string,
     successMessage: string,
     failMessage: string,
-    databaseUrl?: string,
+    databaseUrl: string,
 ): Promise<void>
 {
     const spinner = ora(spinnerText).start();
@@ -459,7 +451,7 @@ async function resolveTempConfigSchema(config: DrizzleConfig, cwd: string, recon
  * `reconcile` loads the entity modules to settle folder versus registry; pass it
  * for a command that reads the schema.
  */
-export async function generateTempConfig(options: { reconcile: boolean; databaseUrl?: string }): Promise<string>
+export async function generateTempConfig(options: { reconcile: boolean; databaseUrl: string }): Promise<string>
 {
     loadEnv();
 
@@ -484,7 +476,7 @@ export async function generateTempConfig(options: { reconcile: boolean; database
  * generateTempConfig, ending the command with the resolver's message instead
  * of a stack when the folder and the registry disagree
  */
-export async function generateTempConfigOrExit(options: { reconcile: boolean; databaseUrl?: string }): Promise<string>
+export async function generateTempConfigOrExit(options: { reconcile: boolean; databaseUrl: string }): Promise<string>
 {
     try
     {
@@ -704,19 +696,12 @@ type Queryable = { query: (...args: any[]) => Promise<any> };
  * `execute()` to return `{ rows: [...] }`, which `pg` provides but
  * `postgres.js` does not.
  */
-export async function createPushConnection(options: { readOnly?: boolean } = {}): Promise<PushConnection>
+export async function createPushConnection(databaseUrl: string, options: { readOnly?: boolean } = {}): Promise<PushConnection>
 {
-    loadEnv();
-
-    if (!env.DATABASE_URL)
-    {
-        throw new Error('DATABASE_URL is required');
-    }
-
     const pg = await import('pg');
     const { drizzle } = await import('drizzle-orm/node-postgres');
 
-    const client = new pg.default.Client(resolvePushConnectionConfig(env.DATABASE_URL));
+    const client = new pg.default.Client(resolvePushConnectionConfig(databaseUrl));
     await client.connect();
 
     const queryable: Queryable = options.readOnly ? readOnlyQueries(client) : client;

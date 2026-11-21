@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setupConfigFiles, serverOnlyEnvKeys } from '../steps/config-files.js';
-import { collectDeclaredKeys } from '../../../utils/env-file.js';
+import { collectDeclaredKeys, gitignoreCovers } from '../../../utils/env-file.js';
 import type { ScaffoldMode } from '../mode.js';
 
 const SERVER_ONLY_KEYS = serverOnlyEnvKeys();
@@ -98,6 +98,42 @@ describe('env reference placement', () =>
         // The rules that keep real secrets out of a commit still hold.
         expect(isGitIgnored(testDirectory, '.env.local')).toBe(true);
         expect(isGitIgnored(testDirectory, '.env.server')).toBe(true);
+    });
+
+    it('ignores the temporary drizzle config spfn db writes: the scaffold, the repository and each example\'s own .gitignore (#405)', async () =>
+    {
+        // Without this row a SIGKILLed spfn db generate leaves a file holding a
+        // database URL that the next `git add .` commits.
+        const temp = `drizzle.config.${process.pid}.${Date.now()}.temp.ts`;
+
+        testDirectory = await mkdtemp(join(tmpdir(), 'spfn-temp-config-ignore-'));
+        spawnSync('git', ['init', '-q'], { cwd: testDirectory, stdio: 'ignore' });
+        await setupConfigFiles(testDirectory, 'full');
+
+        expect(isGitIgnored(testDirectory, temp)).toBe(true);
+
+        expect(isGitIgnored(REPO_ROOT, temp)).toBe(true);
+
+        // An example's own .gitignore goes with it when the app is copied out of the repository.
+        const ignoreFiles = (await readdir(join(REPO_ROOT, 'examples'), { withFileTypes: true }))
+            .map((entry) => join(REPO_ROOT, 'examples', entry.name, '.gitignore'))
+            .filter((path) => existsSync(path));
+
+        expect(ignoreFiles.length).toBeGreaterThan(0);
+
+        for (const path of ignoreFiles)
+        {
+            expect(gitignoreCovers((await readFile(path, 'utf-8')).split('\n'), 'drizzle.config.*.temp.ts'), path).toBe(true);
+        }
+    });
+
+    it('keeps the temporary drizzle config out of a Docker build context: the .dockerignore spfn init writes (#405)', async () =>
+    {
+        // Without this row a file holding a database URL, left by a SIGKILLed
+        // spfn db command, is copied into the image by `COPY . .`.
+        const template = join(REPO_ROOT, 'packages', 'cli', 'templates', '.dockerignore');
+
+        expect(gitignoreCovers((await readFile(template, 'utf-8')).split('\n'), 'drizzle.config.*.temp.ts')).toBe(true);
     });
 
     it('has no backend-only key in any example app .env.local.example', async () =>

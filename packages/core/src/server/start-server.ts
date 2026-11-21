@@ -19,6 +19,7 @@ import { printBanner } from './banner';
 import { createServer } from './create-server';
 import { loadServerConfigFile } from './config-file';
 import { loadEnv } from '../env/loader';
+import { discardInheritedOwnerCredentials } from './owner-credentials';
 import { loadAppConfig, resolveServerAddress } from '../app-config';
 import {
     applyServerTimeouts,
@@ -107,6 +108,8 @@ export async function startServer(config?: ServerConfig): Promise<ServerInstance
     // @spfn/core is refused by the import that would bring it in.
     markServerProcess(message => serverLogger.error(message));
 
+    // The owner's URL goes before server.config, or anything else, can read it.
+    discardInheritedOwnerCredentials();
     loadEnv();
 
     const finalConfig = await loadAndMergeConfig(config);

@@ -21,8 +21,6 @@ import {
     type FunctionMigrationInfo,
     type MigrationStatusDb,
 } from '@spfn/core/db';
-import { env } from '@spfn/core/config';
-import { loadEnv } from '@spfn/core/server';
 import { failingIn } from './database-failure.js';
 
 export { discoverFunctionMigrations, readMigrationEntries };
@@ -131,25 +129,18 @@ async function createPostgresJsMigrationDb(client: any): Promise<MigrationDb>
 }
 
 /**
- * Execute function package migrations directly (no copying)
+ * Execute function package migrations directly (no copying), connected with
+ * `databaseUrl` — the owner's for every caller (see database-connection.ts).
  * Returns the number of migrations applied
  */
 export async function executeFunctionMigrations(
     plans: FunctionMigrationPlan[],
-    databaseUrl?: string,
+    databaseUrl: string,
 ): Promise<number>
 {
     const postgres = await import('postgres');
 
-    loadEnv();
-    const url = databaseUrl ?? env.DATABASE_URL;
-
-    if (!url)
-    {
-        throw new Error('DATABASE_URL not found in environment');
-    }
-
-    const connection = postgres.default(url, { max: 1 });
+    const connection = postgres.default(databaseUrl, { max: 1 });
     const db = await createPostgresJsMigrationDb(connection);
     let appliedCount = 0;
 

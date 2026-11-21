@@ -57,7 +57,7 @@ different:
 
 | Role | Connects through | Does |
 | --- | --- | --- |
-| owner (`app_owner`) | `DATABASE_OWNER_URL` | runs `spfn db migrate`, `backup`, `restore`, `drop`; owns every table |
+| owner (`app_owner`) | `DATABASE_OWNER_URL` | runs every command that changes the schema — `spfn db push` (its `--dry-run` too), `db migrate`, `spfn add` — and `db backup`, `restore`, `drop`, `tenant import`; owns every table |
 | app (`app_user`) | `DATABASE_URL` (and `DATABASE_WRITE_URL` / `DATABASE_READ_URL` if you use them) | runs the server; owns nothing, is not a superuser, has no `BYPASSRLS` |
 
 As a superuser (on a local install, usually `postgres`), create both roles and the database:
@@ -84,15 +84,23 @@ exist, grant them per schema as well, and move ownership off the app role if it 
 see [Database roles](../../packages/core/src/db/README.md#database-roles) in the `@spfn/core` db
 README.
 
-Set both URLs in `.env.server`:
+Set both URLs in `.env.server` for local development:
 
 ```bash
 DATABASE_URL=postgresql://app_user:app-password@localhost:5432/acme
 DATABASE_OWNER_URL=postgresql://app_owner:owner-password@localhost:5432/acme
 ```
 
-`DATABASE_OWNER_URL` is read only by the four `spfn db` commands above; the server never uses
-it. Without it, they fall back to `DATABASE_URL`
+`DATABASE_OWNER_URL` is read only by the `spfn` commands above; the server never uses it, and
+must not hold it — the owner's credentials are the ones row-level security does not apply to.
+Only those commands load it from a file. The server, `spfn provision`, every other `spfn` command
+and app code that calls `loadEnv()` leave it out and say so once, on stderr: `DATABASE_OWNER_URL is
+in .env.server; the server does not load it; spfn db commands that change the schema do.` Keep it
+in `.env.server`, which Next.js never reads, rather than `.env` or `.env.local`, which it does; or
+export it in the shell you run `spfn db` commands from. In production, give it only to the
+environment of the job that runs `spfn db migrate`. A server started with it in its environment
+removes it from there and logs one warning about that environment. Without it, the commands fall
+back to `DATABASE_URL`
 ([config reference](../../packages/core/src/config/README.md)).
 
 **Check:**
@@ -621,6 +629,8 @@ The same shape, with the user in `app.user_id`
 | `permission denied for table …` after a migration | the app role has no privilege on a new table | set the default privileges of step 1, or grant on the table |
 | The server logs `permission denied for schema drizzle` at boot and starts without checking migrations | the app role cannot read the `drizzle` schema, where migrations are recorded | grant `USAGE` on schema `drizzle` and `SELECT` on its tables to the app role |
 | `spfn db backup` or `restore` fails on a tenancy table | it ran as the app role, to which the policy applies | set `DATABASE_OWNER_URL` |
+| `spfn db push` fails with `Invalid query (42501)` on a table that exists | the app role owns it — it was pushed through `DATABASE_URL` before push connected as the owner | `REASSIGN OWNED BY app_user TO app_owner`, as a superuser or a member of both roles ([Database roles](../../packages/core/src/db/README.md#database-roles)) |
+| The server logs `DATABASE_OWNER_URL was in the environment the server was started with` | the owner's URL was exported to the server's process (a shell, a container's env) | give it only to the migrate job |
 | A workspace with notes cannot be deleted | the tenant foreign key is `NO ACTION` | delete or move the tenant's rows first |
 | Renaming or deleting a workspace fails with the policy error | the `tenantList` update and delete policies need the workspace's binding | do it on a guarded route with `Transactional()`, or in `runInTransaction(fn, { tenant: id })` |
 | A job that walks every workspace fails reading `workspaces` | a `tenantList` admits no row to a connection bound to neither | read the list through the owner connection, or an all-workspace read the app sets up itself |

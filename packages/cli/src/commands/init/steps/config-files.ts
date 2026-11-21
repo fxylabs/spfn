@@ -200,7 +200,7 @@ function withPlaceholderCreds(text: string): string
  * - .env.local.example and .env.server.example (committed, placeholder-only references,
  *   one per consumer, so a reader always knows which file a key belongs in)
  * - .spfnrc.ts (codegen configuration)
- * - .gitignore (add .spfn directory + env patterns)
+ * - .gitignore (add .spfn directory, env patterns, the temporary drizzle config)
  * - tsconfig.json (exclude src/server for Vercel)
  */
 export async function setupConfigFiles(cwd: string, mode: ScaffoldMode): Promise<void>
@@ -440,6 +440,14 @@ function pendingIgnoreRules(content: string): string[]
     if (!gitignoreCovers(lines, '.env.server'))
     {
         rules.push('\n# spfn server env (secrets)\n.env.server\n');
+    }
+
+    // `spfn db generate`, `check` and `studio` write one when the project has
+    // no drizzle.config.ts and remove it on exit; a SIGKILL leaves it behind,
+    // with a database URL in it.
+    if (!gitignoreCovers(lines, 'drizzle.config.*.temp.ts'))
+    {
+        rules.push('\n# spfn db temporary drizzle config (holds a database URL)\ndrizzle.config.*.temp.ts\n');
     }
 
     // Keep the committed references tracked even when a broad `.env*` glob

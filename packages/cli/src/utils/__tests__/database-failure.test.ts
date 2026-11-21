@@ -12,7 +12,7 @@ import { DrizzleQueryError } from 'drizzle-orm';
 import pg from 'pg';
 import postgres from 'postgres';
 import { describe, it, expect } from 'vitest';
-import { describeFailure, failingIn } from '../database-failure';
+import { describeFailure, failedStatementOf, failingIn } from '../database-failure';
 
 const URL_WITH_SECRET = 'postgresql://x10c-user:x10c-secret@db.example.test:5432/app';
 
@@ -62,6 +62,17 @@ describe('describeFailure for a failed db push project statement (pg through dri
         expect(text).toBe('duplicate key value violates unique constraint "accounts_email_key" (23505, constraint accounts_email_key, table public.accounts)\n'
             + '   Failed statement: ALTER TABLE "accounts" ADD CONSTRAINT "accounts_email_key" UNIQUE("email")');
         expect(text).not.toMatch(/x11-param/);
+    });
+
+    it('X13 failedStatementOf gives the statement describeFailure prints, for the ownership remedy to list its object first; none for another error', () =>
+    {
+        // Without this row push hands the remedy no statement, and the object it
+        // failed on is listed in the catalog's order (only CI's A4d sees it).
+        const cause = Object.assign(new pg.DatabaseError('must be owner of table notes', 0, 'error'), { severity: 'ERROR', code: '42501' });
+        const statement = 'ALTER TABLE "i405_owner"."notes" DROP COLUMN "legacy";';
+
+        expect(failedStatementOf(new DrizzleQueryError(statement, [], cause))).toBe(statement);
+        expect(failedStatementOf(new Error('ECONNREFUSED'))).toBeUndefined();
     });
 });
 

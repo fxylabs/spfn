@@ -12,6 +12,7 @@ import { syncAgentInstructions } from '../lib/agent-instructions.js';
 import { detectPackageManager, getRunScriptArgs, type PackageManager } from '../utils/package-manager.js';
 import { missingTsxMessage } from '../utils/tsx-required.js';
 import { resolveKeychainEnv } from '../utils/secret-store/index.js';
+import { databaseUrlFor, dropOwnerCredentials, enterCommand } from '../utils/database-connection.js';
 import { loadAppConfig, resolvePorts, resolveHost } from '@spfn/core/app-config';
 
 /**
@@ -309,6 +310,10 @@ export const devCommand = new Command('dev')
     .option('--no-agent-files', 'Do not write the SPFN instruction block into AGENTS.md (same as SPFN_AGENT_FILES=0)')
     .action(async (options) =>
     {
+        // An app command: an inherited owner URL leaves this process before
+        // anything of the app — the pre-start check included — runs.
+        enterCommand('spfn dev');
+
         // Increase max listeners to prevent warning in dev mode
         // Dev mode runs multiple concurrent processes (SPFN server, contract watcher, Next.js)
         // Each process adds event listeners (SIGTERM, SIGINT, exit, etc.)
@@ -380,13 +385,17 @@ export const devCommand = new Command('dev')
         // run. The dev server keeps `development`.
         const watcherEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
 
+        // No child — server, Next.js, codegen watcher — gets the owner's
+        // credentials from the keychain either.
+        dropOwnerCredentials(serverEnv, watcherEnv);
+
         // A package bumped without `spfn db migrate` boots fine and then 500s on the
         // first request touching a missing column. Refuse here instead; the server
         // refuses the same boot by itself, this only makes the message immediate.
         const { checkPendingMigrationsBeforeStart } = await import('../utils/migration-status.js');
         const migrationCheck = await checkPendingMigrationsBeforeStart(
             cwd,
-            serverEnv.DATABASE_URL,
+            databaseUrlFor('pre-start check', serverEnv),
             options.allowPendingMigrations === true,
         );
 

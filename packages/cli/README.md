@@ -169,8 +169,9 @@ pnpm spfn add @mycompany/spfn-analytics
 
 How it works: if not already present it installs the package, then reads the package's
 `spfn` field in its `package.json` (`migrations`, `setupMessage`) and applies any
-function migrations to `DATABASE_URL`. If `DATABASE_URL` is unset, migration is skipped
-with a hint to run `spfn db push` later. Works with published and workspace packages.
+function migrations as the table owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`). If
+neither is set, migration is skipped with a hint to run `spfn db migrate` later. Works with
+published and workspace packages.
 
 ### `spfn add vercel`
 
@@ -609,13 +610,14 @@ removal rules.
 
 ### `spfn db`
 
-Wraps Drizzle Kit with auto-generated config. Most commands read `DATABASE_URL` from the
-loaded `.env` chain.
+Wraps Drizzle Kit with auto-generated config. The commands read their connection from the
+loaded `.env` chain and the shell; which variable each uses is in
+[Which connection each command uses](#which-connection-each-command-uses) below.
 
 | Subcommand | Description |
 |------------|-------------|
 | `db generate` (`g`) | Generate migrations from schema changes (timestamp-prefixed) |
-| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. Answering No skips them and applies the rest; an aborted confirmation (Ctrl-C, EOF) exits 1 with nothing applied, and so does a run whose stdin is not a terminal while a destructive change is pending and `--force` is not given. Function package migrations apply first (one transaction per package), then the project statements (one transaction), so a project table may reference a package table on an empty database; the plan lists them in that order. A failed statement prints one line: core's text for the error (the server's message where `@spfn/core` keeps it, else its fixed text for the SQLSTATE class, such as `Invalid input value`), then its code, constraint, table and column — never a row's value — and under it the statement's SQL (`   Failed statement: …`), for a package migration after the migration's name (`   In: @spfn/cms migration 20260101000000_init`). `--dry-run` shows each function package's pending migrations by name and the classified statements, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1 |
+| `db push` | Diff with Drizzle Kit's current PostgreSQL engine and apply the selected DDL atomically. Destructive changes need confirmation; `--force` applies them. Answering No skips them and applies the rest; an aborted confirmation (Ctrl-C, EOF) exits 1 with nothing applied, and so does a run whose stdin is not a terminal while a destructive change is pending and `--force` is not given. Function package migrations apply first (one transaction per package), then the project statements (one transaction), so a project table may reference a package table on an empty database; the plan lists them in that order. A failed statement prints one line: core's text for the error (the server's message where `@spfn/core` keeps it, else its fixed text for the SQLSTATE class, such as `Invalid input value`), then its code, constraint, table and column — never a row's value — and under it the statement's SQL (`   Failed statement: …`), for a package migration after the migration's name (`   In: @spfn/cms migration 20260101000000_init`). `--dry-run` shows each function package's pending migrations by name and the classified statements, then stops. Each plan query runs in its own `BEGIN READ ONLY` transaction, rolled back when the query ends, so it writes nothing and holds no lock between statements. Before the plan runs, `transaction_read_only` is read once, in one such transaction; when PostgreSQL does not report it `on` it exits 1. A database push cannot reach ends it the same way, before anything is planned: exit 1 and `❌ Could not connect to the database — nothing was planned or applied: could not reach the database (ECONNREFUSED)`, never the URL. Push, its dry run and the package migrations connect as the table owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`). When PostgreSQL refuses a privilege (SQLSTATE 42501) and `DATABASE_OWNER_URL` is set apart from `DATABASE_URL`, push asks the catalog which of the schemas, tables and enum types it manages (a `pgEnum` created through a superuser's URL is the superuser's) belong to a role other than the one it connects as — leaving out an extension's members (PostGIS's `spatial_ref_sys`), which belong to the extension, a sequence a column owns, which follows its table, and initdb's objects; when some do, it prints `REASSIGN OWNED BY <their owner> TO <connected role>` with the names under the failed line — and for what the bootstrap superuser owns, for which PostgreSQL refuses `REASSIGN OWNED`, one `ALTER … OWNER TO <connected role>;` per object, to run as a superuser — the relation the failed statement acts on first (the table after `ALTER TABLE [IF EXISTS] [ONLY]`, `DROP TABLE [IF EXISTS]`, `CREATE INDEX … ON`, …, the type after `ALTER TYPE`/`DROP TYPE`, never a column or a referenced table). Any other 42501 adds nothing |
 | `db migrate` (`m`) | Run pending migrations. `--with-backup` snapshots first |
 | `db status` | Show which migrations are applied and which are pending, for the project and for each installed function package. The project's pending list is drizzle-orm's own (`getMigrationsToRun`, by folder name), so it is what `db migrate` runs; when migrate would refuse the project's bookkeeping, status exits 1 with `bookkeeping does not match local migrations` and the remedy. `--json` prints one machine-readable report instead (one line after the `#spfn-db-status#` marker); when it could not read a status it has `reachable: false` and `reason`: `"not-configured"` (no `DATABASE_URL`), `"unreachable"` (the database did not answer), `"bookkeeping-mismatch"` (it answered, and `db migrate` would refuse the project's bookkeeping; `detail` carries the text) or `"permission-denied"` (it answered and refused the role in `DATABASE_URL` the read, SQLSTATE 42501 — typically no grant on schema `drizzle`; `detail` carries PostgreSQL's message). An unread status always has an empty `pending` list, which never means "nothing pending": check `reachable` first. The human form exits 1 on all of them and, on a permission error, names the grant (the `@spfn/core` db README, "Database roles", has the SQL; no spfn command grants it yet). `spfn dev`/`spfn start` refuse to start on a mismatch before spawning the server, whatever `--allow-pending-migrations` says; on any other read failure they print one line (`Could not check migrations: …`) and start |
 | `db studio` | Open Drizzle Studio. `-p, --port` (auto-finds a free port) |
@@ -628,6 +630,74 @@ loaded `.env` chain.
 | `db reindex` | Convert sequential migration prefixes to timestamps (`--dry-run`) |
 | `db tenant export <tenantId>` | Write one tenant's rows of every tenant table to `backups/tenant-<id>-<time>/`: one `COPY` file per table and a `manifest.json`, read in one snapshot as the app (`DATABASE_READ_URL`, else `DATABASE_URL`) |
 | `db tenant import <dir>` | Put an export's rows back in one transaction as the owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`). Refuses when the tenant already has rows; `--replace` deletes them first |
+
+#### Which connection each command uses
+
+A database may have two roles: the **owner** (`DATABASE_OWNER_URL`), which creates and owns
+every table, and the **app** (`DATABASE_URL`, and `DATABASE_READ_URL` for reads), which owns
+none, so row-level security applies to it. Without `DATABASE_OWNER_URL` both are
+`DATABASE_URL`, one role, and nothing below changes. A command that changes the schema or the
+migration bookkeeping connects as the owner; one that checks what the app itself can see connects
+as the app. The CLI keeps this choice in one table (`src/utils/database-connection.ts`), and every
+command that opens a connection or writes a drizzle config reads its URL from it. Outside it: a
+project's own `drizzle.config.ts`, which `db generate`, `check`, `drop` and `studio` hand to
+drizzle-kit as it is; `spfn provision`, whose runner connects through `@spfn/core` as the server
+does; and `db reindex`, which only reads the migrations folder.
+
+| Command | Connects with | Why |
+|---------|---------------|-----|
+| `db push`, including `--dry-run` and the function package migrations it applies | `DATABASE_OWNER_URL`, else `DATABASE_URL` | runs DDL and writes the migration bookkeeping; the dry run plans as the role that will apply the plan, since drizzle-kit sees only the schemas its role may use |
+| `db migrate` (and its `--with-backup`) | `DATABASE_OWNER_URL`, else `DATABASE_URL` | runs DDL and writes the migration bookkeeping |
+| `spfn add <package>` | `DATABASE_OWNER_URL`, else `DATABASE_URL` | applies the package's migrations |
+| `db backup`, `db restore` | `DATABASE_OWNER_URL`, else `DATABASE_URL` | `pg_dump` stops on, and PostgreSQL refuses `COPY FROM` into, a table whose policy applies to the role |
+| `db drop` | `DATABASE_OWNER_URL`, else `DATABASE_URL` | only the owner may drop the tables |
+| `db tenant import` | `DATABASE_OWNER_URL`, else `DATABASE_URL` | writes past the policy, checking the tenant column itself, and moves sequences |
+| `db status`, the `spfn dev`/`spfn start` pre-start check | `DATABASE_URL` | reports the migrations the running app sees, with the app's privileges |
+| `db studio` | `DATABASE_URL` | an interactive data tool stays under row-level security |
+| `db generate`, `db check` | `DATABASE_URL`, written into the generated config | drizzle-kit connects to nothing here; the app's URL keeps the owner's out of the file |
+| `db tenant export` | `DATABASE_READ_URL`, else `DATABASE_URL` | reads one tenant's rows under its policy |
+| `spfn provision` | `DATABASE_URL` (or `POSTGRES_URL`), through `@spfn/core` | runs the app's lifecycle seeding as the server would |
+
+No command prints either URL, and no child process is handed the owner's URL as `DATABASE_URL`.
+
+Where `DATABASE_OWNER_URL` comes from, and who holds it:
+
+| Source | owner command (`DATABASE_OWNER_URL` rows above) | any other spfn command (`db status`, `spfn dev`, …) | the server (`spfn dev`/`start`'s, or a custom entry) | `spfn provision` and `provisionInfrastructure` |
+|--------|------|------|------|------|
+| an `.env*` file | holds it | does not: the file's value is not loaded | does not: the file's value is not loaded | does not: the file's value is not loaded |
+| the shell (or a container's environment) | holds it | does not: removed at the command's entry, silently | does not: removed at start, one warning | does not: removed at the CLI's entry, removed at start |
+
+Each command loads the `.env` files through the table above: only the owner commands load
+`DATABASE_OWNER_URL` from them (`@spfn/core`'s `loadEnv({ ownerCredentials: true })`). Every other
+load — every other command, the server, provisioning, app code — leaves it out, and the first
+in a process logs one line naming the file at `debug` (`SPFN_LOG_LEVEL=debug`; core's console
+transport writes `debug` to stdout, so at that level `db status --json` prints that line before its
+object). Nothing is wrong with the setup it reports: a file the CLI reads is a fine place for it. For local development keep it in `.env.server` (Next.js never
+reads that file; it does read `.env` and `.env.local`), or export it in the shell you run
+`spfn db` commands from. In production give it only to the migrate job's environment. Every
+command that does not connect as the owner — `db status`, `db generate`/`check`, `db studio`,
+`db tenant export`, `spfn dev`, `spfn start`, `spfn provision` — removes an inherited
+`DATABASE_OWNER_URL` from its own process at its entry, before anything of it runs (the pre-start
+check included), so no process it starts inherits it; `spfn dev` and `spfn provision` also keep a
+keychain reference to it in `.env.server` out of their children's environment. That removal is
+silent: exporting the variable is how you give it to the owner commands, so its presence in a
+shell an app command runs from is nothing to fix. The server entries remove it from their own
+environment with one warning about the environment they were started with: nothing should start
+a server with it.
+
+An owner command that **Kit** runs (`spfn kit install`'s `spfn db migrate`) does not get a
+shell-exported `DATABASE_OWNER_URL`: Kit builds the child's environment from a fixed list of
+names (`PATH`, `HOME`, the locale, …), and no database URL is on it. That child reads the owner's
+URL from the project's `.env*` files only, so a project Kit migrates keeps it in `.env.server`.
+
+A database whose tables the app role created — pushed through `DATABASE_URL` before `db push`
+connected as the owner — has them owned by the app role, and `db push` now fails on them
+(`Invalid query (42501)`; under it the remedy, with the role names and the tables the catalog
+reports). Move them to the owner once: `REASSIGN OWNED BY <app role> TO <owner role>`; tables a
+superuser's URL created (the bootstrap superuser, usually `postgres`, for which PostgreSQL refuses
+`REASSIGN OWNED`) get one `ALTER … OWNER TO <owner role>;` each in the same remedy (the
+`@spfn/core` db README,
+[Database roles](../core/src/db/README.md#database-roles)).
 
 > `db push` is for development. For production, use `db generate` + `db migrate` to keep
 > migration history.
@@ -1540,7 +1610,7 @@ committed.
   destructive ones unless `--force`/confirmed. Prefer `db generate` + `db migrate` for
   production; `db push` is dev-only.
 - **`spfn add` requires a scoped package name** (must contain `/`) and only applies
-  migrations when `DATABASE_URL` is set — otherwise it skips with a hint. The single
+  migrations when `DATABASE_OWNER_URL` or `DATABASE_URL` is set — otherwise it skips with a hint. The single
   exception is `spfn add vercel`, a built-in target rather than a package.
 - **The package manager is the app's own.** Its lockfile decides, then the lockfile and
   declaration of a workspace that lists the app, then npm (see [Usage](#usage)). An app that

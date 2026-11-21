@@ -3,9 +3,9 @@ import { spawn } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
-import { loadEnv } from '@spfn/core/server';
-import { OWNER_URL_MISSING, ownerDatabaseUrl, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
+import { OWNER_URL_MISSING, parseDatabaseUrl, confirmDangerousTarget } from './utils/database.js';
 import { listBackupFiles } from './utils/backup-files.js';
+import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 import {
     loadBackupMetadata,
     collectGitInfo,
@@ -23,8 +23,8 @@ export async function dbRestore(backupFile?: string, options: { drop?: boolean; 
 {
     console.log(chalk.blue('♻️  Restoring database from backup...\n'));
 
-    loadEnv();
-    const dbUrl = ownerDatabaseUrl();
+    loadEnvFor('db restore');
+    const dbUrl = databaseUrlFor('db restore');
     if (!dbUrl)
     {
         console.error(chalk.red(OWNER_URL_MISSING));
