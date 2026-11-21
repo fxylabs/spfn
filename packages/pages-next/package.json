@@ -25,6 +25,7 @@
   },
   "files": [
     "dist",
+    "!dist/*.metafile.json",
     "bin",
     "README.md"
   ],

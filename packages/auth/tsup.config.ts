@@ -1,6 +1,7 @@
 import { defineConfig } from 'tsup';
 
 import { sharedExternal } from './tsup.shared';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
@@ -17,6 +18,7 @@ export default defineConfig({
         server: 'src/server.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     sourcemap: true,
     clean: true,

@@ -12,6 +12,7 @@
     },
     "files": [
         "dist",
+        "!dist/*.metafile.json",
         "README.md"
     ],
     "scripts": {

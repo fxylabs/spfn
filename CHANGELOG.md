@@ -825,13 +825,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **@spfn/signing, @spfn/pages-next, @spfn/i18n, @spfn/cms:** shared helpers, one copy each (no class
     or state was affected).
 
-  A build check, `scripts/check-bundle-identity.mjs`, runs after `tsup` in every package's `build`
-  and fails when one module — the package's own or a dependency it bundles, such as
-  `@sinclair/typebox` — is in two output files, or when an output file holds code without the
-  module markers the check reads; `pnpm check:exports` fails a package whose `build` does not run
-  it. Packages built with tsup's `treeshake` (core, i18n, mcp, signing, workflow) no longer are: its
-  rollup pass removed those markers. esbuild still tree-shakes; `@spfn/auth`'s root browser entry
-  grows from 79,563 to 82,927 bytes minified (+0.7 KB gzipped).
+  A build check, `scripts/check-bundle-identity.mjs`, runs after `tsup` in every package's `build`.
+  It reads esbuild's own record of which modules each output file holds (its metafile, which
+  every tsup config writes to `dist/*.metafile.json`; `files` keeps it out of the package) and
+  fails when one module — the package's own or a dependency it bundles, such as
+  `@sinclair/typebox` — is in two output files, or when an output file is in no record;
+  `pnpm check:exports` fails a package whose `build` does not run it. Packages built with tsup's
+  `treeshake` (core, i18n, mcp, signing, workflow) no longer are: its rollup pass rewrites the
+  files after esbuild recorded them, and dropped chunk imports esbuild writes to keep evaluation
+  order. esbuild still tree-shakes; `@spfn/auth`'s root browser entry grows from 79,563 to 82,927
+  bytes minified (+0.7 KB gzipped).
 - **@spfn/core: a rolled-back transaction, a failed job and a failed request no longer log the
   failed query's bound values (#382).** drizzle's `Failed query: … params: …` message, its
   `params`, its stack header and the driver's `detail` reached the logs through the runner's

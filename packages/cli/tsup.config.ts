@@ -1,5 +1,6 @@
 import { defineConfig } from 'tsup';
 import { readFileSync } from 'fs';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 const packageJson = JSON.parse(readFileSync('./package.json', 'utf-8'));
 
@@ -13,6 +14,7 @@ export default defineConfig({
         'dev-loader-import': 'src/utils/dev-loader.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     clean: true,
     sourcemap: false,

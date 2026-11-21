@@ -280,6 +280,7 @@
     },
     "files": [
         "dist",
+        "!dist/*.metafile.json",
         "docs",
         "README.md",
         "LICENSE",

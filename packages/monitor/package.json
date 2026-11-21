@@ -29,6 +29,7 @@
   },
   "files": [
     "dist",
+    "!dist/*.metafile.json",
     "migrations",
     "README.md"
   ],

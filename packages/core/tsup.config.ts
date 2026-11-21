@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { basename, dirname, relative, resolve } from 'path';
 import { defineConfig, type Options } from 'tsup';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 type Plugin = NonNullable<Options['esbuildPlugins']>[number];
 
@@ -63,8 +64,8 @@ function subpathName(entryKey: string): string
  * entry imports (`server` imports `route`) does not record from inside that
  * other file. The source stays one module, which the code splitting puts in a
  * shared chunk when two entries reach it; only the module written here is the
- * entry's own. It lives in a namespace of its own, so the build's `// src/…`
- * markers name the source once (`scripts/check-bundle-identity.mjs`).
+ * entry's own. It lives in a namespace of its own, so the build's record names
+ * it apart from the source (`scripts/lib/bundle-identity.mjs`).
  */
 function recordEvaluationPlugin(): Plugin
 {
@@ -103,7 +104,7 @@ function recordEvaluationPlugin(): Plugin
 
 export default defineConfig({
     entry,
-    esbuildPlugins: [recordEvaluationPlugin()],
+    esbuildPlugins: [recordEvaluationPlugin(), recordMetafile('main')],
     format: ['esm'],
     dts: true,
     sourcemap: true,

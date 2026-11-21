@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
@@ -7,6 +8,7 @@ export default defineConfig({
         'entities/workflow-step-execution': 'src/entities/workflow-step-execution.entity.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     sourcemap: true,
     clean: true,

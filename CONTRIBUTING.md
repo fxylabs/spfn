@@ -62,9 +62,12 @@ pnpm check:circular     # madge --circular
 
 Every package's `build` ends with `scripts/check-bundle-identity.mjs`, which fails when one source
 module is emitted into two `dist/` files, so that a class or a singleton is one object in every entry
-point. When it fails, keep `splitting: true` in the package's tsup config; a separate tsup config,
-such as auth's `'use client'` build, must reach the main build's modules by package name (or the
-package's private `imports`), never by a relative path.
+point. It reads the record esbuild writes of each build, so every tsup config passes
+`recordMetafile('<label>')` (from `scripts/lib/bundle-identity.mjs`, one label per config) to
+`esbuildPlugins`; a `dist/` file no record names fails the check. When it reports a module twice,
+keep `splitting: true` in the package's tsup config; a separate tsup config, such as auth's
+`'use client'` build, must reach the main build's modules by package name (or the package's private
+`imports`), never by a relative path.
 
 Codegen and migrations (in packages/apps that use them):
 

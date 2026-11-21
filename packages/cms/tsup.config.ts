@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup';
+import { recordMetafile } from '../../scripts/lib/bundle-identity.mjs';
 
 export default defineConfig({
     entry: {
@@ -9,6 +10,7 @@ export default defineConfig({
         errors: 'src/errors/index.ts',
     },
     format: ['esm'],
+    esbuildPlugins: [recordMetafile('main')],
     dts: true,
     sourcemap: true,
     clean: true,
