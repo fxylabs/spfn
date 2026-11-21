@@ -620,6 +620,16 @@ async function refuseUnadmittedStep(step: SecondStep): Promise<void>
  * it changes the password with, and that session is restricted from its first
  * request.
  *
+ * One admitting requirement is enough, here as on every route, and that leaves
+ * an asymmetry kept on purpose: an account held to enrolment while its
+ * challenge was open (the policy changed, or its listed factor went) is refused
+ * here when it is not flagged, and admitted when it is. The admitted session is
+ * restricted to both requirements — no more than a password sign-in of that
+ * account gets, which opens no challenge for an account holding no listed
+ * factor — so admitting it hands out nothing a retry would not, and refusing it
+ * would make the completion an exception to the rule that lets an account held
+ * to both enrol and change its password in either order (#362).
+ *
  * Asked inside the transaction that activated the key, after the activation
  * and before anything is announced, so a refusal rolls the activation back
  * with it: an account suspended while its challenge was open keeps the key

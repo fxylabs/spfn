@@ -835,6 +835,11 @@ The routes such a session reaches:
 | `getAuthSession`, `logout` | to know why, and to leave |
 | `oauthFinalize`, `mfaVerify` | the sign-in completions that hand such an account its session |
 
+`mfa/verify` follows the one rule, so an account the policy came to hold to enrolment while its
+challenge was open completes it when it is flagged, and is refused when it is not. Kept on purpose:
+the session it gets is restricted to both requirements, which is what a password sign-in of that
+account (no listed factor, so no challenge) gets anyway.
+
 `GET /_auth/channels` is public, so it answers anyone; `GET /_auth/session/binding` is refused — the
 package's client helpers call neither on the way to a change.
 
