@@ -177,9 +177,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the description, so a drizzle query error over a driver error gets its class's text. Class 28
   (authentication) now has a fixed text of its own, `Database authentication failed`, for this and
   for `fromPostgresError` (was `Database query failed`).
+- **@spfn/core: `defineServerConfig().logging({ redactPaths })` and `loggedPath(c)` from
+  `@spfn/core/middleware` — a path prefix no log line names in full (spfn/spfn#164).** A capability
+  route carries its secret in the path (`/api/import/:token`, a share link, a one-time download).
+  Declare its prefix once and every core line that names the request path writes
+  `<prefix>/[redacted]`, at every level: the request logger, proxy-guard (whose tag-mode debug and
+  strict-mode warn carried the token), the error handler and its `onError` context, rate limiting
+  and the transaction context. A prefix covers itself and what lies below it on a segment
+  boundary (`/api/import` covers `/api/import/abc`, not `/api/importer`), matched in a canonical
+  spelling of the path: percent-decoded three times over (`%2F` included), dot segments
+  resolved, repeated slashes collapsed, case ignored. A request the router does not serve is
+  logged as received, so a 404 for `//api/import/<token>`, `/API/import/<token>` or
+  `/api/%2569mport/<token>` is redacted like the route it missed. An entry that does not start
+  with `/`, ends with `/`, or contains `?`, `#`, `:` or `*` refuses the boot (builder, plain config
+  and `createServer`). `createServer` publishes the declaration before anything else, so a
+  hand-written `app.ts` wiring its own `RequestLogger` and `ErrorHandler` gets it too; a bare Hono
+  app calls `setRedactPaths()` itself. `loggedPath(c)` is how your own lines name the path. Under a
+  declared prefix nothing derived from the path is logged either: the request logger leaves out an
+  error response's body (a path-parameter validation failure quotes the segment in
+  `fields[].value`) and the request body, the error handler's and request logger's error lines
+  describe the error without the message of any link in its cause chain, and the `onError`
+  context's `Referer` is redacted when its path falls under a prefix. Paths nothing declares are
+  written as before. `ServerConfig.logging`, `setRedactPaths`, `parseRedactPaths`,
+  `isRedactedPath` and `loggedError` are new.
+- **@spfn/core: `.middleware({ logger: { excludePaths, … } })`** — the auto-applied request logger
+  takes `RequestLoggerOptions` as well as a boolean, in place. Excluding a path used to mean
+  `logger: false` and a `RequestLogger` of your own in `.use()`, which runs after proxy-guard.
 
 ### Changed
 
+- **BREAKING: @spfn/core: the Next.js API client's and RPC proxy's failure lines no longer carry the
+  URL (spfn/spfn#164).** A GET call's URL holds its whole input in `?input=` — params, query and
+  body — and the proxy's target URL the forwarded query, and the lines are written at error level.
+  The client's `Request timeout` and `Network error` lines drop `url` (they keep `route`, `method`
+  and `timeout`); the proxy's `Request timeout` and `Fetch error` lines drop `targetUrl` (they keep
+  `routeName`). The debug lines `→ Request` (client) and `→ RPC request` (proxy) drop them too. A
+  log query on those fields needs `route` / `routeName` instead. `ApiError.url` is unchanged. The
+  proxy's two debug lines that named the path with its params filled in — `→ RPC request`'s
+  `targetPath` and `Found N matching interceptors for <method> <path>` — name the route's pattern
+  (`/api/import/:token`) and `routeName` instead: the proxy cannot know which of the server's
+  paths `logging.redactPaths` declares, so it writes no param value at any level.
+- **BREAKING: @spfn/core: `RequestLogger`'s `excludePaths` matches the decoded path the router
+  serves (spfn/spfn#164).** It matched the undecoded URL path, so `/api/%69mport/x` was served by
+  `/api/import/:token` and logged despite `excludePaths: ['/api/import']`. Percent-encoded spellings
+  of an excluded path are now excluded too, which changes log volume. The request logger's `path`
+  field is the decoded path as well — the one every other core line already wrote — so a
+  percent-encoded request's line reads `/files/a b` where it read `/files/a%20b`.
 - **BREAKING (deployment, security-relevant): @spfn/core: the proxy signature covers the client
   address, and a server-side call asserts the browser's (#363).** A sign-in made by a server
   component, server action or route handler recorded the Next.js server's address — in
@@ -227,52 +270,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `clientIp` and returns the version header; `verifyProxyRequest` takes `version` and
     `clientIp` and answers `version`.
 
-- **@spfn/core: `defineServerConfig().logging({ redactPaths })` and `loggedPath(c)` from
-  `@spfn/core/middleware` — a path prefix no log line names in full (spfn/spfn#164).** A capability
-  route carries its secret in the path (`/api/import/:token`, a share link, a one-time download).
-  Declare its prefix once and every core line that names the request path writes
-  `<prefix>/[redacted]`, at every level: the request logger, proxy-guard (whose tag-mode debug and
-  strict-mode warn carried the token), the error handler and its `onError` context, rate limiting
-  and the transaction context. A prefix covers itself and what lies below it on a segment
-  boundary (`/api/import` covers `/api/import/abc`, not `/api/importer`), matched in a canonical
-  spelling of the path: percent-decoded three times over (`%2F` included), dot segments
-  resolved, repeated slashes collapsed, case ignored. A request the router does not serve is
-  logged as received, so a 404 for `//api/import/<token>`, `/API/import/<token>` or
-  `/api/%2569mport/<token>` is redacted like the route it missed. An entry that does not start
-  with `/`, ends with `/`, or contains `?`, `#`, `:` or `*` refuses the boot (builder, plain config
-  and `createServer`). `createServer` publishes the declaration before anything else, so a
-  hand-written `app.ts` wiring its own `RequestLogger` and `ErrorHandler` gets it too; a bare Hono
-  app calls `setRedactPaths()` itself. `loggedPath(c)` is how your own lines name the path. Under a
-  declared prefix nothing derived from the path is logged either: the request logger leaves out an
-  error response's body (a path-parameter validation failure quotes the segment in
-  `fields[].value`) and the request body, the error handler's and request logger's error lines
-  describe the error without the message of any link in its cause chain, and the `onError`
-  context's `Referer` is redacted when its path falls under a prefix. Paths nothing declares are
-  written as before. `ServerConfig.logging`, `setRedactPaths`, `parseRedactPaths`,
-  `isRedactedPath` and `loggedError` are new.
-- **@spfn/core: `.middleware({ logger: { excludePaths, … } })`** — the auto-applied request logger
-  takes `RequestLoggerOptions` as well as a boolean, in place. Excluding a path used to mean
-  `logger: false` and a `RequestLogger` of your own in `.use()`, which runs after proxy-guard.
-
-### Changed
-
-- **BREAKING: @spfn/core: the Next.js API client's and RPC proxy's failure lines no longer carry the
-  URL (spfn/spfn#164).** A GET call's URL holds its whole input in `?input=` — params, query and
-  body — and the proxy's target URL the forwarded query, and the lines are written at error level.
-  The client's `Request timeout` and `Network error` lines drop `url` (they keep `route`, `method`
-  and `timeout`); the proxy's `Request timeout` and `Fetch error` lines drop `targetUrl` (they keep
-  `routeName`). The debug lines `→ Request` (client) and `→ RPC request` (proxy) drop them too. A
-  log query on those fields needs `route` / `routeName` instead. `ApiError.url` is unchanged. The
-  proxy's two debug lines that named the path with its params filled in — `→ RPC request`'s
-  `targetPath` and `Found N matching interceptors for <method> <path>` — name the route's pattern
-  (`/api/import/:token`) and `routeName` instead: the proxy cannot know which of the server's
-  paths `logging.redactPaths` declares, so it writes no param value at any level.
-- **BREAKING: @spfn/core: `RequestLogger`'s `excludePaths` matches the decoded path the router
-  serves (spfn/spfn#164).** It matched the undecoded URL path, so `/api/%69mport/x` was served by
-  `/api/import/:token` and logged despite `excludePaths: ['/api/import']`. Percent-encoded spellings
-  of an excluded path are now excluded too, which changes log volume. The request logger's `path`
-  field is the decoded path as well — the one every other core line already wrote — so a
-  percent-encoded request's line reads `/files/a b` where it read `/files/a%20b`.
 - **BREAKING: @spfn/core: a failed job's `output` is the error's description (#382).** Core's
   fetch loop fails a batch with `describeError(error)` instead of the error, so pg-boss no longer
   serialises drizzle's `params` or the driver's `detail` into the job row. The `output` of a failed
