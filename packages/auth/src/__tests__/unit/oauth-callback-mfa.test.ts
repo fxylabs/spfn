@@ -229,11 +229,11 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
         expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
     });
 
-    it('row 6: a network failure is an error outcome, not a throw', async () =>
+    it('row 6: a network failure is an error outcome with a fixed sentence, not a throw (#382)', async () =>
     {
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, optionsWith(new TypeError('Failed to fetch')));
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to fetch', reason: 'failed' });
+        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
     });
 
     it('row 6: a failure message that echoes the challenge never reaches onError', async () =>

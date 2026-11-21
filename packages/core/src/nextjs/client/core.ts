@@ -198,7 +198,9 @@ function transportError(
 
     apiLogger.error('Network error', { ...site, error });
 
-    return transportOutcome('network', error instanceof Error ? error.message : 'Network error', 0, site.url);
+    // The fetch error's text is not client-safe (a custom fetch's, a server-side
+    // fetch's naming a host); it is logged above and kept as `cause` (#382)
+    return transportOutcome('network', 'Network error', 0, site.url, { cause: error });
 }
 
 /**

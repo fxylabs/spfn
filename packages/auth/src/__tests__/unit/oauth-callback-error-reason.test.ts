@@ -607,6 +607,22 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         expect(await outcomeFor('?userId=7')).toMatchObject({ kind: 'error', reason: 'failed' });
     });
 
+    it('R9d: a finalize whose fetch throws — failed with a fixed sentence, never the caught error\'s text (#382)', async () =>
+    {
+        const keyId = generateKeyPair('ES256').keyId;
+        const throwingFetch = (async () =>
+        {
+            throw new TypeError('connect ECONNREFUSED 10.9.8.7:8790 secret-host.internal');
+        }) as unknown as CallbackOptions['fetch'];
+
+        for (const search of [`?userId=7&keyId=${keyId}`, `?mfaChallenge=c-1&keyId=${keyId}`])
+        {
+            const outcome = await runOAuthCallback(search, { apiBasePath: '/api/rpc', fetch: throwingFetch });
+
+            expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+        }
+    });
+
     /** The finalize a callback page posts, through the proxy rules, answered by the real route. */
     async function finalizeAnswer(keyId: string, jar: Map<string, string>): Promise<{ status: number; body: Record<string, unknown> }>
     {

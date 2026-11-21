@@ -356,6 +356,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a database error's code, constraint and table, a kept message, per link of the cause chain) and
   its top frames. A scheduled notification whose send guard throws stores
   `Send guard <name> failed: <description as JSON>` in `error_message`, not the error's message.
+- **@spfn/auth, @spfn/core: client-visible failure answers carry a fixed sentence, not a caught
+  error's text (#382).** `OAuthCallback` (and `runOAuthCallback`) showed and passed to `onError` the
+  message of an error thrown while finalizing — a fetch failure's, say; it now shows
+  `Failed to finalize OAuth`, `reason` still `failed`. The api client's `'network'` `ApiError` had the
+  fetch error's message (a server-side fetch's can name an internal host); its message is now
+  `Network error` and the fetch error is its `cause`. The RPC proxy's 502 (the backend call or a
+  response interceptor threw) and 500 (a request interceptor threw) answered the error's message; they
+  now answer `Failed to connect to backend` and `Internal server error` — the error is in the proxy's
+  log line, and a development proxy (`debug`) still adds the stack.
 - **@spfn/core: `isSerializableError(error)` from `@spfn/core/errors` (#382).** The error
   handler's check for a typed error — `instanceof SerializableError`, or `toJSON()` and a numeric
   `statusCode` for a second copy of the class loaded in dev — is now exported, and auth's OAuth error

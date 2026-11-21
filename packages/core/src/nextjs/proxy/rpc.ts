@@ -571,8 +571,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                     );
                 }
 
-                // Handle other fetch errors
-                const fetchErr = error as Error;
+                // Handle other fetch errors: logged here, never in the answer (#382)
                 rpcLogger.error('Fetch error', {
                     routeName,
                     targetUrl,
@@ -580,7 +579,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                 });
 
                 return NextResponse.json(
-                    buildErrorResponse('Bad Gateway', fetchErr.message || 'Failed to connect to backend', debug, fetchErr),
+                    buildErrorResponse('Bad Gateway', 'Failed to connect to backend', debug, error as Error),
                     { status: 502 },
                 );
             }
@@ -588,7 +587,6 @@ export function createRpcProxy(config: RpcProxyConfig)
         catch (error)
         {
             const duration = Date.now() - startTime;
-            const err = error as Error;
 
             rpcLogger.error('RPC proxy error', {
                 error,
@@ -596,7 +594,7 @@ export function createRpcProxy(config: RpcProxyConfig)
             });
 
             return NextResponse.json(
-                buildErrorResponse('Internal Server Error', err.message || 'Unknown error', debug, err),
+                buildErrorResponse('Internal Server Error', 'Internal server error', debug, error as Error),
                 { status: 500 },
             );
         }

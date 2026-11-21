@@ -126,7 +126,8 @@ export function mfaConfirmUrl(mfaPath: string, challenge: string, returnUrl: str
 /**
  * Run the callback: read the query, call `oauthFinalize`, and say where to go.
  *
- * Never throws — a network failure is an error outcome like any other.
+ * Never throws — a network failure is an error outcome like any other, with a
+ * fixed sentence, never the caught error's text.
  */
 export async function runOAuthCallback(search: string, options: CallbackOptions): Promise<CallbackOutcome>
 {
@@ -143,9 +144,11 @@ export async function runOAuthCallback(search: string, options: CallbackOptions)
             ? await finishWithChallenge(input, options)
             : await finishWithSession(input, options);
     }
-    catch (error)
+    catch
     {
-        return { kind: 'error', message: error instanceof Error ? error.message : 'OAuth failed', reason: 'failed' };
+        // A caught error's text — a fetch failure's, a client library's — is not
+        // client-safe; the page gets the fixed sentence (#382)
+        return { kind: 'error', message: FINALIZE_FAILED, reason: 'failed' };
     }
 }
 
