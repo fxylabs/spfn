@@ -37,6 +37,8 @@
  * | R8 | the bin as its own re-spawned child, without the     | the relaunch guard gone: a child without the hook       |
  * |    | hook (`SPFN_CLI_RELAUNCHED_IN` set, no `--import`);  | re-spawns itself, without bound once the hook argument  |
  * |    | each bin process counts itself, the third exits      | goes too (773 processes in round 1)                     |
+ * | R9 | the bin whose `process.execve` throws (as Node 26.1+  | the failed relaunch taken for "no tsx": the command     |
+ * |    | does on a failed exec), replaced by a preload        | runs on without the hook, saying nothing                |
  *
  * R3 and the provision runner's refusal are in `provision-runner.test.ts`.
  */
@@ -254,4 +256,25 @@ it('R8 the bin started as its own re-spawned child without the module hook stops
     expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain('the CLI\'s module hook (dist/dev-loader/register.js) did not register in the process spfn re-spawned');
     expect(readFileSync(depthFile, 'utf8')).toBe('1\n');
+});
+
+it('R9 the bin whose relaunch fails stops with the error rather than run without the module hook', () =>
+{
+    // Node 26.1+ throws from a failed execve (E2BIG, EACCES, …); this one always does.
+    write('execve-fails.cjs', `if (require('node:worker_threads').isMainThread && process.argv[1] === ${JSON.stringify(bin)})\n{\n`
+        + '    process.execve = () => { throw Object.assign(new Error(\'E2BIG: argument list too long, execve\'), { code: \'E2BIG\' }); };\n}\n');
+
+    const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        NODE_OPTIONS: `--require ${join(appDir, 'execve-fails.cjs')}`,
+        PATH: `${join(cliRoot, 'node_modules/.bin')}:${process.env.PATH}`,
+    };
+
+    delete env.SPFN_CLI_RELAUNCHED_IN;
+
+    const result = spawnSync(process.execPath, [bin, '--version'], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+
+    expect({ status: result.status, stdout: result.stdout }, result.stderr).toEqual({ status: 1, stdout: '' });
+    expect(result.stderr).toContain('Error: spfn could not re-run itself under tsx and its module hook:');
+    expect(result.stderr).toContain('E2BIG: argument list too long, execve');
 });

@@ -905,7 +905,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spfn dev` exited before the server had stopped, which then held its port, orphaned. Now:
   - `bin/spfn.js` re-runs itself under tsx with `process.execve` instead of spawning a child: the
     pid you start is the CLI's, for every command (a SIGTERM to the bin's pid during `spfn db
-    migrate` used to leave the command running, orphaned).
+    migrate` used to leave the command running, orphaned). A relaunch that fails stops the command
+    with `Error: spfn could not re-run itself under tsx and its module hook: …`, exit 1. It used to
+    run the command without the hook, saying nothing, when the spawn failed, and would have when
+    `process.execve` throws (Node.js 26.1+); before 26.1 a failed `execve` ends the process itself.
   - Each child of `spfn dev` leads a process group of its own and is stopped by one SIGTERM to that
     group, from `spfn dev`, whatever stopped `spfn dev`: Ctrl-C or Ctrl-\\, or SIGTERM, SIGINT,
     SIGHUP or SIGQUIT to the pid. `spfn dev` exits 0 once every group is empty.
