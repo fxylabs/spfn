@@ -14,6 +14,7 @@ import {
     PROXY_TIMESTAMP_HEADER,
     PROXY_NONCE_HEADER,
     PROXY_KEY_ID_HEADER,
+    PROXY_SIGNATURE_VERSION_HEADER,
     type ProxyKey,
 } from '../proxy-signature';
 
@@ -82,6 +83,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -101,6 +103,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -125,6 +128,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -142,6 +146,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -160,6 +165,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(false);
@@ -178,6 +184,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(false);
@@ -196,6 +203,7 @@ describe('proxy-signature', () =>
             timestamp: headers[PROXY_TIMESTAMP_HEADER],
             nonce: headers[PROXY_NONCE_HEADER],
             keyId: headers[PROXY_KEY_ID_HEADER],
+            version: headers[PROXY_SIGNATURE_VERSION_HEADER],
         };
 
         it('rejects a tampered body', () =>
@@ -242,6 +250,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -259,6 +268,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(false);
@@ -276,6 +286,7 @@ describe('proxy-signature', () =>
                 timestamp: headers[PROXY_TIMESTAMP_HEADER],
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
             });
 
             expect(result.valid).toBe(true);
@@ -297,6 +308,7 @@ describe('proxy-signature', () =>
                 timestamp: oldTs,
                 nonce: headers[PROXY_NONCE_HEADER],
                 keyId: headers[PROXY_KEY_ID_HEADER],
+                version: headers[PROXY_SIGNATURE_VERSION_HEADER],
                 now: 1_000_000 + 60_000,
                 windowMs: 30_000,
             });

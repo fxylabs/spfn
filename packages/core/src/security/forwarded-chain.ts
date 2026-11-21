@@ -1,8 +1,9 @@
 /**
  * @spfn/core - Reading a client address out of `X-Forwarded-For`
  *
- * Shared by the two places that read the header: the Next.js proxy, which
- * forwards the address it resolved to the backend, and the backend's own
+ * Shared by the places that read the header: the Next.js app — its proxy, which
+ * forwards the address it resolved to the backend, and a server-side `createApi`
+ * call, which asserts the browser's address to that proxy — and the backend's own
  * `getClientIp`, when the operator declared the proxies in front of it.
  */
 
@@ -30,4 +31,19 @@ export function clientIpFromForwardedChain(
     const parts = (xff ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
     return parts[parts.length - Math.max(1, trustedHops)];
+}
+
+/**
+ * The browser's address as the Next.js app resolves it from an inbound
+ * `X-Forwarded-For`: `TRUSTED_PROXY_HOPS` (default 1) entries from the right.
+ *
+ * The one rule for both the RPC proxy and a server-side `createApi` call, so the
+ * address a call asserts is the one the proxy would have read off the browser's
+ * own request.
+ */
+export function appClientIp(xff: string | null | undefined): string | undefined
+{
+    const hops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '', 10);
+
+    return clientIpFromForwardedChain(xff, Number.isFinite(hops) && hops > 0 ? hops : 1);
 }

@@ -12,6 +12,7 @@
             "@spfn/core/client": ["./src/client/index.ts"],
             "@spfn/core/nextjs": ["./src/nextjs/index.ts"],
             "@spfn/core/nextjs/server": ["./src/nextjs/server.ts"],
+            "@spfn/core/nextjs/server-call": ["./src/nextjs/server-call.ts"],
             "@spfn/core/route": ["./src/route/index.ts"],
             "@spfn/core/route/types": ["./src/route/types.ts"],
             "@spfn/core/db": ["./src/db/index.ts"],

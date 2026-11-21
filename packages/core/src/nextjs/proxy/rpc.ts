@@ -26,12 +26,13 @@ import { NextRequest, NextResponse } from 'next/server.js';
 import { env } from '@spfn/core/config';
 import { logger } from '@spfn/core/logger';
 
-import { signProxyRequest, parseProxyKeySet } from '../../security/proxy-signature';
+import { signProxyRequest, PROXY_CLIENT_IP_HEADER } from '../../security/proxy-signature';
 import { buildUrlWithParams, buildQueryString } from '../shared';
 import { interceptorRegistry } from './interceptors';
 import { executeRequestInterceptors, executeResponseInterceptors, filterMatchingInterceptors } from './interceptors';
 import type { RouteMapEntry } from './interceptors/types';
 import { callBackend } from './backend-call';
+import { activeProxyKey, proxiedClientIp } from './client-address';
 import {
     buildProxyHeaders,
     parseCookiesFromNextRequest,
@@ -123,9 +124,7 @@ export function createRpcProxy(config: RpcProxyConfig)
     } = config;
 
     // Parse the active signing key once — it's fixed for the proxy's lifetime.
-    // Use the SAME parser the backend uses (comma key set) and take the active key,
-    // so a `v2:new,v1:old` secret is interpreted identically on both sides.
-    const proxyKey = proxySecret ? (parseProxyKeySet([proxySecret])[0] ?? null) : null;
+    const proxyKey = activeProxyKey(proxySecret);
 
     // proxy-guard signs route-relative paths; if SPFN_API_URL carries a base path the
     // backend keeps (no ingress strip), the signed path won't match c.req.url and
@@ -322,7 +321,7 @@ export function createRpcProxy(config: RpcProxyConfig)
             }
 
             // Build headers
-            const headers = buildProxyHeaders(request.headers, defaultHeaders);
+            const headers = buildProxyHeaders(request.headers, defaultHeaders, proxiedClientIp(request, proxyKey));
 
             // Remove Content-Type for formData (let fetch set it with boundary)
             if (hasFormData)
@@ -435,6 +434,8 @@ export function createRpcProxy(config: RpcProxyConfig)
             // Sign the FINAL request (after interceptors settled body/headers) so
             // the backend can prove it came through this trusted proxy. JSON body
             // is hashed into the signature; large multipart uploads are excluded.
+            // The client address is signed as finally sent, so the backend
+            // believes no address this proxy did not put there.
             if (proxyKey)
             {
                 const signedBody = typeof fetchOptions.body === 'string' ? fetchOptions.body : undefined;
@@ -448,6 +449,7 @@ export function createRpcProxy(config: RpcProxyConfig)
                     path: resolvedPath,
                     query: queryString,
                     body: signedBody,
+                    clientIp: headers.get(PROXY_CLIENT_IP_HEADER),
                 });
 
                 for (const [headerName, value] of Object.entries(signatureHeaders))

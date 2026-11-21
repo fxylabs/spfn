@@ -338,9 +338,9 @@ All defined in `packages/core/src/config/schema.ts`.
 | `FETCH_CONNECT_TIMEOUT` | number (ms) | `10000` | Outbound TCP connect timeout |
 | `FETCH_HEADERS_TIMEOUT` | number (ms) | `300000` | Outbound response-header timeout |
 | `FETCH_BODY_TIMEOUT` | number (ms) | `300000` | Outbound timeout between body chunks |
-| `SPFN_PROXY_SECRET` | string (secret) | None | Shared HMAC secret signing proxy→backend requests. Unset disables proxy-guard signing. Same value in both processes; belongs in `.env.local`. |
+| `SPFN_PROXY_SECRET` | string (secret) | None | Shared HMAC secret signing proxy→backend requests (client address included), and keying the browser address a server-side `createApi` call asserts to its own proxy. Unset disables both. Same value in both processes; belongs in `.env.local`. |
 | `SPFN_PROXY_SECRET_PREVIOUS` | string (secret) | None | Grace keys still accepted during rotation, `<keyId>:<secret>` comma-separated. Backend-only — `.env.server`. |
-| `TRUSTED_PROXY_HOPS` | number | `1` | Reverse proxies in front of the Next.js proxy, for real-client-IP extraction |
+| `TRUSTED_PROXY_HOPS` | number | `1` | Reverse proxies in front of the Next.js app, for real-client-IP extraction — by the proxy and by a server-side `createApi` call alike |
 | `SERVER_TRUSTED_PROXY_HOPS` | number | `0` | Reverse proxies directly in front of the SPFN backend. The backend's client address (per-IP rate limits, logs, device records) is the `X-Forwarded-For` entry that many hops from the right; `0` reads no forwarding header and uses the TCP peer. Must be declared behind a load balancer. Invalid values refuse the boot. `defineServerConfig().trustedProxyHops(n)` wins. |
 | `RATE_LIMIT_MODE` | `'off'` \| `'on'` | `'off'` | Global default rate limiter |
 | `RATE_LIMIT_DEFAULT_LIMIT` | number | `100` | Requests per window for the default limiter |

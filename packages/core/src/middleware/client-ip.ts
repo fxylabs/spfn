@@ -8,7 +8,7 @@
  * In order:
  *
  * 1. A request proxy-guard verified as the Next.js proxy's: the address the proxy
- *    resolved and sent in its signed request (`x-spfn-proxy-client-ip`).
+ *    resolved and signed (`x-spfn-proxy-client-ip` under a version-2 signature).
  * 2. When the operator declared the proxies in front of this server
  *    (`SERVER_TRUSTED_PROXY_HOPS`, or `defineServerConfig().trustedProxyHops(n)`):
  *    the `X-Forwarded-For` entry n hops from the right, the one the outermost
@@ -24,7 +24,6 @@ import type { Context } from 'hono';
 import { env } from '@spfn/core/config';
 // Package specifier, not '../logger': see rate-limit.ts (issue #136).
 import { logger } from '@spfn/core/logger';
-import { PROXY_CLIENT_IP_HEADER } from '../security/proxy-signature';
 import { clientIpFromForwardedChain } from '../security/forwarded-chain';
 
 const clientIpLogger = logger.child('@spfn/core:client-ip');
@@ -69,24 +68,10 @@ export function setTrustedProxyHops(hops: number | undefined): void
  */
 export function getClientIp(c: Context): string
 {
-    return attestedProxyClientIp(c)
+    return c.get('proxyClientIp')
         ?? forwardedClientIp(c)
         ?? socketRemoteAddress(c)
         ?? 'unknown';
-}
-
-/**
- * The address the Next.js proxy resolved, on a request proxy-guard verified as
- * the proxy's (`clientType` set and not `'untrusted'`). Anywhere else the header
- * is the caller's own.
- */
-function attestedProxyClientIp(c: Context): string | undefined
-{
-    const clientType = c.get('clientType');
-
-    return clientType && clientType !== 'untrusted'
-        ? c.req.header(PROXY_CLIENT_IP_HEADER) || undefined
-        : undefined;
 }
 
 function forwardedClientIp(c: Context): string | undefined

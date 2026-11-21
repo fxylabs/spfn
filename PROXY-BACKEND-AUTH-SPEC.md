@@ -24,7 +24,9 @@
 
 프록시가 백엔드로 forward할 때 요청에 서명을 실어, 백엔드가 "정상 프록시 경유"를 검증한다.
 
-- **서명 대상**: `method + path + query + timestamp + nonce + bodyHash`. path·query는
+- **서명 대상**: `method + path + query + timestamp + nonce + bodyHash + clientIp`. clientIp는
+  `x-spfn-proxy-client-ip` 값(없으면 `''`) — 서명 버전 2(`x-spfn-proxy-signature-version: 2`, #363).
+  버전 1(clientIp 없음)은 0.4.x 동안만 검증하고 그 주소는 무시한다. path·query는
   **wire 표현**(프록시가 보내는 raw request-target). 백엔드는 디코드된 `c.req.path`가 아니라
   `new URL(c.req.url).pathname`·`.search`로 재구성해 바이트를 일치시킨다(인코딩 드리프트 방지).
   query를 서명에 넣어야 캡처한 서명을 쿼리만 바꿔 재전송하는 걸 막는다.

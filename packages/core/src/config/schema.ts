@@ -447,7 +447,7 @@ export const coreEnvSchema = defineEnvSchema({
     // ========================================================================
 
     SPFN_PROXY_SECRET: envString({
-        description: 'Shared secret for signing proxy→backend requests (HMAC-SHA256). Read by BOTH processes — the Next.js proxy (to sign) and the SPFN backend (to verify) — so it belongs in .env.local (loaded by both; the backend reads it via loadEnv, Next.js reads it server-side without exposing it to the browser). Set the SAME value on both. Leave unset to disable proxy-guard signing.',
+        description: 'Shared secret for signing proxy→backend requests (HMAC-SHA256). Read by BOTH processes — the Next.js proxy (to sign) and the SPFN backend (to verify) — so it belongs in .env.local (loaded by both; the backend reads it via loadEnv, Next.js reads it server-side without exposing it to the browser). Set the SAME value on both. It also keys the browser address a server-side createApi call asserts to its own proxy. Leave unset to disable proxy-guard signing and that assertion.',
         required: false,
         sensitive: true,
         nextjs: true,
@@ -463,7 +463,7 @@ export const coreEnvSchema = defineEnvSchema({
     }),
 
     TRUSTED_PROXY_HOPS: envNumber({
-        description: 'Number of trusted reverse proxies in front of the Next.js proxy (e.g. cloud LB + nginx = 2). Read by the proxy to extract the real client IP from the inbound X-Forwarded-For (counting from the right, which your own infra appends and a client cannot spoof) and forward it to the backend for rate limiting. Set it to your actual hop count; too low trusts a client-spoofable entry, too high collapses users behind a shared proxy IP.',
+        description: 'Number of trusted reverse proxies in front of the Next.js proxy (e.g. cloud LB + nginx = 2). Read by the proxy (and by a server-side createApi call, with the same rule) to extract the real client IP from the inbound X-Forwarded-For (counting from the right, which your own infra appends and a client cannot spoof) and forward it to the backend for rate limiting. Set it to your actual hop count; too low trusts a client-spoofable entry, too high collapses users behind a shared proxy IP.',
         default: 1,
         nextjs: true,
         examples: [1, 2, 3],

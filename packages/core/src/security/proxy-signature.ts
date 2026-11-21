@@ -29,11 +29,15 @@ export const PROXY_TIMESTAMP_HEADER = 'x-spfn-proxy-timestamp';
 export const PROXY_NONCE_HEADER = 'x-spfn-proxy-nonce';
 export const PROXY_KEY_ID_HEADER = 'x-spfn-proxy-key-id';
 /**
- * The real client IP, forwarded by the proxy. The backend trusts this only when
- * the request is proxy-verified (proxy-guard `clientType` ≠ untrusted) — the proxy
- * itself sees no spoofable hop, so a verified request's value is the true client.
+ * The real client IP, forwarded by the proxy. Part of the signed canonical string
+ * (version 2), so the backend believes only an address the holder of the proxy key
+ * signed: proxy-guard hands it on as the `proxyClientIp` context value.
  */
 export const PROXY_CLIENT_IP_HEADER = 'x-spfn-proxy-client-ip';
+/** Which canonical string the signature covers. Absent = version 1 (no address). */
+export const PROXY_SIGNATURE_VERSION_HEADER = 'x-spfn-proxy-signature-version';
+/** The version this proxy signs: the canonical string includes the client address. */
+export const PROXY_SIGNATURE_VERSION = '2';
 
 /** keyId used when a raw secret carries no `keyId:` prefix (back-compat). */
 export const DEFAULT_KEY_ID = 'default';
@@ -155,6 +159,9 @@ export interface SignatureParts
      *     unprotected) and is intentionally not done.
      */
     bodyHash: string;
+
+    /** The `x-spfn-proxy-client-ip` value sent with the request, or '' when absent. */
+    clientIp: string;
 }
 
 /**
@@ -166,6 +173,7 @@ export interface SignatureHeaders
     [PROXY_TIMESTAMP_HEADER]: string;
     [PROXY_NONCE_HEADER]: string;
     [PROXY_KEY_ID_HEADER]: string;
+    [PROXY_SIGNATURE_VERSION_HEADER]: string;
 }
 
 // ============================================================================
@@ -173,11 +181,26 @@ export interface SignatureHeaders
 // ============================================================================
 
 /**
- * Build the canonical string that gets signed. Field order is fixed and each
- * field is newline-separated, so a captured signature cannot be replayed against
- * a different method, path, or body.
+ * Build the canonical string that gets signed (version 2). Field order is fixed
+ * and each field is newline-separated, so a captured signature cannot be replayed
+ * against a different method, path, body or client address.
  */
 export function buildCanonicalString(parts: SignatureParts): string
+{
+    return [
+        parts.method.toUpperCase(), parts.path, parts.query, parts.timestamp, parts.nonce, parts.bodyHash, parts.clientIp,
+    ].join('\n');
+}
+
+/**
+ * The version-1 canonical string: no client address. Verified only so a backend
+ * upgraded first keeps accepting a not-yet-upgraded proxy; a request signed this
+ * way is `web` but its address is ignored.
+ *
+ * @deprecated Accepted through @spfn/core 0.4.x; removed in 0.5.0, with every
+ * `version === 1` branch in `verifyProxyRequest`.
+ */
+export function buildLegacyCanonicalString(parts: Omit<SignatureParts, 'clientIp'>): string
 {
     return [parts.method.toUpperCase(), parts.path, parts.query, parts.timestamp, parts.nonce, parts.bodyHash].join('\n');
 }
@@ -208,6 +231,12 @@ export function computeSignature(secret: string, parts: SignatureParts): string
     return createHmac('sha256', secret).update(buildCanonicalString(parts)).digest('hex');
 }
 
+/** @deprecated The version-1 signature; removed in 0.5.0 with `buildLegacyCanonicalString`. */
+function computeLegacySignature(secret: string, parts: Omit<SignatureParts, 'clientIp'>): string
+{
+    return createHmac('sha256', secret).update(buildLegacyCanonicalString(parts)).digest('hex');
+}
+
 /**
  * Generate a fresh random nonce (hex).
  */
@@ -231,6 +260,8 @@ export interface SignInput
     query?: string;
     /** Raw request body string, if any. Omit for GET / multipart uploads. */
     body?: string | null;
+    /** The `x-spfn-proxy-client-ip` value the request carries, if any. */
+    clientIp?: string | null;
     /** Override the timestamp (testing). Defaults to Date.now(). */
     timestamp?: string;
     /** Override the nonce (testing). Defaults to a random nonce. */
@@ -239,7 +270,7 @@ export interface SignInput
 
 /**
  * Sign an outbound proxy request and return the headers to attach (including the
- * keyId so the backend knows which key to verify against).
+ * keyId so the backend knows which key to verify against, and the version).
  */
 export function signProxyRequest(input: SignInput): SignatureHeaders
 {
@@ -252,6 +283,7 @@ export function signProxyRequest(input: SignInput): SignatureHeaders
         timestamp,
         nonce,
         bodyHash: hashBody(input.body),
+        clientIp: input.clientIp ?? '',
     });
 
     return {
@@ -259,6 +291,7 @@ export function signProxyRequest(input: SignInput): SignatureHeaders
         [PROXY_TIMESTAMP_HEADER]: timestamp,
         [PROXY_NONCE_HEADER]: nonce,
         [PROXY_KEY_ID_HEADER]: input.key.keyId,
+        [PROXY_SIGNATURE_VERSION_HEADER]: PROXY_SIGNATURE_VERSION,
     };
 }
 
@@ -271,6 +304,7 @@ export type VerifyFailureReason =
     | 'stale-timestamp'
     | 'bad-timestamp'
     | 'unknown-key'
+    | 'unknown-version'
     | 'signature-mismatch';
 
 // ('body-read-error' / 'origin-not-allowed' / 'nonce-replay' are guard-level
@@ -284,6 +318,11 @@ export interface VerifyResult
     nonce?: string;
     /** The keyId the request was verified against (for logging/metrics). */
     keyId?: string;
+    /**
+     * The signature version. Only on version 2 does the signature cover the client
+     * address; a version-1 request's address is the caller's own.
+     */
+    version?: 1 | 2;
 }
 
 export interface VerifyInput
@@ -301,6 +340,10 @@ export interface VerifyInput
     timestamp: string | null | undefined;
     nonce: string | null | undefined;
     keyId: string | null | undefined;
+    /** The `x-spfn-proxy-signature-version` header; absent = version 1. */
+    version?: string | null;
+    /** The `x-spfn-proxy-client-ip` header, or absent. */
+    clientIp?: string | null;
     /** Allowed clock skew / replay window in ms. Default 30s. */
     windowMs?: number;
     /** Current time (testing). Defaults to Date.now(). */
@@ -314,7 +357,7 @@ export interface VerifyInput
  * the first bad char — so a malformed signature yields a shorter buffer that the
  * length check rejects. No try/catch needed.
  */
-function safeEqualHex(a: string, b: string): boolean
+export function safeEqualHex(a: string, b: string): boolean
 {
     const bufA = Buffer.from(a, 'hex');
     const bufB = Buffer.from(b, 'hex');
@@ -330,9 +373,9 @@ function safeEqualHex(a: string, b: string): boolean
 /**
  * Verify an inbound request's proxy signature against the accepted key set.
  *
- * Checks, in order: headers present, timestamp within window (replay guard),
- * keyId known, and HMAC match. Nonce-level replay rejection is left to the caller
- * (optional, Redis-backed) since not every deployment has a shared store.
+ * Checks, in order: headers present, version known, timestamp within window
+ * (replay guard), keyId known, and HMAC match. Nonce-level replay rejection is left
+ * to the caller (optional, Redis-backed) since not every deployment has a shared store.
  */
 export function verifyProxyRequest(input: VerifyInput): VerifyResult
 {
@@ -341,6 +384,12 @@ export function verifyProxyRequest(input: VerifyInput): VerifyResult
     if (!signature || !timestamp || !nonce || !keyId)
     {
         return { valid: false, reason: 'missing-headers' };
+    }
+
+    const version = signatureVersion(input.version);
+    if (!version)
+    {
+        return { valid: false, reason: 'unknown-version' };
     }
 
     const ts = Number(timestamp);
@@ -362,19 +411,39 @@ export function verifyProxyRequest(input: VerifyInput): VerifyResult
         return { valid: false, reason: 'unknown-key' };
     }
 
-    const expected = computeSignature(key.secret, {
+    const parts = {
         method: input.method,
         path: input.path,
         query: input.query ?? '',
         timestamp,
         nonce,
         bodyHash: hashBody(input.body),
-    });
+    };
+    const expected = version === 2
+        ? computeSignature(key.secret, { ...parts, clientIp: input.clientIp ?? '' })
+        : computeLegacySignature(key.secret, parts);
 
     if (!safeEqualHex(signature, expected))
     {
         return { valid: false, reason: 'signature-mismatch' };
     }
 
-    return { valid: true, nonce, keyId };
+    return { valid: true, nonce, keyId, version };
+}
+
+/**
+ * The version a request declares: 2, or 1 when the header is absent or says 1.
+ *
+ * Version 1 is accepted through @spfn/core 0.4.x only. In 0.5.0 this answers 2 or
+ * `undefined` (refused), and `computeLegacySignature` / `buildLegacyCanonicalString`
+ * go with it.
+ */
+function signatureVersion(header: string | null | undefined): 1 | 2 | undefined
+{
+    if (header === PROXY_SIGNATURE_VERSION)
+    {
+        return 2;
+    }
+
+    return !header || header === '1' ? 1 : undefined;
 }

@@ -10,7 +10,7 @@
  * timeout.
  */
 
-import { signProxyRequest, type ProxyKey } from '../../security/proxy-signature';
+import { signProxyRequest, PROXY_CLIENT_IP_HEADER, type ProxyKey } from '../../security/proxy-signature';
 import { parseResponseBody } from '../shared';
 import type { BackendAnswer, BackendCall } from './interceptors/types';
 
@@ -73,7 +73,7 @@ function jsonBody(body: unknown): string | undefined
     return body === undefined ? undefined : JSON.stringify(body);
 }
 
-/** Replace whatever signature the forwarded headers carried with one over this request. */
+/** Replace whatever signature the forwarded headers carried with one over this request, its client address included. */
 function signFor(
     proxyKey: ProxyKey | null,
     headers: Headers,
@@ -91,6 +91,7 @@ function signFor(
         path: request.path,
         query: request.query,
         body: typeof request.body === 'string' ? request.body : undefined,
+        clientIp: headers.get(PROXY_CLIENT_IP_HEADER),
     });
 
     for (const [name, value] of Object.entries(signature))

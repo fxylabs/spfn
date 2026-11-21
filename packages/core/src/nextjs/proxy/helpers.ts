@@ -18,23 +18,18 @@ import { clientIpFromForwardedChain } from '../../security/forwarded-chain';
 export { parseResponseBody } from '../shared';
 export { clientIpFromForwardedChain };
 
-function trustedProxyHops(): number
-{
-    const raw = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '', 10);
-
-    return Number.isFinite(raw) && raw > 0 ? raw : 1;
-}
-
 /**
  * Build request headers for proxying
  * Forwards important headers from source and adds default headers
  *
  * @param sourceHeaders - Source headers (can be Headers object or Record)
  * @param defaultHeaders - Default headers to add
+ * @param clientIp - the browser's address, as `proxiedClientIp` resolved it
  */
 export function buildProxyHeaders(
     sourceHeaders: Headers | Record<string, string>,
     defaultHeaders: Record<string, string>,
+    clientIp: string | undefined,
 ): Headers
 {
     const headers = new Headers();
@@ -65,12 +60,8 @@ export function buildProxyHeaders(
     }
 
     // Forward the real client IP so the backend can rate-limit per user. The
-    // backend trusts this header only on proxy-verified requests, so a direct
-    // caller can't spoof it. Resolved hop-aware from the inbound X-Forwarded-For.
-    const xff = sourceHeaders instanceof Headers
-        ? sourceHeaders.get('x-forwarded-for')
-        : sourceHeaders['x-forwarded-for'];
-    const clientIp = clientIpFromForwardedChain(xff, trustedProxyHops());
+    // proxy signature covers it, so the backend believes it only from the holder
+    // of the proxy key.
     if (clientIp)
     {
         headers.set(PROXY_CLIENT_IP_HEADER, clientIp);
