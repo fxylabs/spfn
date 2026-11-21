@@ -372,11 +372,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A second Ctrl-C escalates, and so does losing the terminal while stopping.** A SIGINT once
     the stop has begun SIGKILLs every child's group, and `spfn dev` exits 130. A repeated SIGTERM or
     SIGHUP changes nothing; under #353 any second signal ended the watcher at once and left the rest
-    alone. A `spfn dev` that started as the terminal's foreground job and, while stopping, is no
-    longer it escalates the same way, at once, saying so: `pnpm exec spfn dev`, `pnpm spfn dev`,
-    `yarn spfn dev` and yarn 1's `yarn dev` exit on the first Ctrl-C and the shell takes the
-    terminal back, so no second Ctrl-C can reach `spfn dev`. Under them, one Ctrl-C no longer gives
-    the server its graceful stop. The watcher's stopping line no longer says `(Ctrl-C again to exit
+    alone. A `spfn dev` that has been the terminal's foreground job — from the start, or since an
+    `fg` — and, while stopping, finds another group holding the terminal escalates the same way, at
+    once, saying so: `pnpm exec spfn dev`, `pnpm spfn dev`, `yarn spfn dev` and yarn 1's `yarn dev`
+    exit on the first Ctrl-C and the shell takes the terminal back, so no second Ctrl-C can reach
+    `spfn dev`. Under them, one Ctrl-C no longer gives the server its graceful stop, also as
+    `pnpm exec spfn dev | tee log`. Nothing else escalates: not a terminal hanging up (the graceful
+    stop), not a read of the terminal that cannot tell (off Linux, a `ps` that fails, prints
+    something unreadable or does not answer within a second; it never holds `spfn dev` up), not a
+    job never brought to the foreground. The watcher's stopping line no longer says `(Ctrl-C again to exit
     now)`; `spfn dev`'s does, when a Ctrl-C can still reach it.
   - **Exit status:** 0 after a stop by any signal. After a Ctrl-C, or a `kill` of the bin, the
     shell used to see the bin killed by the signal (130, 143).
@@ -912,6 +916,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with `Error: spfn could not re-run itself under tsx and its module hook: …`, exit 1. It used to
     run the command without the hook, saying nothing, when the spawn failed, and would have when
     `process.execve` throws (Node.js 26.1+); before 26.1 a failed `execve` ends the process itself.
+    Only a `tsx` that is not installed runs the command without the hook; one that is there but
+    does not resolve (a `package.json` that does not parse, an entry file missing, EACCES) stops it
+    with `Error: spfn could not resolve tsx, which it re-runs itself under: …`, exit 1.
   - Each child of `spfn dev` leads a process group of its own and is stopped by one SIGTERM to that
     group, from `spfn dev`, whatever stopped `spfn dev`: Ctrl-C or Ctrl-\\, or SIGTERM, SIGINT,
     SIGHUP or SIGQUIT to the pid. `spfn dev` exits 0 once every group is empty.
@@ -925,6 +932,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     they used to run on.
   - SIGHUP (a closed terminal) stops `spfn dev` as SIGTERM does; it used to kill `spfn dev` and
     the watcher mid-generation.
+  - `spfn dev` and the codegen watcher outlive their output: in `spfn dev | tee log`, whose Ctrl-C
+    kills `tee` too, and on a terminal that hung up, the stopping lines fail (EPIPE, EIO) and
+    end neither; `spfn dev` used to die on them, leaving the server unsupervised, and the watcher
+    before finishing its generation. Any other error on stdout or stderr still ends `spfn dev`.
   - `spfn dev` exiting on an uncaught exception SIGTERMs every child's group it has not signalled
     yet. execa's exit cleanup, which stopped the server and the watcher before, skips children in
     groups of their own.

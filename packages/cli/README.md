@@ -254,7 +254,11 @@ only once every group is empty, with no deadline of its own.
 | `kill <pid>` / SIGTERM, SIGINT, SIGHUP or SIGQUIT from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
 | the same signal again, or SIGTERM / SIGHUP / SIGQUIT after a Ctrl-C | | nothing more | unchanged |
 | a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
-| — (stopping, and the terminal is no longer `spfn dev`'s: `pnpm exec` exited) | | SIGKILL, to every group left | at once, 130 |
+| — (stopping, and the shell took the terminal back: `pnpm exec spfn dev`, also as `pnpm exec spfn dev \| tee log`, or `pnpm exec spfn dev &` then `fg`, and one Ctrl-C) | | SIGKILL, to every group left | at once, 130 |
+| Ctrl-C to `spfn dev \| tee log` (`tee` dies with it) | `spfn dev` and `tee` | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| the terminal hangs up (window closed, SSH dropped) | `spfn dev` (SIGHUP) | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| `kill -INT %1` to `pnpm exec spfn dev &`, never brought forward | `spfn dev` and the launcher | one SIGTERM, from `spfn dev` | after the last child, 0 |
+| Ctrl-C while `ps` fails or hangs (macOS and other non-Linux systems) | `spfn dev` alone | one SIGTERM, from `spfn dev` | after the last child, 0 |
 | Ctrl-Z in the terminal | the terminal's foreground group: `spfn dev` alone | nothing: they run on | not: it is stopped until `fg` |
 | SIGKILL | `spfn dev` | nothing | at once |
 
@@ -283,14 +287,30 @@ only once every group is empty, with no deadline of its own.
   shell, directly or behind `pnpm dev`, `npm run dev` or `npx spfn dev`, which wait for it. `pnpm
   exec spfn dev`, `pnpm spfn dev`, `yarn spfn dev` and yarn 1's `yarn dev` exit on the first
   Ctrl-C; the shell sees its job end, takes the terminal back, and a further Ctrl-C goes to the
-  shell. So `spfn dev` that started in the terminal's foreground, once it is stopping and no longer
-  has it, escalates as a second Ctrl-C does — SIGKILL to every group left, exit 130 — at once,
+  shell. So `spfn dev` reads which process group has its terminal — when it starts, every 100 ms
+  while it runs (once a second through `ps` off Linux, every 100 ms once stopping), and when the
+  stop begins — and remembers whether it was ever its own: a job started with `&` and brought
+  forward with `fg` counts from then. Once it has had the terminal, a stop that finds another group
+  holding it escalates as a second Ctrl-C does — SIGKILL to every group left, exit 130 — at once,
   saying `spfn dev no longer has the terminal, so no second Ctrl-C can reach it: killing what is left
-  of …`; no process is left holding the port behind the
-  shell's prompt. Under the launchers that wait, the server gets its full graceful stop unless you
-  press Ctrl-C again. The same holds after Ctrl-Z and `bg`: a stop of a `spfn dev` sent to the
-  background kills at once. Started without a terminal (a process manager, CI), or in the
-  background (`spfn dev &`), only a signal escalates.
+  of …`; no process is left holding the port behind the shell's prompt. If the shell took the
+  terminal back before `spfn dev` handled the Ctrl-C, the server gets no SIGTERM first. Under the
+  launchers that wait, the server gets its full graceful stop unless you press Ctrl-C again. The
+  same holds after Ctrl-Z and `bg`: a stop of a `spfn dev` sent to the background kills at once.
+  Only "another group has the terminal" escalates. Without a terminal (a process manager, CI), when
+  the terminal hangs up (it is gone, not taken: the graceful stop, as for SIGTERM), when the read
+  cannot tell (`ps` failing, printing something unreadable, or not answering within a second — it
+  is not waited for), and in a job that was never in the foreground (`spfn dev &`, then `kill`),
+  only a second SIGINT escalates. One case gets the graceful stop though no second Ctrl-C can reach it:
+  `pnpm exec spfn dev &`, `fg`, and a Ctrl-C within one read of the `fg` — `spfn dev` never saw
+  the terminal as its own, and nothing it can see tells that stop from a `kill -INT` to a job still
+  in the background.
+- **`spfn dev` outlives its output.** In `spfn dev | tee log` the Ctrl-C kills `tee` too, and when
+  the terminal hangs up, the terminal is gone: the stopping lines `spfn dev` and the codegen watcher
+  write then fail (EPIPE, EIO), and those failures end neither. From the start of `spfn dev`, an
+  EPIPE on its stdout or stderr, or an EIO on one that is a terminal, closes that stream; any other
+  error on them still ends `spfn dev` as an uncaught exception (below). The server's own output is
+  the server's: core's shutdown lines meet the same closed pipe.
 - **The watcher finishes what it is running first.** On its SIGTERM it finishes the generation,
   or the codegen config load, it is running (`Codegen watcher stopping once the running generation
   or codegen config load finishes`), so the route map and contract never
@@ -304,8 +324,7 @@ only once every group is empty, with no deadline of its own.
 - **`--watch` restarts the server the same way:** one SIGTERM to the server's group, then the new
   server starts once nothing is left in it — its port is free then.
 - **Next.js exiting with an error** stops the server and the watcher, then `spfn dev`, exit 1.
-- **`spfn dev` dying stops its children**: an uncaught exception, or a write to a closed stdout,
-  SIGTERMs every child's group not signalled yet as `spfn dev` exits. Only a SIGKILL of `spfn dev`
+- **`spfn dev` dying stops its children**: an uncaught exception SIGTERMs every child's group not signalled yet as `spfn dev` exits. Only a SIGKILL of `spfn dev`
   reaches no child: their groups run on. A process manager that kills by process group must kill
   each child's group, or the cgroup (systemd's default `KillMode=control-group` does).
 
@@ -323,7 +342,9 @@ itself — entities under `spfn db generate`, `db push` and `db tenant`, `drizzl
 env`, your router under codegen — load as they do under `spfn dev`. (`drizzle-kit`, which `db
 generate`, `check`, `drop` and `studio` hand a `drizzle.config.ts` to, reads that file and the
 schema it names in a process of its own, by its own rule.) Without `tsx` in the app, the bin runs
-the command without the hook, and a command that loads your TypeScript — `spfn env`, `spfn db`
+the command without the hook — only when `tsx` is not found; a `tsx` that is there but cannot be
+resolved (a `package.json` that does not parse, an entry file missing, a permission error) stops the
+command with `Error: spfn could not resolve tsx, which it re-runs itself under: …`, exit 1 — and a command that loads your TypeScript — `spfn env`, `spfn db`
 (`push`, `tenant`, and `generate` with the entity registry), `spfn provision` — stops before its
 first import with `tsx is not installed in this project, and it is what loads TypeScript. Add it:
 <your package manager's add command>` and exit code 1. The cost: every `spfn` command in a project
