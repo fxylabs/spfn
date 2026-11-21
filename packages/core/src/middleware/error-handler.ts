@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { SerializableError, type SerializedError } from '@spfn/core/errors';
+import { isSerializableError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
 import { env } from '@spfn/core/config';
@@ -86,12 +86,6 @@ interface ErrorWithStatusCode extends Error
 {
     statusCode?: number;
     details?: Record<string, unknown>;
-}
-
-interface SerializableErrorLike extends Error
-{
-    statusCode: number;
-    toJSON(): SerializedError;
 }
 
 interface ErrorLogData extends Record<string, unknown>
@@ -337,18 +331,6 @@ function setRetryAfter(c: Context, err: Error): void
     {
         c.header('Retry-After', String(Math.ceil(retryAfter)));
     }
-}
-
-/**
- * Type guard for SerializableError
- *
- * Uses duck typing to handle module duplication issues in dev mode (tsx)
- */
-function isSerializableError(err: Error): err is SerializableErrorLike
-{
-    return err instanceof SerializableError ||
-        (typeof (err as any).toJSON === 'function' &&
-         typeof (err as any).statusCode === 'number');
 }
 
 /**

@@ -73,6 +73,7 @@ export {
     isDatabaseError,
     isHttpError,
     hasStatusCode,
+    isSerializableError,
 } from './error-utils';
 
 export const errorRegistry = new ErrorRegistry();

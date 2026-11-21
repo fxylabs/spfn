@@ -7,6 +7,7 @@ import {
     isDatabaseError,
     isHttpError,
     hasStatusCode,
+    isSerializableError,
 } from '../error-utils';
 import {
     DatabaseError,
@@ -128,5 +129,24 @@ describe('hasStatusCode', () =>
         expect(hasStatusCode('string')).toBe(false);
         expect(hasStatusCode(123)).toBe(false);
         expect(hasStatusCode(true)).toBe(false);
+    });
+});
+
+describe('isSerializableError', () =>
+{
+    it('is true for an instance and for a copy of the class loaded twice', () =>
+    {
+        const copy = { statusCode: 409, toJSON: () => ({ __type: 'ConflictError', message: 'x' }) };
+
+        expect(isSerializableError(new UnauthorizedError({ message: 'no' }))).toBe(true);
+        expect(isSerializableError(copy)).toBe(true);
+    });
+
+    it('is false for a plain error, a status-only object and non-objects', () =>
+    {
+        expect(isSerializableError(new Error('plain'))).toBe(false);
+        expect(isSerializableError({ statusCode: 500 })).toBe(false);
+        expect(isSerializableError(null)).toBe(false);
+        expect(isSerializableError('ConflictError')).toBe(false);
     });
 });

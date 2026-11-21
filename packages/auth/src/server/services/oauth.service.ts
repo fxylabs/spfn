@@ -8,7 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { SerializableError, ValidationError } from '@spfn/core/errors';
+import { isSerializableError, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
@@ -1123,7 +1123,8 @@ export function oauthErrorReason(error: unknown): OAuthErrorReason
  * The error redirect for a caught error: its text and its reason code (#382).
  *
  * A typed error meant for the client — a `SerializableError` not marked
- * `internal` — keeps its message, as core's error handler answers it. Any
+ * `internal`, by core's own `isSerializableError`, the check its error handler
+ * makes — keeps its message, as that handler answers it. Any
  * other error's message may carry a failed statement's SQL and bound values,
  * so the redirect carries `fallback` instead, and the error goes to the server
  * log at error level: the redirect no longer carries it, and a sign-in that
@@ -1132,7 +1133,7 @@ export function oauthErrorReason(error: unknown): OAuthErrorReason
  */
 export function oauthFailureUrl(error: unknown, fallback: string): string
 {
-    const forClient = error instanceof SerializableError && (error as { internal?: boolean }).internal !== true;
+    const forClient = isSerializableError(error) && (error as { internal?: boolean }).internal !== true;
 
     if (!forClient)
     {

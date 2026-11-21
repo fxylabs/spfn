@@ -356,9 +356,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a database error's code, constraint and table, a kept message, per link of the cause chain) and
   its top frames. A scheduled notification whose send guard throws stores
   `Send guard <name> failed: <description as JSON>` in `error_message`, not the error's message.
+- **@spfn/core: `isSerializableError(error)` from `@spfn/core/errors` (#382).** The error
+  handler's check for a typed error — `instanceof SerializableError`, or `toJSON()` and a numeric
+  `statusCode` for a second copy of the class loaded in dev — is now exported, and auth's OAuth error
+  redirect asks it instead of its own `instanceof`, so both give one answer.
 - **@spfn/auth, @spfn/monitor, @spfn/workflow, @spfn/notification need the `@spfn/core` that
-  exports `describeError` (#382).** Their peer range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1,
-  which does not; release them together with core.
+  exports `describeError` (#382)**, auth also the one that exports `isSerializableError`. Their peer
+  range (`>=0.4.0-beta.1`) still admits 0.4.0-beta.1, which exports neither; release them together with core.
 - **BREAKING (behaviour, under `secondFactor.required: true` only): @spfn/auth: a user-verified
   passkey registration is marked as a second factor whenever the policy requires one (#399).**
   `passkeys/register/verify` marked only in the enrolment-only state, so a spare passkey added by an

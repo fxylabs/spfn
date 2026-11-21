@@ -46,7 +46,7 @@ From `@spfn/core/errors`:
   `DeadlockError`, `DuplicateEntryError`
 - Namespaced re-exports: `HttpErrors` (`HttpErrors.NotFoundError`, …),
   `DatabaseErrors` (`DatabaseErrors.QueryError`, …)
-- Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`
+- Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`, `isSerializableError`
 - Types: `SerializedError`, `SerializableErrorConstructor`, `ErrorRegistryInput`
 
 > **Every constructor takes a single object argument.** There is **no** positional form.
@@ -331,11 +331,12 @@ For a custom subclass to round-trip, **its constructor must accept the serialize
 ## Type guards
 
 ```typescript
-import { isHttpError, isDatabaseError, hasStatusCode } from '@spfn/core/errors';
+import { isHttpError, isDatabaseError, hasStatusCode, isSerializableError } from '@spfn/core/errors';
 
 if (isDatabaseError(error)) { /* error: DatabaseError — has .statusCode, .details */ }
 if (isHttpError(error))     { /* error: HttpError */ }
 if (hasStatusCode(error))   { /* error: { statusCode: number } */ }
+if (isSerializableError(error)) { /* error: SerializableError — also true for a copy of the class loaded twice in dev */ }
 ```
 
 ---
