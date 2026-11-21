@@ -10,14 +10,25 @@
  * A row stored before #382 holds a raw stack, whose header is the error's
  * message — for a failed statement its SQL, and its next line `params: …` the
  * bound values. From that text only what names a place in code is shown: the
- * error's name and its `at …` frame lines.
+ * error's name and its frame lines — lines of V8's frame grammar, not every
+ * line starting `at `, which a multi-line message or bound value can hold.
  */
 
 import { summarizeError, type Description } from '../../error-summary';
 
 const PREVIEW_FRAMES = 3;
 
-const FRAME_LINE = /^\s*at /;
+/** Where a V8 frame points: `file:line:col`, or a place with no file */
+const FRAME_LOCATION = String.raw`(?:[^()]+:\d+:\d+|native|<anonymous>)`;
+
+/**
+ * A V8 stack frame on an indented line: `at fn (location)`, `at location`,
+ * `at fn (index N)` (a `Promise.all` element), each optionally `async`. A
+ * message line or a bound value that happens to start with `at ` is none of these.
+ */
+const FRAME_LINE = new RegExp(
+    String.raw`^\s+at (?:async )?(?:[^()]+ \((?:${FRAME_LOCATION}|index \d+)\)|${FRAME_LOCATION})\s*$`,
+);
 
 const ERROR_NAME = /^[\w$.]+$/;
 

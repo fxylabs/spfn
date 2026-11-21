@@ -358,8 +358,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message — so a wrapped database error shows its cause's code, a plain error its message, a thrown
   non-Error value what its description holds) and its top three frames, not the first lines of the
   stored JSON. An event stored before this release (a raw stack)
-  previews as its error's name and its `at …` frame lines, not its first five lines, whose header
-  and `params:` line held a failed statement's SQL and bound values.
+  previews as its error's name and its V8 frame lines (indented, of the frame grammar — not every
+  line starting `at `), not its first five lines, whose header and `params:` line held a failed
+  statement's SQL and bound values.
 - **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text
   (#382).** `executions.error`, `step_executions.error` and the `error` of the `step.failed` and
   `failed` events held the error's message — for a failed statement its SQL and bound values. They
