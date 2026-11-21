@@ -308,13 +308,14 @@ export function createRpcProxy(config: RpcProxyConfig)
             const queryString = buildQueryString(inputQuery);
             const targetUrl = `${apiUrl}${resolvedPath}${queryString}`;
 
+            // The debug lines name the route pattern, never the filled path: the
+            // proxy cannot know which of the server's paths are declared redacted
             if (debug)
             {
                 rpcLogger.debug('→ RPC request', {
                     routeName,
                     targetMethod,
-                    targetPath: resolvedPath,
-                    targetUrl,
+                    targetPath,
                     hasBody: !!inputBody,
                     hasFormData,
                 });
@@ -367,7 +368,7 @@ export function createRpcProxy(config: RpcProxyConfig)
 
             if (debug && matchingInterceptors.length > 0)
             {
-                rpcLogger.debug(`Found ${matchingInterceptors.length} matching interceptors for ${targetMethod} ${resolvedPath}`);
+                rpcLogger.debug(`Found ${matchingInterceptors.length} matching interceptors for ${targetMethod} ${targetPath}`, { routeName });
             }
 
             // Create RequestInterceptorContext
@@ -561,7 +562,6 @@ export function createRpcProxy(config: RpcProxyConfig)
                 {
                     rpcLogger.error('Request timeout', {
                         routeName,
-                        targetUrl,
                         timeout,
                     });
 
@@ -575,7 +575,6 @@ export function createRpcProxy(config: RpcProxyConfig)
                 const fetchErr = error as Error;
                 rpcLogger.error('Fetch error', {
                     routeName,
-                    targetUrl,
                     error,
                 });
 

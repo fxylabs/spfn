@@ -121,7 +121,8 @@ There is **no validation in the builder** — validation runs inside `startServe
 | `.routes(router)` | `routes` | Also auto-merges the router's `.use()` + `.packages()` global middlewares into `middlewares` |
 | `.middlewares([named])` | `middlewares` | `NamedMiddleware[]` from `defineMiddleware()` (route-level `.skip()` targets these) |
 | `.use([handlers])` | `use` | Raw `MiddlewareHandler[]`, applied `app.use('*', …)` |
-| `.middleware({...})` | `middleware` | Toggle built-ins: `{ logger?, cors?, errorHandler?, onError? }` |
+| `.middleware({...})` | `middleware` | Toggle built-ins: `{ logger?, cors?, errorHandler?, onError? }`; `logger` also takes `RequestLoggerOptions` |
+| `.logging({...})` | `logging` | `{ redactPaths? }` — path prefixes no log line names in full; see [Paths that must not be logged](#paths-that-must-not-be-logged) |
 | `.cors(opts \| false)` | `cors` | hono/cors options, or `false` to disable |
 | `.jobs(router, cfg?)` | `jobs` / `jobsConfig` | pg-boss job router (`@spfn/core/job`); `cfg` is `Omit<BossOptions, 'connectionString'>` |
 | `.events(router, cfg?)` | `events` / `eventsConfig` | SSE router (`@spfn/core/event`); `cfg.path` default `/events/stream`, `cfg.auth` for token-gated streams; cross-pod fan-out auto-wires when a cache is set (`cfg.multiInstance`/`cfg.channelPrefix`) |
@@ -303,7 +304,7 @@ When there is no `app.ts`, `createServer` builds the app in this **fixed order**
 
 ```
 1. errorHandlerEnabled flag        (if middleware.errorHandler !== false)
-2. RequestLogger()                 (if middleware.logger !== false)
+2. RequestLogger(options)          (if middleware.logger !== false; an object is its options)
 3. cors(config.cors)               (if middleware.cors !== false && cors !== false)
 4. proxyGuard                      (if proxyGuard.mode !== 'off')
 5. built-in server time            (GET /_core/time — unproven and session-free)
@@ -320,6 +321,8 @@ When there is no `app.ts`, `createServer` builds the app in this **fixed order**
 ```
 
 - Each built-in is opt-out via `.middleware({ logger: false, cors: false, errorHandler: false })`.
+- `.middleware({ logger: { excludePaths: ['/metrics'] } })` configures the request logger in
+  place, still ahead of CORS and proxy-guard.
 - **`proxyGuard`** is opt-in (`mode: 'off'` by default). When enabled via `.proxyGuard({...})`
   it verifies the trusted-proxy HMAC signature (`method+path+query+body`) + origin allowlist and
   tags `c.get('clientType')`. `tag` and `strict` evaluate every gate; only enforcement differs.
@@ -332,6 +335,71 @@ When there is no `app.ts`, `createServer` builds the app in this **fixed order**
 - Named `middlewares` (from `.middlewares()` / `.routes()`) are applied **per route** inside
   `registerRoutes`, respecting each route's `.skip([...])` / `.skip('*')`. Validation
   middleware is never skipped.
+
+---
+
+## Paths that must not be logged
+
+A capability route carries its secret in the path: `/api/import/:token`, a share link, a
+one-time download. Declare its prefix once:
+
+```typescript
+export default defineServerConfig()
+    .logging({ redactPaths: ['/api/import'] })
+    .routes(appRouter)
+    .build();
+```
+
+Every core log line that names the request path then writes `/api/import/[redacted]`, at
+every level: the request logger, proxy-guard, the error handler and its `onError` context,
+rate limiting, and the transaction context of `Transactional()`.
+
+Nothing derived from the path is written under the prefix either:
+
+- **No response body.** The request logger logs a 4xx/5xx response's body (and a write's request
+  body) everywhere else. Under a declared prefix it logs neither — a path-parameter validation
+  failure answers `fields: [{ path: '/token', value: '<the segment>' }]`, and a `NotFoundError`
+  may name the token. Status, duration and the redacted path remain.
+- **No error message.** The error handler's `Error occurred` and the request logger's
+  `Request failed` describe the error by name, code, status and stack frames, without the
+  message of any link in its cause chain (`loggedError(c, error)`).
+- **No `Referer` naming it.** `OnErrorContext.request.headers.referer` under a declared prefix is
+  `<origin><prefix>/[redacted]`, whatever path the erroring request had. `onError` still receives
+  the error object itself.
+
+- **Matching.** A prefix covers itself and what lies below it on a segment boundary:
+  `/api/import` covers `/api/import` and `/api/import/abc`, not `/api/importer`.
+- **Every spelling of it.** A request the router does not serve is logged too, as received — a
+  404 for `//api/import/<token>` (a client joining a base URL that ends in `/`),
+  `/API/import/<token>` or `/api/%2569mport/<token>` (a proxy encoding twice) carries the token the
+  client meant for the route. So the path and the entries are matched in one canonical spelling:
+  percent-decoded three times over (`%2F` included), dot segments resolved, repeated slashes
+  collapsed, case ignored. Each of those 404s writes `/api/import/[redacted]`; a path outside every
+  prefix is still written exactly as the router received it.
+- **Refused entries.** An entry that does not start with `/`, ends with `/`, or contains `?`,
+  `#`, `:` or `*` refuses the boot: the builder fails the config load, a plain config fails
+  `validateServerConfig`, and `createServer` throws. A route pattern such as
+  `/api/import/:token` would never equal a path, so it would redact nothing.
+- **Undeclared paths** are written as they always were.
+- **Your own lines.** Name the path with `loggedPath(c)` from `@spfn/core/middleware`; it
+  applies the same declaration. `createServer` publishes the declaration before it builds
+  anything, so a hand-written `app.ts` that wires its own `RequestLogger` and `ErrorHandler`
+  gets it too. A bare Hono app without `createServer` calls `setRedactPaths([...])` itself.
+- **`excludePaths` is a different thing.** It only silences the request logger's lines for a
+  path (noise such as `/metrics`). The guard, the error handler and the rest still write their
+  lines, with the path, unless the path is declared here.
+
+What it does not cover:
+
+- A proxy, load balancer or CDN in front of the server logs the path on its own.
+- The Next.js RPC proxy runs in another process and cannot read this declaration, so none of its
+  lines carries a param value: its debug lines `→ RPC request` (`targetPath`) and
+  `Found N matching interceptors for <method> <path>` name the route's pattern
+  (`/api/import/:token`) and `routeName`, not the path the params fill in.
+- `@spfn/auth`'s log lines (its `API access` line and its warnings) read the path themselves
+  until it moves to `loggedPath`.
+- Prefer a request body over a path segment for a token where you can: a body reaches no
+  access log.
 
 ---
 
@@ -786,6 +854,11 @@ Outbound `fetch()` (undici global dispatcher) — set via the `fetchTimeout` fie
   port/timeout/shutdown values also throw at `startServer()` time.
 - **Don't import `validateServerConfig` / `printBanner` / `ShutdownManager` from
   `@spfn/core/server`** — not in the public barrel. Use `getShutdownManager()`.
+- **Strict proxy-guard cannot serve an unsigned capability route.** A share link or a token
+  URL is opened directly by a browser, so it carries no proxy signature, and strict mode
+  answers it 403. `proxyGuard.skipPaths` matches whole paths only (`/api/import/abc` is not
+  covered by `/api/import`), so it cannot exempt a route whose path holds the token. Keep such
+  routes on a server in `tag` mode, or call them through the RPC proxy.
 - **`loadEnvFiles` is deprecated** (warns once). `startServer()` calls `loadEnv()` for you;
   only call `loadEnv` manually outside `startServer` (e.g. a script).
 

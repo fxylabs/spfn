@@ -4,7 +4,7 @@
  * Validates server configuration to catch errors early with clear messages.
  */
 
-import { parseTrustedProxyHops } from '@spfn/core/middleware';
+import { parseRedactPaths, parseTrustedProxyHops } from '@spfn/core/middleware';
 import type { ServerConfig } from './types';
 
 /**
@@ -66,6 +66,11 @@ export function validateServerConfig(config: ServerConfig): void
     if (config.trustedProxyHops !== undefined)
     {
         parseTrustedProxyHops(config.trustedProxyHops);
+    }
+
+    if (config.logging?.redactPaths !== undefined)
+    {
+        parseRedactPaths(config.logging.redactPaths);
     }
 
     // Health check path validation

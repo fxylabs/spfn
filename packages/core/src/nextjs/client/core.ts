@@ -125,13 +125,15 @@ function setUnlessCallerDid(headers: Record<string, string>, name: string, value
 }
 
 /**
- * Where a failed call went, for the log line its transport error writes
+ * Which call failed, for the log line its transport error writes
+ *
+ * Named by route, never by URL: a GET carries its params, query and body in
+ * `?input=`, and the line is written at error level.
  */
 interface CallSite
 {
     route: string;
     method: string;
-    url: string;
 }
 
 /**
@@ -170,6 +172,7 @@ function transportOutcome(
 function transportError(
     failure: Extract<ScopedFetchResult, { ok: false }>,
     site: CallSite,
+    url: string,
     timeout: number,
 ): TransportOutcome
 {
@@ -177,14 +180,14 @@ function transportError(
     {
         apiLogger.error('Request timeout', { ...site, timeout });
 
-        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, site.url);
+        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, url);
     }
 
     if (failure.cause === 'caller')
     {
         apiLogger.debug('Request aborted by caller', site);
 
-        return transportOutcome('aborted', 'Request aborted', 0, site.url, { cause: failure.error });
+        return transportOutcome('aborted', 'Request aborted', 0, url, { cause: failure.error });
     }
 
     const { error } = failure;
@@ -193,12 +196,12 @@ function transportError(
     {
         apiLogger.error('Request timeout', { ...site, timeout });
 
-        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, site.url);
+        return transportOutcome('timeout', `Request timeout after ${timeout}ms`, 408, url);
     }
 
     apiLogger.error('Network error', { ...site, error });
 
-    return transportOutcome('network', error instanceof Error ? error.message : 'Network error', 0, site.url);
+    return transportOutcome('network', error instanceof Error ? error.message : 'Network error', 0, url);
 }
 
 /**
@@ -450,7 +453,7 @@ export function createApi<TRouter extends Router<any>>(
 
         if (debug)
         {
-            debugLogs.logRequest(apiLogger, routeName, method, fullUrl, !!init.body);
+            debugLogs.logRequest(apiLogger, routeName, method, !!init.body);
         }
 
         // Execute fetch and parse the body inside one abort scope
@@ -459,7 +462,7 @@ export function createApi<TRouter extends Router<any>>(
 
         if (!fetched.ok)
         {
-            const outcome = transportError(fetched, { route: routeName, method, url: fullUrl }, appliedTimeout);
+            const outcome = transportError(fetched, { route: routeName, method }, fullUrl, appliedTimeout);
             notifyOutcome(onOutcome, outcome);
             throw outcome.error;
         }

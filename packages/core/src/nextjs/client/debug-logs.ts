@@ -19,14 +19,13 @@ export function logRequest(
     logger: Logger,
     routeName: string,
     method: string,
-    url: string,
     hasBody: boolean,
 ): void
 {
+    // No URL: a GET's URL carries its params, query and body in `?input=`
     logger.debug('→ Request', {
         route: routeName,
         method,
-        url,
         hasBody,
     });
 }

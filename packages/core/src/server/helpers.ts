@@ -400,7 +400,7 @@ export function applyGlobalFetchTimeouts(timeouts: {
 
 export function buildMiddlewareOrder(config: {
     middleware?: {
-        logger?: boolean;
+        logger?: NonNullable<ServerConfig['middleware']>['logger'];
         cors?: boolean;
         errorHandler?: boolean;
     };
@@ -429,7 +429,7 @@ export function buildMiddlewareOrder(config: {
 export function buildStartupConfig(
     config: {
         middleware?: {
-            logger?: boolean;
+            logger?: NonNullable<ServerConfig['middleware']>['logger'];
             cors?: boolean;
             errorHandler?: boolean;
         };

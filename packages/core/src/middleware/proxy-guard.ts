@@ -31,6 +31,7 @@ import {
     PROXY_CLIENT_IP_HEADER,
     type VerifyFailureReason,
 } from '../security/proxy-signature';
+import { loggedPath } from './logged-path';
 
 const guardLogger = logger.child('@spfn/core:proxy-guard');
 
@@ -535,13 +536,13 @@ function reject(
 {
     if (mode === 'strict')
     {
-        guardLogger.warn('Rejected unverified request', { reason, path: c.req.path, method: c.req.method });
+        guardLogger.warn('Rejected unverified request', { reason, path: loggedPath(c), method: c.req.method });
 
         return c.json({ error: 'Forbidden', message: 'Request origin could not be verified' }, 403);
     }
 
     // tag mode — observe only, never block
-    guardLogger.debug('Unverified request (would reject in strict mode)', { reason, path: c.req.path });
+    guardLogger.debug('Unverified request (would reject in strict mode)', { reason, path: loggedPath(c) });
     c.set('clientType', 'untrusted');
 
     return next();

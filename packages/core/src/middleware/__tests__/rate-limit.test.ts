@@ -5,7 +5,7 @@
  * returns the [count, pttl] the Lua counter would produce.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Hono } from 'hono';
 
 const evalMock = vi.fn();
@@ -22,8 +22,11 @@ import {
     setRateLimitFailClosedDefault, resetMemoryRateLimitStore,
 } from '../rate-limit';
 import { getClientIp } from '../client-ip';
+import { setRedactPaths } from '../logged-path';
 import { TooManyRequestsError } from '../../errors';
 import { defineRouter, registerRoutes, route } from '../../route';
+import { Logger } from '@spfn/core/logger';
+import { captureLoggerClass } from '../../logger/__tests__/helpers/leak-probe';
 
 function makeCtx(headers: Record<string, string> = {})
 {
@@ -320,5 +323,55 @@ describe('getClientIp socket fallback', () =>
     it('returns "unknown" only when nothing identifies the client', () =>
     {
         expect(getClientIp(ipCtx())).toBe('unknown');
+    });
+});
+
+/**
+ * T11 (spfn/spfn#164): both lines the limiter writes about where it counts name
+ * the request path; under a declared prefix they name it redacted. Without the
+ * row a site missed by the switch to loggedPath goes on logging the token in a
+ * capability route's path whenever the cache is away.
+ */
+describe('rateLimit log lines under a redacted prefix', () =>
+{
+    const SECRET = 'capability-token-1f3a9c';
+
+    beforeEach(() =>
+    {
+        evalMock.mockReset();
+        cacheClient = { eval: evalMock };
+        resetMemoryRateLimitStore();
+        setRedactPaths(['/api/import']);
+    });
+
+    afterEach(() =>
+    {
+        setRedactPaths(undefined);
+        vi.restoreAllMocks();
+    });
+
+    function app(): Hono
+    {
+        const hono = new Hono();
+        hono.get('/api/import/:token', rateLimit({ limit: 5, windowMs: 60_000 }).handler, c => c.text('ok'));
+
+        return hono;
+    }
+
+    it('T11: the cache-failure warning and the no-cache line carry the redacted path, never the token', async () =>
+    {
+        const { lines, output } = captureLoggerClass(Logger);
+        evalMock.mockRejectedValue(new Error('connection lost'));
+
+        expect((await app().request(`/api/import/${SECRET}`)).status).toBe(200);
+        cacheClient = undefined;
+        expect((await app().request(`/api/import/${SECRET}`)).status).toBe(200);
+
+        const counted = lines.filter(line => /^(Cache failed|No cache)/.test(line.message));
+        expect(counted.map(line => [line.level, line.context?.path])).toEqual([
+            ['warn', '/api/import/[redacted]'],
+            ['debug', '/api/import/[redacted]'],
+        ]);
+        expect(output()).not.toContain(SECRET);
     });
 });

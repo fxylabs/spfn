@@ -28,6 +28,7 @@ import { TooManyRequestsError } from '../errors';
 // relative import would inline a SECOND logger singleton into this entrypoint's
 // bundle (issue #136).
 import { logger } from '@spfn/core/logger';
+import { loggedPath } from './logged-path';
 import { CacheRateLimitStore, MemoryRateLimitStore, type RateLimitStore } from './rate-limit-store';
 import { getClientIp } from './client-ip';
 
@@ -172,7 +173,7 @@ export const rateLimit = defineMiddlewareFactory(
 
         return async (c, next) =>
         {
-            const store = selectStore(failClosed, message, c.req.path);
+            const store = selectStore(failClosed, message, loggedPath(c));
 
             const dimensions = (by ? await by(c) : [getClientIp(c)])
                 .filter((d): d is RateLimitDimension => Boolean(d));
@@ -195,7 +196,7 @@ export const rateLimit = defineMiddlewareFactory(
                     windowMs,
                     failClosed,
                     message,
-                    c.req.path,
+                    loggedPath(c),
                 );
 
                 if (count > dimLimit)
