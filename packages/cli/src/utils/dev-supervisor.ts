@@ -1,6 +1,6 @@
 import { execa, type ExecaChildProcess } from 'execa';
 import { logger } from './logger.js';
-import { inTerminalForeground } from './terminal-foreground.js';
+import { TerminalWatch } from './terminal-foreground.js';
 
 /**
  * The process tree `spfn dev` owns (#358).
@@ -31,9 +31,11 @@ import { inTerminalForeground } from './terminal-foreground.js';
  * `pnpm exec`, `pnpm <bin>` and yarn 1 exit on the first Ctrl-C; the shell then
  * sees its job end and takes the terminal back, and a further Ctrl-C goes to
  * the shell. So while stopping, `spfn dev`, if it had the terminal's
- * foreground when it started, escalates as a second SIGINT does as soon as it
- * no longer has it — the moment it begins to stop, if it lost it before.
- * Without a terminal (a process manager, CI) nothing but a signal escalates.
+ * foreground when it started, escalates as a second SIGINT does as soon as a
+ * read (`TerminalWatch`, every `TERMINAL_READ_MS`) finds another group there —
+ * the moment it begins to stop, if that group took it before. A read that
+ * cannot tell (a failing or hung `ps`) does not escalate. Without a terminal
+ * (a process manager, CI) nothing but a signal escalates.
  *
  * Each child is a session of its own (`detached` is `setsid`): it has no
  * controlling terminal, so job control does not touch it. A Ctrl-Z stops
@@ -62,6 +64,8 @@ type StopSignal = typeof STOP_SIGNALS[number];
 
 const PROCESS_GROUPS = process.platform !== 'win32';
 const GROUP_POLL_MS = 100;
+/** How often the terminal is read while stopping. */
+const TERMINAL_READ_MS = 100;
 const KILLING = 'killing what is left of the server, Next.js and the codegen watcher';
 const TERMINAL_LOST = 'spfn dev no longer has the terminal, so no second Ctrl-C can reach it';
 
@@ -69,7 +73,7 @@ export class DevSupervisor
 {
     private readonly children = new Set<DevChild>();
     private readonly signalled = new Set<DevChild>();
-    private readonly startedInForeground = inTerminalForeground();
+    private readonly terminal = new TerminalWatch();
     private stopping = false;
     private killing = false;
     private exitCode = 0;
@@ -80,7 +84,12 @@ export class DevSupervisor
         // spfn dev exiting otherwise — an uncaught exception, a write to a closed
         // stdout — stops each child not stopped yet. execa's own cleanup skips
         // detached children, so this is the only one they have.
-        process.on('exit', () => this.children.forEach(child => this.signalOnce(child)));
+        process.on('exit', () =>
+        {
+            this.terminal.close();
+            this.children.forEach(child => this.signalOnce(child));
+        });
+        this.terminal.read();
     }
 
     /** Whether a stop has begun. */
@@ -139,7 +148,9 @@ export class DevSupervisor
 
         const children = [...this.children];
 
-        if (this.terminalLost())
+        this.terminal.read();
+
+        if (this.terminal.lost())
         {
             this.killAll(TERMINAL_LOST);
         }
@@ -147,7 +158,7 @@ export class DevSupervisor
         {
             logger.info('[SPFN] Stopping the server, Next.js and the codegen watcher (Ctrl-C again to kill them now)');
             children.forEach(child => this.signalOnce(child));
-            this.killWhenTerminalLost();
+            this.watchTerminal();
         }
 
         await Promise.all(children.map(child => child.ended));
@@ -175,27 +186,24 @@ export class DevSupervisor
         this.children.forEach(child => signalGroup(child.process, 'SIGKILL'));
     }
 
-    /** Whether a Ctrl-C could reach `spfn dev` when it started, and cannot now. */
-    private terminalLost(): boolean
+    /** While stopping, read the terminal until something escalated or the stop is done; escalate once it is found lost. */
+    private watchTerminal(): void
     {
-        return this.startedInForeground && !inTerminalForeground();
-    }
-
-    /** While stopping, escalate once the terminal is seen lost, unless something else already did. */
-    private killWhenTerminalLost(): void
-    {
-        const check = setInterval(() =>
+        if (this.killing || this.children.size === 0)
         {
-            if (this.killing)
-            {
-                clearInterval(check);
-            }
-            else if (this.terminalLost())
-            {
-                clearInterval(check);
-                this.killAll(TERMINAL_LOST);
-            }
-        }, GROUP_POLL_MS);
+            return;
+        }
+
+        this.terminal.read();
+
+        if (this.terminal.lost())
+        {
+            this.killAll(TERMINAL_LOST);
+
+            return;
+        }
+
+        setTimeout(() => this.watchTerminal(), TERMINAL_READ_MS).unref();
     }
 
     /** SIGTERM the child's group, unless it was already sent one or has ended. */
