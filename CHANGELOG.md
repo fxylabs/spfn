@@ -811,8 +811,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`/middleware`) the `TooManyRequestsError` of `@spfn/core/errors`, and `errorRegistry` is one
     registry; `OpsRouterError` is `SurfaceError`, as `src/ops/error.ts` documents; `/env/loader` and
     `/server` share the load-once state of `loadEnv`; the job, SSE and route builders are one copy
-    each between their own entry and `/server`. 35 modules before (at least 54 counted without the
-    rollup pass, which hid markers). Each entry still records its evaluation once (`recordEvaluation`).
+    each between their own entry and `/server`. 53 modules were in more than one file (56 in esbuild's
+    record; the rollup pass removed 3 copies). Each entry still records its evaluation once
+    (`recordEvaluation`).
   - **@spfn/notification:** configuration set through `@spfn/notification/config` is what
     `@spfn/notification/server` sends with; before, `/config` configured a copy `/server` never read.
   - **@spfn/pages:** `/server` throws the `PagesError`, `SiteConfigError` and `FrontmatterError` that
