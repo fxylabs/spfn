@@ -1,5 +1,6 @@
 import { execa, type ExecaChildProcess } from 'execa';
 import { logger } from './logger.js';
+import { inTerminalForeground } from './terminal-foreground.js';
 
 /**
  * The process tree `spfn dev` owns (#358).
@@ -21,6 +22,17 @@ import { logger } from './logger.js';
  * Ctrl-C again — SIGKILLs every group left, and `spfn dev` exits 130. A SIGKILL
  * of `spfn dev` reaches no child.
  *
+ * A second Ctrl-C means "stop waiting", and when it can no longer arrive it is
+ * taken as given. It can arrive while `spfn dev`'s group is its terminal's
+ * foreground group, as it is when started from a shell — directly, or behind
+ * `pnpm run`, `npm run` or `npx`, which share the group and wait for `spfn dev`.
+ * `pnpm exec`, `pnpm <bin>` and yarn 1 exit on the first Ctrl-C; the shell then
+ * sees its job end and takes the terminal back, and a further Ctrl-C goes to
+ * the shell. So while stopping, `spfn dev`, if it had the terminal's
+ * foreground when it started, escalates as a second SIGINT does as soon as it
+ * no longer has it — the moment it begins to stop, if it lost it before.
+ * Without a terminal (a process manager, CI) nothing but a signal escalates.
+ *
  * Children get no stdin: a background group reading the terminal would be
  * stopped by it (SIGTTIN) and never exit. Windows has no process groups: there
  * the leader alone is signalled and waited for.
@@ -40,12 +52,16 @@ export interface DevChild
 
 const PROCESS_GROUPS = process.platform !== 'win32';
 const GROUP_POLL_MS = 100;
+const KILLING = 'killing what is left of the server, Next.js and the codegen watcher';
+const TERMINAL_LOST = 'spfn dev no longer has the terminal, so no second Ctrl-C can reach it';
 
 export class DevSupervisor
 {
     private readonly children = new Set<DevChild>();
     private readonly signalled = new Set<DevChild>();
+    private readonly startedInForeground = inTerminalForeground();
     private stopping = false;
+    private killing = false;
     private exitCode = 0;
 
     constructor()
@@ -111,7 +127,17 @@ export class DevSupervisor
 
         const children = [...this.children];
 
-        children.forEach(child => this.signalOnce(child));
+        if (this.terminalLost())
+        {
+            this.killAll(TERMINAL_LOST);
+        }
+        else
+        {
+            logger.info('[SPFN] Stopping the server, Next.js and the codegen watcher (Ctrl-C again to kill them now)');
+            children.forEach(child => this.signalOnce(child));
+            this.killWhenTerminalLost();
+        }
+
         await Promise.all(children.map(child => child.ended));
         process.exit(this.exitCode);
     }
@@ -120,14 +146,44 @@ export class DevSupervisor
     {
         if (this.stopping && signal === 'SIGINT')
         {
-            logger.warn('[SPFN] Second interrupt: killing what is left of the server, Next.js and the codegen watcher');
-            this.exitCode = 130;
-            this.children.forEach(child => signalGroup(child.process, 'SIGKILL'));
+            this.killAll('Second interrupt');
 
             return;
         }
 
         void this.stop();
+    }
+
+    /** The second Ctrl-C's escalation: SIGKILL every group left; `spfn dev` exits 130 once they are empty. */
+    private killAll(reason: string): void
+    {
+        logger.warn(`[SPFN] ${reason}: ${KILLING}`);
+        this.killing = true;
+        this.exitCode = 130;
+        this.children.forEach(child => signalGroup(child.process, 'SIGKILL'));
+    }
+
+    /** Whether a Ctrl-C could reach `spfn dev` when it started, and cannot now. */
+    private terminalLost(): boolean
+    {
+        return this.startedInForeground && !inTerminalForeground();
+    }
+
+    /** While stopping, escalate once the terminal is seen lost, unless something else already did. */
+    private killWhenTerminalLost(): void
+    {
+        const check = setInterval(() =>
+        {
+            if (this.killing)
+            {
+                clearInterval(check);
+            }
+            else if (this.terminalLost())
+            {
+                clearInterval(check);
+                this.killAll(TERMINAL_LOST);
+            }
+        }, GROUP_POLL_MS);
     }
 
     /** SIGTERM the child's group, unless it was already sent one or has ended. */

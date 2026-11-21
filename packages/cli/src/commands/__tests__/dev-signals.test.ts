@@ -22,21 +22,27 @@
  * |    | both)                                     |                                                                 |
  * | S4 | SIGTERM, then SIGINT, every child held    | a second Ctrl-C that kills the wrapper only: Next.js behind     |
  * |    | past the row                              | `pnpm run`/`sh -c` survives it, holding its port                |
+ * | T1 | one Ctrl-C to `pnpm exec spfn dev` typed  | `spfn dev` and a slow server running on behind the shell's      |
+ * |    | in an interactive bash in a terminal, the | prompt, for the server's whole stop, after the launcher exited  |
+ * |    | server's stop longer than the row         | and no second Ctrl-C could reach them                           |
+ * | T2 | one Ctrl-C to `pnpm dev` / `spfn dev`     | over-eager killing: a launcher that waits for `spfn dev` taken  |
+ * |    | typed in that bash, a slow server         | for one that left, and the server's graceful stop cut short     |
  *
  * No process outlives a row: each stand-in exits by itself 30 s after it
  * starts, and teardown SIGKILLs every process carrying the row's environment
  * tag (`helpers/process-tree.ts`). Waits time out and fail the row rather than
  * hang it. Build the CLI first (`pnpm --filter spfn build`): the bin runs
- * `dist/`. Needs `pnpm` and Linux (`/proc`).
+ * `dist/`. Needs `pnpm` and Linux (`/proc`); T1 and T2 need `script`
+ * (util-linux) for the terminal and `bash` for the shell typed in.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { killTagged, newRowTag, ROW_TAG_VARIABLE } from './helpers/process-tree';
+import { killTagged, newRowTag, ROW_TAG_VARIABLE, taggedPids } from './helpers/process-tree';
 
 const bin = join(__dirname, '../../../bin/spfn.js');
 const ROLES = ['server', 'watcher', 'next'] as const;
@@ -88,7 +94,8 @@ export const stopAfter = (ms) =>
 
 function writeApp(): void
 {
-    write('package.json', JSON.stringify({ name: 'dev-signals-fixture', private: true, dependencies: { next: '15.0.0' }, scripts: { 'spfn:next': 'node next-stand-in.mjs' } }));
+    write('package.json', JSON.stringify({ name: 'dev-signals-fixture', private: true, dependencies: { next: '15.0.0' },
+        scripts: { 'spfn:next': 'node next-stand-in.mjs', dev: 'spfn dev --no-agent-files' } }));
     write('pnpm-lock.yaml', '');
     write('src/server/.keep', '');
     write('signal-log.mjs', SIGNAL_LOG);
@@ -110,6 +117,8 @@ function writeApp(): void
         + '    close() { return new Promise(settle => setTimeout(settle, Number(process.env.WATCHER_STOP_MS))); }\n}\n'
         + 'export const loadCodegenConfig = () => ({});\nexport const createGeneratorsFromConfig = () => [];\n'
         + 'export const markAppSourceProcess = () => stub(\'watcher\');\n');
+    mkdirSync(join(appDir, 'node_modules/.bin'));
+    symlinkSync(bin, join(appDir, 'node_modules/.bin/spfn'));
 }
 
 function lines(): Line[]
@@ -156,8 +165,10 @@ interface Dev
     exited: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>;
 }
 
-/** The bin, `spfn dev`, in a process group of its own, as a terminal or a process manager starts it. */
-async function startDev(stopMs: { server: number; watcher: number; next: number }): Promise<Dev>
+type StopMs = { server: number; watcher: number; next: number };
+
+/** The environment of what a row starts: the row's tag, free ports, the stand-ins' stop times. */
+async function rowEnv(stopMs: StopMs): Promise<NodeJS.ProcessEnv>
 {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
@@ -175,7 +186,33 @@ async function startDev(stopMs: { server: number; watcher: number; next: number 
         delete env[name];
     }
 
-    const child = spawn(process.execPath, [bin, 'dev', '--no-agent-files'], { cwd: appDir, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    return env;
+}
+
+/** The bin, `spfn dev`, in a process group of its own, as a terminal or a process manager starts it. */
+async function startDev(stopMs: StopMs): Promise<Dev>
+{
+    return devOf(spawn(process.execPath, [bin, 'dev', '--no-agent-files'], { cwd: appDir, env: await rowEnv(stopMs), detached: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+}
+
+/**
+ * An interactive bash in a terminal of its own (`script`), with `line` typed at
+ * its prompt: the terminal's foreground job is what the line starts, and the
+ * shell takes the terminal back when that job ends.
+ */
+async function typeInTerminal(line: string, stopMs: StopMs): Promise<Dev>
+{
+    const env = { ...(await rowEnv(stopMs)), TERM: 'dumb' };
+    const terminal = devOf(spawn('script', ['-qf', '-c', 'bash --norc --noprofile -i', '/dev/null'], { cwd: appDir, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }));
+
+    await until(terminal, 'the shell\'s prompt', () => terminal.output().includes('$ '));
+    terminal.child.stdin!.write(`${line}\n`);
+
+    return terminal;
+}
+
+function devOf(child: ChildProcess): Dev
+{
     let output = '';
 
     child.stdout!.on('data', chunk => (output += chunk));
@@ -187,10 +224,10 @@ async function startDev(stopMs: { server: number; watcher: number; next: number 
     return { child, output: () => output.replace(/\x1b\[[0-9;]*m/g, ''), exited };
 }
 
-/** Resolves once `condition` holds; rejects 30 s on, or once the bin has exited without it. */
-async function until(dev: Dev, what: string, condition: () => boolean): Promise<void>
+/** Resolves once `condition` holds; rejects `ms` on (30 s), or once the bin has exited without it. */
+async function until(dev: Dev, what: string, condition: () => boolean, ms = 30_000): Promise<void>
 {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + ms;
 
     while (!condition())
     {
@@ -235,6 +272,25 @@ function groupsLeft(): number[]
             return false;
         }
     });
+}
+
+/** The row's processes but the terminal and its shell: `spfn dev`, its launcher, the stand-ins. */
+function treeLeft(): string[]
+{
+    return taggedPids(rowTag).map(cmdlineOf).filter(cmdline => cmdline !== '' && !/^(script|bash) /.test(cmdline));
+}
+
+function cmdlineOf(pid: number): string
+{
+    try
+    {
+        return readFileSync(`/proc/${pid}/cmdline`, 'latin1').replace(/\0/g, ' ');
+    }
+    catch
+    {
+        // Gone already.
+        return '';
+    }
 }
 
 beforeEach(() =>
@@ -309,5 +365,49 @@ describe.skipIf(process.platform !== 'linux')('spfn dev supervision (#358)', () 
         const exit = await exitOf(dev);
 
         expect({ code: exit.code, groupsLeft: groupsLeft() }, dev.output()).toEqual({ code: 130, groupsLeft: [] });
+    }, 60_000);
+});
+
+describe.skipIf(process.platform !== 'linux')('spfn dev typed in a terminal (#358)', () =>
+{
+    it('T1 one Ctrl-C to `pnpm exec spfn dev`, which exits on it: no second Ctrl-C can come, so spfn dev kills what is left at once', async () =>
+    {
+        // The server's stop outlasts the wait below: only the kill ends it in time.
+        const terminal = await typeInTerminal('pnpm exec spfn dev --no-agent-files', { server: 25_000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        terminal.child.stdin!.write('\x03');
+        await until(terminal, 'no process left behind the prompt', () => treeLeft().length === 0, 10_000)
+            .catch(error => expect.fail(`${error}\n${treeLeft().join('\n')}`));
+
+        expect({
+            server: signalsByRole().server,
+            serverStoppedGracefully: lines().some(line => line.role === 'server' && line.event === 'exit'),
+            said: terminal.output().includes('spfn dev no longer has the terminal, so no second Ctrl-C can reach it: killing what is left'),
+            groupsLeft: groupsLeft(),
+        }, terminal.output()).toEqual({ server: ['SIGTERM'], serverStoppedGracefully: false, said: true, groupsLeft: [] });
+    }, 60_000);
+
+    it.each([
+        ['pnpm dev', 'pnpm dev'],
+        ['spfn dev', './node_modules/.bin/spfn dev --no-agent-files'],
+    ])('T2 one Ctrl-C to `%s`, which waits for spfn dev: the server gets its whole graceful stop', async (_launcher, line) =>
+    {
+        const terminal = await typeInTerminal(line, { server: 3000, watcher: 500, next: 500 });
+
+        await until(terminal, 'server, watcher and Next.js starting', allStarted);
+        terminal.child.stdin!.write('\x03');
+        await until(terminal, 'no process left behind the prompt', () => treeLeft().length === 0);
+
+        const server = lines().filter(line => line.role === 'server');
+        const signalled = server.find(line => line.event === 'SIGTERM');
+        const exited = server.find(line => line.event === 'exit');
+
+        expect({
+            server: signalsByRole().server,
+            stopTookItsTime: signalled !== undefined && exited !== undefined && exited.at - signalled.at >= 3000,
+            killed: terminal.output().includes('killing what is left'),
+            groupsLeft: groupsLeft(),
+        }, terminal.output()).toEqual({ server: ['SIGTERM'], stopTookItsTime: true, killed: false, groupsLeft: [] });
     }, 60_000);
 });

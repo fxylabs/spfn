@@ -369,9 +369,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     server still shutting down. A process manager with a shorter stop timeout SIGKILLs `spfn
     dev`, which reaches no child: kill the cgroup or each child's group, or allow for core's
     deadline.
-  - **Only a second Ctrl-C escalates.** A SIGINT once the stop has begun SIGKILLs every child's
-    group, and `spfn dev` exits 130. A repeated SIGTERM or SIGHUP changes nothing; under #353 any
-    second signal ended the watcher at once and left the rest alone.
+  - **A second Ctrl-C escalates, and so does losing the terminal while stopping.** A SIGINT once
+    the stop has begun SIGKILLs every child's group, and `spfn dev` exits 130. A repeated SIGTERM or
+    SIGHUP changes nothing; under #353 any second signal ended the watcher at once and left the rest
+    alone. A `spfn dev` that started as the terminal's foreground job and, while stopping, is no
+    longer it escalates the same way, at once, saying so: `pnpm exec spfn dev`, `pnpm spfn dev`,
+    `yarn spfn dev` and yarn 1's `yarn dev` exit on the first Ctrl-C and the shell takes the
+    terminal back, so no second Ctrl-C can reach `spfn dev`. Under them, one Ctrl-C no longer gives
+    the server its graceful stop. The watcher's stopping line no longer says `(Ctrl-C again to exit
+    now)`; `spfn dev`'s does, when a Ctrl-C can still reach it.
   - **Exit status:** 0 after a stop by any signal. After a Ctrl-C, or a `kill` of the bin, the
     shell used to see the bin killed by the signal (130, 143).
   - **The server's process** is Node under tsx, not `pnpm exec tsx`/`npx tsx`: it no longer gets

@@ -254,6 +254,7 @@ only once every group is empty, with no deadline of its own.
 | `kill <pid>` / SIGTERM, SIGINT or SIGHUP from a process manager | the pid you started (`bin/spfn.js`'s) | one SIGTERM, from `spfn dev` | after the last child, 0 |
 | the same signal again, or SIGTERM / SIGHUP after a Ctrl-C | | nothing more | unchanged |
 | a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
+| — (stopping, and the terminal is no longer `spfn dev`'s: `pnpm exec` exited) | | SIGKILL, to every group left | at once, 130 |
 | SIGKILL | `spfn dev` | nothing | at once |
 
 - **The pid you start is `spfn dev`'s.** `bin/spfn.js` re-runs itself under tsx in its own
@@ -264,15 +265,28 @@ only once every group is empty, with no deadline of its own.
 - **A terminal's Ctrl-C reaches each child once.** The children are not in the terminal's
   foreground group, so the terminal's SIGINT reaches `spfn dev` only, and `spfn dev`'s SIGTERM
   is the one signal each child gets.
-- **Only a second Ctrl-C escalates.** SIGTERM and SIGHUP always mean "stop", however often they
-  come: `pnpm exec spfn dev` relays a Ctrl-C as a SIGINT and then a SIGTERM, and a closing terminal
-  sends SIGHUP. A SIGINT once the stop has begun — a person pressing Ctrl-C again, or
-  `kill -INT` twice — SIGKILLs every group left: it is the way out of a server shutdown that takes
-  too long (core's deadline is `SHUTDOWN_TIMEOUT`, 280 s by default) or a generation that never
-  settles. Next.js's own processes and the server's are SIGKILLed with the rest.
+- **A second Ctrl-C escalates, and so does a launcher that exits.** SIGTERM and SIGHUP always mean
+  "stop", however often they come: `pnpm exec spfn dev` relays a Ctrl-C as a SIGINT and then a
+  SIGTERM, and a closing terminal sends SIGHUP. A SIGINT once the stop has begun — a person pressing
+  Ctrl-C again, or `kill -INT` twice — means "stop waiting": it SIGKILLs every group left, and `spfn
+  dev` exits 130. It is the way out of a server shutdown that takes too long (core's deadline is
+  `SHUTDOWN_TIMEOUT`, 280 s by default) or a generation that never settles. Next.js's own processes
+  and the server's are SIGKILLed with the rest. When that second Ctrl-C can no longer arrive, it is
+  taken as given. It can arrive while `spfn dev` is in the terminal's foreground: started from a
+  shell, directly or behind `pnpm dev`, `npm run dev` or `npx spfn dev`, which wait for it. `pnpm
+  exec spfn dev`, `pnpm spfn dev`, `yarn spfn dev` and yarn 1's `yarn dev` exit on the first
+  Ctrl-C; the shell sees its job end, takes the terminal back, and a further Ctrl-C goes to the
+  shell. So `spfn dev` that started in the terminal's foreground, once it is stopping and no longer
+  has it, escalates as a second Ctrl-C does — SIGKILL to every group left, exit 130 — at once,
+  saying `spfn dev no longer has the terminal, so no second Ctrl-C can reach it: killing what is left
+  of …`; no process is left holding the port behind the
+  shell's prompt. Under the launchers that wait, the server gets its full graceful stop unless you
+  press Ctrl-C again. The same holds after Ctrl-Z and `bg`: a stop of a `spfn dev` sent to the
+  background kills at once. Started without a terminal (a process manager, CI), or in the
+  background (`spfn dev &`), only a signal escalates.
 - **The watcher finishes what it is running first.** On its SIGTERM it finishes the generation,
   or the codegen config load, it is running (`Codegen watcher stopping once the running generation
-  or codegen config load finishes (Ctrl-C again to exit now)`), so the route map and contract never
+  or codegen config load finishes`), so the route map and contract never
   come from two generations. Neither can be cancelled — a config load is a module evaluation — so
   one that never settles (a top-level `await` that never resolves in `.spfnrc.ts` or a custom
   generator) holds the watcher until a second Ctrl-C, which kills it mid-generation or mid-load:

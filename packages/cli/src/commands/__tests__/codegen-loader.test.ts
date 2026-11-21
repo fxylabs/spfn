@@ -426,7 +426,7 @@ describe.each(TSX)('codegen in CLI processes, tsx $version', (tsx) =>
                 + 'export default defineConfig({ generators: [{ path: \'./gate-generator.mjs\' }, { path: \'./hang-generator.mjs\' }] });\n');
             await watcher.until(() => watcher.output().includes('Codegen config changed (.spfnrc.ts): reloading'));
             watcher.signal('SIGTERM');
-            await watcher.until(() => watcher.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes (Ctrl-C again to exit now)'));
+            await watcher.until(() => watcher.output().includes('Codegen watcher stopping once the running generation or codegen config load finishes'));
             await watcher.until(() => watcher.output().includes('Closing watcher'));
             expect(watcher.running()).toBe(true);
             watcher.signal('SIGTERM');

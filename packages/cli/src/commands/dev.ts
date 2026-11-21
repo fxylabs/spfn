@@ -164,7 +164,7 @@ const orchestrator = new CodegenOrchestrator({
 // (a module evaluation) can be cancelled, so a second signal exits at once: it
 // is the only way to stop one that never settles. Under spfn dev the watcher
 // gets one SIGTERM whatever stopped spfn dev, and a second Ctrl-C makes spfn
-// dev SIGKILL it.
+// dev SIGKILL it; spfn dev says whether one can still reach it.
 let stopping = false;
 
 const stop = async (signal) =>
@@ -175,7 +175,7 @@ const stop = async (signal) =>
     }
 
     stopping = true;
-    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes (Ctrl-C again to exit now)');
+    console.log('[SPFN] Codegen watcher stopping once the running generation or codegen config load finishes');
     await orchestrator.close();
     process.exit(0);
 };
