@@ -35,9 +35,12 @@ import { inTerminalForeground } from './terminal-foreground.js';
  * no longer has it — the moment it begins to stop, if it lost it before.
  * Without a terminal (a process manager, CI) nothing but a signal escalates.
  *
- * Children get no stdin: a background group reading the terminal would be
- * stopped by it (SIGTTIN) and never exit. Windows has no process groups: there
- * the leader alone is signalled and waited for.
+ * Each child is a session of its own (`detached` is `setsid`): it has no
+ * controlling terminal, so job control does not touch it. A Ctrl-Z stops
+ * `spfn dev` and leaves the children running, and a child reading the
+ * terminal it inherited would get what the user types, taking it from the
+ * shell — not SIGTTIN, not EIO. So children get no stdin. Windows has no process
+ * groups: there the leader alone is signalled and waited for.
  */
 
 export type DevChildName = 'server' | 'Next.js' | 'codegen watcher';

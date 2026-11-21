@@ -385,7 +385,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `node_modules/.bin` on `PATH`) unless the `pnpm dev`/`npx spfn dev` that started `spfn dev`
     added it already.
   - **No stdin for any child:** the server, Next.js and the watcher read an empty stdin. In a
-    group of their own they would otherwise be stopped by the terminal (SIGTTIN).
+    session of their own they have no controlling terminal: a read of the terminal they inherited
+    would take what the user types from the shell.
+  - **Ctrl-Z stops `spfn dev` only:** the children, in sessions of their own, run on while it is
+    stopped; a stop of a `spfn dev` sent to the background with `bg` kills at once (above).
   - **Without tsx** for the app and for the CLI, `spfn dev` exits 1 with `tsx is not installed
     in this project, and it is what loads TypeScript. Add it: …` before starting anything. It
     used to start without the watcher and fail to start the server.

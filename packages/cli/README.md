@@ -255,16 +255,23 @@ only once every group is empty, with no deadline of its own.
 | the same signal again, or SIGTERM / SIGHUP / SIGQUIT after a Ctrl-C | | nothing more | unchanged |
 | a second Ctrl-C (SIGINT once the stop has begun) | `spfn dev` | SIGKILL, to every group left | at once, 130 |
 | — (stopping, and the terminal is no longer `spfn dev`'s: `pnpm exec` exited) | | SIGKILL, to every group left | at once, 130 |
+| Ctrl-Z in the terminal | the terminal's foreground group: `spfn dev` alone | nothing: they run on | not: it is stopped until `fg` |
 | SIGKILL | `spfn dev` | nothing | at once |
 
 - **The pid you start is `spfn dev`'s.** `bin/spfn.js` re-runs itself under tsx in its own
   process (`process.execve`) rather than in a child, so a signal to the pid a terminal, a process
   manager or `kill` sees reaches `spfn dev` once, and its exit status is `spfn dev`'s. (On Windows,
   which has neither `execve` nor process groups, the CLI runs as the bin's child, and each child of
-  `spfn dev` is signalled alone.)
+  `spfn dev` is signalled alone.) `process.execve` is "Stability: 1 – Experimental" on every Node.js
+  line spfn supports (22, 24, 26); a relaunch that fails stops the command with the error rather
+  than run it without the module hook.
 - **A terminal's Ctrl-C reaches each child once.** The children are not in the terminal's
   foreground group, so the terminal's SIGINT reaches `spfn dev` only, and `spfn dev`'s SIGTERM
   is the one signal each child gets.
+- **Each child is a session of its own** (Node's `detached` is `setsid`), with no controlling
+  terminal: nothing the terminal sends — Ctrl-C, Ctrl-\\, Ctrl-Z, a hangup — reaches it but through
+  `spfn dev`. So Ctrl-Z stops `spfn dev` alone; the children run on while it is stopped. No child gets a
+  stdin: reading the terminal it inherited, it would take what you type from the shell.
 - **A second Ctrl-C escalates, and so does a launcher that exits.** SIGTERM and SIGHUP always mean
   "stop", however often they come: `pnpm exec spfn dev` relays a Ctrl-C as a SIGINT and then a
   SIGTERM, and a closing terminal sends SIGHUP. A SIGINT once the stop has begun — a person pressing
