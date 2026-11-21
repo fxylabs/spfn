@@ -347,8 +347,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once (its fingerprint changed); the old group keeps its count and stops growing. A group an
   operator marked `ignored` is no exception: its fault comes back once as a new `active` group and
   sends one Slack alert. Mark that new group `ignored` again; it stays quiet from then on.
-  The dashboard's event preview shows the fault (name, code, constraint, table) and its top three
-  frames, not the first lines of the stored JSON. An event stored before this release (a raw stack)
+  The dashboard's event preview shows the group's line for the event (`summarizeError` over the
+  stored description: per link of the cause chain its name, code, constraint and table, and a kept
+  message — so a wrapped database error shows its cause's code, a plain error its message, a thrown
+  non-Error value what its description holds) and its top three frames, not the first lines of the
+  stored JSON. An event stored before this release (a raw stack)
   previews as its error's name and its `at …` frame lines, not its first five lines, whose header
   and `params:` line held a failed statement's SQL and bound values.
 - **BREAKING: @spfn/workflow: a failed step's `error` is the error's description as JSON text

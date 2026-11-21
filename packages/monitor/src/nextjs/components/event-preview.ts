@@ -3,8 +3,9 @@
  *
  * An event's `stackTrace` is its error's description as indented JSON (#382).
  * Its first lines are only `{ kind name code severity`, so the preview is
- * built from the description's fields instead: the fault's name, code,
- * constraint and table, then its top frames.
+ * built from the description instead: the line naming the fault — the
+ * group's line, `summarizeError` — then its top frames. Everything shown comes
+ * from the stored description, which core's `describeError` already made safe.
  *
  * A row stored before #382 holds a raw stack, whose header is the error's
  * message — for a failed statement its SQL, and its next line `params: …` the
@@ -12,20 +13,13 @@
  * error's name and its `at …` frame lines.
  */
 
+import { summarizeError, type Description } from '../../error-summary';
+
 const PREVIEW_FRAMES = 3;
 
 const FRAME_LINE = /^\s*at /;
 
 const ERROR_NAME = /^[\w$.]+$/;
-
-interface StoredDescription
-{
-    name?: unknown;
-    code?: unknown;
-    constraint?: unknown;
-    table?: unknown;
-    stack?: unknown;
-}
 
 export function eventPreview(stackTrace: string): string
 {
@@ -36,43 +30,41 @@ export function eventPreview(stackTrace: string): string
         return legacyPreview(stackTrace);
     }
 
-    const frames = typeof description.stack === 'string'
-        ? description.stack.split('\n').slice(0, PREVIEW_FRAMES)
-        : [];
-
-    return [faultLine(description), ...frames].join('\n');
+    return [summarizeError(description), ...topFrames(description.stack ?? '')].join('\n');
 }
 
 /** A raw stack's error name — the text before the first `:` of its header — and its frames */
 function legacyPreview(stackTrace: string): string
 {
     const name = stackTrace.split('\n', 1)[0].split(':', 1)[0].trim();
-    const frames = stackTrace.split('\n').filter(line => FRAME_LINE.test(line)).slice(0, PREVIEW_FRAMES);
 
-    return [ERROR_NAME.test(name) ? name : 'Error', ...frames].join('\n');
+    return [ERROR_NAME.test(name) ? name : 'Error', ...topFrames(stackTrace)].join('\n');
 }
 
-/** `Name [code=…] [constraint=…] [table=…]`, each tag only when present */
-function faultLine(description: StoredDescription): string
+function topFrames(text: string): string[]
 {
-    const tags = (['code', 'constraint', 'table'] as const)
-        .filter(key => ['string', 'number'].includes(typeof description[key]) && description[key] !== '')
-        .map(key => ` [${key}=${description[key]}]`)
-        .join('');
-
-    return `${typeof description.name === 'string' ? description.name : 'Error'}${tags}`;
+    return text.split('\n').filter(line => FRAME_LINE.test(line)).slice(0, PREVIEW_FRAMES);
 }
 
-function storedDescription(stackTrace: string): StoredDescription | null
+/** The stored description, or null for text that is not one: a row stored before #382 */
+function storedDescription(stackTrace: string): Description | null
 {
     try
     {
-        const parsed: unknown = JSON.parse(stackTrace);
+        const parsed: Partial<Description> | null = JSON.parse(stackTrace);
 
-        return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+        return isDescription(parsed) ? parsed : null;
     }
     catch
     {
         return null;
     }
+}
+
+function isDescription(value: Partial<Description> | null): value is Description
+{
+    return typeof value === 'object'
+        && value !== null
+        && (value.kind === 'error' || value.kind === 'database')
+        && typeof value.name === 'string';
 }

@@ -7,7 +7,8 @@
  */
 
 import crypto from 'node:crypto';
-import { describeError, type DatabaseErrorDescription, type ErrorDescription } from '@spfn/core/logger';
+import { describeError } from '@spfn/core/logger';
+import { chainOf, summarizeError, type Description } from '../../error-summary';
 import { monitorLogger } from '../logger';
 import { errorGroupsRepository } from '../repositories';
 import { errorEventsRepository } from '../repositories';
@@ -15,8 +16,6 @@ import { notifyErrorToSlack } from '../notifiers/slack';
 import type { ErrorGroup, ErrorGroupStatus } from '../entities';
 
 const logger = monitorLogger.errorTracking;
-
-type Description = ErrorDescription | DatabaseErrorDescription;
 
 /** How many of the stack's top frames name where a fault was raised */
 const FAULT_FRAMES = 3;
@@ -54,23 +53,6 @@ export function generateFingerprint(description: Description, path: string): str
         .update(JSON.stringify(identity))
         .digest('hex')
         .slice(0, 16);
-}
-
-/**
- * One line naming the fault — the group's `message` and the Slack text:
- * each link of the cause chain by its name, code, constraint and table, and
- * the message its description kept
- */
-export function summarizeError(description: Description): string
-{
-    return chainOf(description).map(linkSummary).join(' ← ');
-}
-
-function chainOf(description: Description): Description[]
-{
-    return description.kind === 'error' && description.cause
-        ? [description, ...chainOf(description.cause)]
-        : [description];
 }
 
 function identityOf(link: Description): unknown[]
@@ -139,19 +121,6 @@ function workingDirectory(): string | null
     {
         return null;
     }
-}
-
-function linkSummary(link: Description): string
-{
-    const fields = link.kind === 'database'
-        ? { code: link.code, constraint: link.constraint, table: link.table }
-        : { code: link.code };
-    const tags = Object.entries(fields)
-        .filter(([, value]) => value !== undefined)
-        .map(([key, value]) => ` [${key}=${value}]`)
-        .join('');
-
-    return `${link.name}${tags}${link.message ? `: ${link.message}` : ''}`;
 }
 
 /**
