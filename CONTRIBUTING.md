@@ -303,6 +303,23 @@ will rewrite the entire codebase to the wrong style. Style is enforced via ESLin
 - Update the relevant package `README.md` when you change public behavior — those
   READMEs are the source of truth, including for AI agents.
 
+## The pull-request check on Gitea Actions
+
+The check in `.gitea/workflows/` (build, lint, type-check, the repository checks,
+the example smokes and the test suites) does not start on its own. It runs when:
+
+- a maintainer adds the label **`ci`** to the pull request — it checks the head at
+  that moment, scoped to the packages the pull request changes and everything that
+  depends on them; to check a later head, remove the label and add it again; or
+- someone starts it by hand (**Run workflow** on the `pr.yml` workflow in the
+  repository's Actions tab), on a branch, which checks everything.
+
+Not on every push, because the project runs CI once per pull request, on the head
+whose reviews are clean: a full run takes many minutes of a shared runner, and a
+head that review is still changing would be checked again anyway. Until Gitea
+Actions has passed once, Woodpecker (`.woodpecker/`) still checks pull requests as
+before.
+
 ## Working with AI agents
 
 Most contributors will use AI assistance, and that's welcome. Two expectations:
@@ -324,7 +341,9 @@ Packages are in **beta** (`0.x.y-beta.N`) / alpha. Do not bump a package to a st
 Publishing is a maintainer task. [`.github/PUBLISHING.md`](./.github/PUBLISHING.md)
 describes it: the two registries, the per-package workflows, the `latest` dist-tag
 sync, and the gotchas. `RELEASE.md` describes the retired tag-triggered release and is
-kept for history only; nothing publishes off a git tag any more.
+kept for history only; nothing publishes off a git tag any more. Until the switch
+from Woodpecker, a Gitea Actions release workflow (`.gitea/workflows/release.yml`)
+publishes to the Gitea registry beside Woodpecker's `.woodpecker/publish.yml`.
 
 ## DCO
 

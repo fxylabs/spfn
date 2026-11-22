@@ -1,0 +1,21 @@
+# primitives CI on Gitea Actions — the pull-request check, started on request.
+#
+# Not on every push. The project runs CI once per pull request, on the head
+# whose reviews are clean, so the check starts in two ways only:
+#
+# - the label `ci` added to a pull request: it checks the head at that moment,
+#   scoped to the packages the pull request changes (scripts/ci-scope.mjs).
+#   Gitea's pull-request payload carries no `label`; the label just added is in
+#   `changes.added_labels`. To check a later head, remove the label and add it
+#   again.
+# - a manual run (workflow_dispatch) on a branch chosen in the UI, which
+#   carries the ref itself. It is not a pull request, so it runs everything.
+on:
+    pull_request:
+        types: [labeled]
+    workflow_dispatch:
+
+jobs:
+    check:
+        if: github.event_name == 'workflow_dispatch' || contains(github.event.changes.added_labels.*.name, 'ci')
+        uses: ./.gitea/workflows/check.yml
