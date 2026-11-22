@@ -31,7 +31,7 @@
  * @module server/middleware/auth-profiles
  */
 import type { Context } from 'hono';
-import { getClientIp } from '@spfn/core/middleware';
+import { getClientIp, loggedPath } from '@spfn/core/middleware';
 
 import { recordKeyUse } from './record-key-use';
 import { keyLiveness } from '../lib/key-liveness';
@@ -397,13 +397,13 @@ async function admitClientProofProfile(c: Context): Promise<AuthContext>
     // writes one a proxy did not attest.
     recordKeyUse(c, keyRecord, admission.admitted.user);
 
+    // The account by id only, as the Bearer path logs it (#429)
     authLogger.middleware.info('API access', {
         userId: admission.admitted.user.id,
-        email: admission.admitted.user.email,
         keyId: credentials.keyId,
         scheme: CLIENT_PROOF_PROFILE,
         method: c.req.method,
-        path: c.req.path,
+        path: loggedPath(c),
         ip: getClientIp(c),
         userAgent: c.req.header('user-agent'),
     });

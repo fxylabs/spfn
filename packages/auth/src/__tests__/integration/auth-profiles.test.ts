@@ -7,11 +7,25 @@
  * for the repositories, and real proofs are signed with the frozen test
  * keypairs — the ECDSA verification, canonical-body and admission-order code
  * paths all run for real.
+ *
+ * Case table A (#429) is the per-request lines of `authenticate`: the "API
+ * access" line it writes on every request it admits, by either path
+ * (`optionalAuth` writes it on the clientProofV1 path only), and the error line
+ * of a request that presents no Authorization header:
+ *
+ * | Row | Path          | goes unnoticed without the row                                          |
+ * |-----|---------------|-------------------------------------------------------------------------|
+ * | A1  | Bearer        | the account's address back in a line written on every request, or the  |
+ * |     |               | path read past `loggedPath`, so a `redactPaths` prefix no longer holds  |
+ * | A2  | clientProofV1 | the same, on the proven path's own copy of the line                     |
+ * | A3  | no header     | the request's header values — a session cookie — dumped into the line   |
+ * |     |               | that names which headers arrived, or its path read past `loggedPath`    |
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { setRedactPaths } from '@spfn/core/middleware';
 
 vi.mock('@spfn/auth/server', async (importOriginal) =>
 {
@@ -48,6 +62,7 @@ vi.mock('@/server/repositories', async (importOriginal) =>
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { usersRepository, accountDeletionRequestsRepository } from '@/server/repositories';
 import {
+    authLogger,
     decodeToken,
     verifyClientToken,
     keysRepository,
@@ -708,5 +723,68 @@ describe('replay ledger through the middleware (case table H)', () =>
         // The expired refusal spent nothing: the nonce is admissible when fresh.
         const fresh = contextFor({ headers: proofHeaders({ nonce }) });
         expect(await run(authenticate, fresh)).toBeNull();
+    });
+});
+
+describe('the API access line (case table A, #429)', () =>
+{
+    const ADDRESS = admissionRow().user.email;
+    const PATH = '/v1/protected/capability-token';
+
+    beforeEach(() =>
+    {
+        vi.clearAllMocks();
+        configureClientProofReplayStore(new MemoryReplayStore());
+        vi.mocked(keysRepository.updateLastUsedById).mockResolvedValue(undefined as never);
+        vi.mocked(keysRepository.findWithAccountEpochOnPrimary).mockResolvedValue(validKeyRecord() as never);
+        vi.mocked(usersRepository.findByIdWithRoleAndKeyOnPrimary).mockResolvedValue(admissionRow() as never);
+        setRedactPaths(['/v1/protected']);
+    });
+
+    afterEach(() =>
+    {
+        setRedactPaths(undefined);
+        vi.restoreAllMocks();
+    });
+
+    /** The context of every "API access" line written while the middleware ran. */
+    async function accessLinesOf(driven: DrivenContext): Promise<unknown[]>
+    {
+        const info = vi.spyOn(authLogger.middleware, 'info').mockImplementation(() => undefined);
+
+        expect(await run(authenticate, driven)).toBeNull();
+
+        return info.mock.calls.filter(([message]) => message === 'API access').map(([, context]) => context);
+    }
+
+    it('A1 Bearer: the line names the account by id, not by address, and the path through loggedPath', async () =>
+    {
+        vi.mocked(decodeToken).mockReturnValue({ keyId: TEST_KEY_ID } as never);
+        vi.mocked(verifyClientToken).mockReturnValue({ payload: { keyId: TEST_KEY_ID } } as never);
+
+        const lines = await accessLinesOf(contextFor({ path: PATH, headers: { Authorization: 'Bearer valid-token' } }));
+
+        expect(lines).toEqual([expect.objectContaining({ userId: USER_ID, path: '/v1/protected/[redacted]' })]);
+        expect(JSON.stringify(lines)).not.toContain(ADDRESS);
+    });
+
+    it('A2 clientProofV1: the line names the account by id, not by address, and the path through loggedPath', async () =>
+    {
+        const lines = await accessLinesOf(contextFor({ path: PATH, headers: proofHeaders({ path: PATH }) }));
+
+        expect(lines).toEqual([expect.objectContaining({ userId: USER_ID, scheme: 'clientProofV1', path: '/v1/protected/[redacted]' })]);
+        expect(JSON.stringify(lines)).not.toContain(ADDRESS);
+    });
+
+    it('A3 no Authorization header: the refusal line names the headers that arrived, not their values', async () =>
+    {
+        const error = vi.spyOn(authLogger.middleware, 'error').mockImplementation(() => undefined);
+        const driven = contextFor({ path: PATH, headers: { Cookie: 'session=cookie-value-a3' } });
+
+        await expectRefusal(await run(authenticate, driven), 401);
+
+        expect(error.mock.calls).toHaveLength(1);
+        expect(error.mock.calls[0][1]).toEqual({ headerNames: ['cookie'], path: '/v1/protected/[redacted]' });
+        expect(JSON.stringify(error.mock.calls)).not.toContain('cookie-value-a3');
     });
 });

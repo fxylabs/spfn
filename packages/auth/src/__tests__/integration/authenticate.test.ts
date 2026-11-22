@@ -93,7 +93,8 @@ describe('Authenticate Middleware', () =>
 
         mockNext = vi.fn();
         mockContext = {
-            req: { header: vi.fn() } as never,
+            // A Hono request always has a path; the access line logs it through loggedPath.
+            req: { header: vi.fn(), path: '/api/protected' } as never,
             json: vi.fn((data, status) => ({ data, status })) as never,
             set: vi.fn(),
             // A Hono context that has set() has get(); the double needs both,
@@ -116,7 +117,10 @@ describe('Authenticate Middleware', () =>
     {
         it('rejects a request without an Authorization header', async () =>
         {
-            (mockContext.req!.header as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+            // Without a name, a Hono request's header() is the record of every header.
+            (mockContext.req!.header as ReturnType<typeof vi.fn>).mockImplementation(
+                (name?: string) => (name === undefined ? {} : undefined),
+            );
 
             await expect(authenticate.handler(mockContext as Context, mockNext))
                 .rejects.toThrow('Authentication header missing or invalid');
@@ -126,7 +130,15 @@ describe('Authenticate Middleware', () =>
         it('rejects a request with a non-Bearer Authorization header', async () =>
         {
             (mockContext.req!.header as ReturnType<typeof vi.fn>).mockImplementation(
-                (name: string) => (name === 'Authorization' ? 'InvalidFormat token' : undefined),
+                (name?: string) =>
+                {
+                    if (name === undefined)
+                    {
+                        return { authorization: 'InvalidFormat token' };
+                    }
+
+                    return name === 'Authorization' ? 'InvalidFormat token' : undefined;
+                },
             );
 
             await expect(authenticate.handler(mockContext as Context, mockNext))

@@ -22,7 +22,7 @@
 
 import type { Context, Next } from 'hono';
 import { defineMiddleware } from '@spfn/core/route';
-import { getClientIp } from '@spfn/core/middleware';
+import { getClientIp, loggedPath } from '@spfn/core/middleware';
 import { UnauthorizedError } from '@spfn/core/errors';
 
 import type { ClientTokenRefusal, KeyAlgorithmType } from '@spfn/auth/server';
@@ -191,9 +191,11 @@ function bearerRefusal(c: Context, outcome: { refused: BearerRefusal }): Error
 {
     if (outcome.refused === 'absent')
     {
+        // Which headers arrived is what tells a missing forward apart; their
+        // values — a cookie, another credential — never reach the line.
         authLogger.middleware.error('Missing or invalid authorization header. If using Next.js API routes, ensure you have imported \'@spfn/auth/nextjs/api\' in your API route handler (e.g., src/app/api/actions/[[...path]]/route.ts) to enable automatic authentication header forwarding from client to backend.', {
-            headers: c.req.header(),
-            path: c.req.path,
+            headerNames: Object.keys(c.req.header()).sort(),
+            path: loggedPath(c),
         });
 
         return new UnauthorizedError({ message: 'Authentication header missing or invalid: Bearer {token}' });
@@ -338,15 +340,13 @@ export async function authenticateBearer(c: Context, next: Next, presentedOn: Pr
     // Available in downstream route handlers via c.get('auth')
     c.set('auth', authContextFor(admission.admitted, 'bearer'));
 
-    // Log API access
-    const method = c.req.method;
-    const path = c.req.path;
+    // Log API access — the account by id only: no address or name in a line
+    // written on every request (#429)
     authLogger.middleware.info('API access', {
         userId: user.id,
-        email: user.email,
         keyId,
-        method,
-        path,
+        method: c.req.method,
+        path: loggedPath(c),
         ip: getClientIp(c),
         userAgent: c.req.header('user-agent'),
     });

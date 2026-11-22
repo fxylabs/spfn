@@ -396,8 +396,11 @@ What it does not cover:
   lines carries a param value: its debug lines `→ RPC request` (`targetPath`) and
   `Found N matching interceptors for <method> <path>` name the route's pattern
   (`/api/import/:token`) and `routeName`, not the path the params fill in.
-- `@spfn/auth`'s log lines (its `API access` line and its warnings) read the path themselves
-  until it moves to `loggedPath`.
+- `@spfn/auth`'s refusal warnings — a refused role check (`requireRole`, `roleGuard`), a refused
+  permission check (`requirePermissions`, `requireAnyPermission`), and a machine credential on the
+  user path (`authenticate`, `optionalAuth`) — read the path themselves until they move to
+  `loggedPath`. Its `API access` line and its missing-authorization-header line read it through
+  `loggedPath`.
 - Prefer a request body over a path segment for a token where you can: a body reaches no
   access log.
 

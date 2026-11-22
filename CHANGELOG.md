@@ -248,6 +248,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **@spfn/auth: the "API access" line no longer carries the user's e-mail address (#429).** The
+  info line `@spfn/auth:middleware` writes for each request `authenticate` admits, by Bearer or by
+  clientProofV1, and each one `optionalAuth` admits by clientProofV1 (its Bearer path writes no
+  such line), logged `email` beside `userId`; it now logs `userId`, `keyId`, `method`, `path`, `ip`
+  and `userAgent` (and `scheme` on the proven path), and no address. There is no setting: `userId`
+  finds the account, and an app could not shape a line the package writes. A log query or alert
+  that read `email` from this line reads `userId` instead. Its `path` is now read through
+  `loggedPath(c)`, so a prefix declared with `defineServerConfig().logging({ redactPaths })` is
+  redacted in it as in core's own lines. Both are held by a test row per authentication path.
+- **@spfn/auth: the "Missing or invalid authorization header" line names the request's headers,
+  not their values (#429).** The error line `authenticate` writes for a request without a Bearer
+  `Authorization` header logged `headers` — every header of the request with its value, a session
+  `Cookie` among them — and the raw path. It now logs `headerNames`, the sorted names of the
+  headers that arrived, which is what tells a forward that dropped `Authorization` apart, and
+  `path` through `loggedPath(c)`. A log query that read a header's value from this line has no
+  replacement: the value is the secret. Held by a test row.
 - **BREAKING: spfn: `spfn db generate` with a project `drizzle.config.ts` loads the schema modules
   itself, as ESM, the way `db push` and `spfn dev` do (#405).** Before, with its own config, it
   handed the file to drizzle-kit and loaded no entity in its own process. It now writes
@@ -487,8 +503,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callback and admin-account create lines it holds the error's description, not its message. The
   passkey boot line ("…so boot continues.") moves the error's text from the message to
   `context.error`. Not changed here: the info-level "API access" line of
-  `@spfn/auth:middleware` logs the account's `email` on every authenticated request
-  (`authenticate.ts`, `auth-profiles.ts`).
+  `@spfn/auth:middleware`, which logged the account's `email` on each request it was written for
+  until #429 (above) removed it.
 - **BREAKING: @spfn/monitor: groups, events and the Slack message hold the error's description, and
   the fingerprint is the fault, not the message (#382).** `error_groups.message` stored the error's
   message and `error_events.stack_trace` its stack, the Slack message sent both, and the group was
@@ -1292,6 +1308,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PasskeyRevokedPayload`. The README documented all three and the package emitted them, but an app
   could not import them to subscribe. A unit test now fails when an event defined anywhere in the
   package's source is not exported and not named as deliberately private.
+  Reported again as #420 against 0.3.0-beta.53: the published `0.4.0-beta.1` predates the fix too —
+  its `dist/server.js` export block and `dist/server.d.ts` carry none of the three events nor
+  their payload types — so the first release with them is the next one after it.
+- **@spfn/auth: the export test also holds the payload types and the README (#420).** The test above
+  compared event objects at run time, so an event exported without its payload type still passed and
+  still built. Two rows now read the source with the type checker: every event
+  `server/events/index.ts` exports has a payload type exported beside it (the type of its
+  `_payload`), and `@spfn/auth/server` exports that same type; and every event or payload type the
+  README's Events section names is exported from `@spfn/auth/server`. The README's list of payload
+  types now names `MfaLockedPayload`, which was exported and not listed.
 - **@spfn/auth: the README no longer says seeded accounts are required to change their password
   (#361).** `passwordChangeRequired` is set for seeded accounts, returned by sign-in and cleared when
   the password changes; nothing in the package gates on it. An app that wants the change enforced

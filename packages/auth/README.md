@@ -6222,7 +6222,7 @@ Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayl
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
 disconnect, see the OAuth unlink-notify section), `OAuthLinkedPayload`, `OAuthLinkRemovedPayload`,
 `PasskeyEnrolledPayload`,
-`PasskeyRevokedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
+`PasskeyRevokedPayload`, `MfaLockedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
 `mfaEnrolled` in 0.3.0-beta.23; `AuthLoginPayload` gained `secondFactorEnrolmentRequired` with
 the second-factor policy (#309). These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.
@@ -6365,6 +6365,14 @@ guarantee — a private member, so an object literal or a spread of another prin
 compile as one; it is not checked at run time. A `new` from outside throws, and the package's
 own source is scanned in its test suite for a cast to a principal type. An app's own door admits with
 `admitPrincipal` and hands the result on with `authContextFor(principal, scheme)`.
+
+Once admitted, a request writes one info line, `API access`, on `@spfn/auth:middleware` — on
+`authenticate`'s Bearer and clientProofV1 paths and on `optionalAuth`'s clientProofV1 path;
+`optionalAuth` admitting a Bearer token writes none. The line holds `userId`, `keyId`, `method`,
+`path`, `ip`, `userAgent`, and `scheme` on the proven path. It names the account by id only — no
+address, no name; `userId` finds the account. `path` is read through `loggedPath(c)` from
+`@spfn/core/middleware`, so a prefix declared with `defineServerConfig().logging({ redactPaths })`
+is written `<prefix>/[redacted]` here too.
 
 ### Account status (`setAccountStatus`)
 
