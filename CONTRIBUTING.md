@@ -338,6 +338,26 @@ run, and a run whose job is skipped posts `skipped` under the check's own status
 which Gitea counts as passing. Until Gitea Actions has passed once, Woodpecker
 (`.woodpecker/`) still checks pull requests as before.
 
+**The publish token is as protected as push access is.** A Gitea repository secret
+(`NPM_PUBLISH_TOKEN`) is handed to a workflow file read from any branch of this
+repository; only a pull request from a fork gets none. A pull request's run reads
+its workflow files from the pull request's head, and a manual run reads them from
+the branch it is started on. So anyone who can push a branch can write a workflow
+that reaches the token. `release.yml`'s `if: github.ref == 'refs/heads/main'`
+stops a manual run on another branch from publishing by accident; it is no
+protection against a branch that changes `release.yml` itself.
+
+**Until `.gitea/workflows` is on `main`, Gitea runs `.github/workflows`.** Gitea
+reads the first of `.gitea/workflows` and `.github/workflows` that the commit it
+runs for has. With Actions enabled and this directory not yet on `main`, that is
+the GitHub workflows: the 14 `publish-*.yml` on a main push changing their
+package's manifest, `check-versions.yml` on main pushes and pull requests,
+`verify-mobile-contract.yml` on changes to the mobile contract, and the daily
+`security-audit.yml`. There is no npm token on Gitea, so they fail or do nothing;
+they are noise, not a publish. They stop for `main` when `.gitea/workflows`
+reaches it. A pull request's run reads the pull request's head, so a branch cut
+before that merge keeps running `check-versions.yml` until it is rebased.
+
 ## Working with AI agents
 
 Most contributors will use AI assistance, and that's welcome. Two expectations:
