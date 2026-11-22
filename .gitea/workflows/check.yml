@@ -37,6 +37,15 @@ jobs:
         runs-on: linux-amd64
         container:
             image: node:22
+            # An init process as PID 1. The job container's own PID 1 does
+            # not reap orphans, so a grandchild that outlives its parent stays
+            # a zombie; `kill(-pgid, 0)` still answers for a zombie, and
+            # `spfn dev` waits for its children's process groups to be empty
+            # (dev-supervisor.ts, `groupEnded`). In the first run all 26 rows
+            # of cli's dev-signals.test.ts failed with "spfn dev did not exit"
+            # for that reason. Woodpecker ran each step as the container's
+            # PID 1 shell, which reaps.
+            options: --init
         defaults:
             run:
                 shell: bash
