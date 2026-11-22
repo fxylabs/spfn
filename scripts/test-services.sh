@@ -11,7 +11,8 @@
 #
 #   start    start the Redis instances and create the logical databases
 #   stop     stop the Redis instances started here (the main 6379 is untouched)
-#   status   report what is up
+#   status   report what is up, connecting to each database as the tests do;
+#            exits 1 when anything is down
 #
 set -euo pipefail
 
@@ -137,8 +138,20 @@ create_databases()
     done
 }
 
+# As the tests connect: as the package's role, to its database, through
+# `localhost` — the name their URLs resolve, which can answer on ::1 where
+# 127.0.0.1 does. A database the tests cannot reach is skipped by some of them
+# rather than failed, so it is reported here, with psql's reason.
+connect_as_role()
+{
+    PGPASSWORD="$3" psql -h localhost -p "$PG_PORT" -U "$1" -d "$2" -w -Atc 'SELECT 1' 2>&1
+}
+
+# Exits 1 when anything it reports is down.
 report_status()
 {
+    local down=0
+
     for port in "${REDIS_PORTS[@]}"
     do
         if ping_redis "$port"
@@ -146,23 +159,33 @@ report_status()
             echo "redis :$port — up"
         else
             echo "redis :$port — down"
+            down=1
         fi
     done
 
     replication=$(redis-cli -p 6481 info replication 2>/dev/null | grep -c 'master_link_status:up' || true)
-    echo "redis 6480→6481 replication — $([ "$replication" = 1 ] && echo up || echo down)"
+    if [ "$replication" = 1 ]
+    then
+        echo "redis 6480→6481 replication — up"
+    else
+        echo "redis 6480→6481 replication — down"
+        down=1
+    fi
 
     for entry in "${PG_DATABASES[@]}"
     do
-        IFS=':' read -r _ _ _ database <<< "$entry"
+        IFS=':' read -r _ role password database <<< "$entry"
 
-        if run_sql -Atc "SELECT 1 FROM pg_database WHERE datname = '$database'" 2>/dev/null | grep -q 1
+        if reason=$(connect_as_role "$role" "$database" "$password")
         then
-            echo "postgres :$PG_PORT — $database up"
+            echo "postgres localhost:$PG_PORT — $database up (as $role)"
         else
-            echo "postgres :$PG_PORT — $database missing"
+            echo "postgres localhost:$PG_PORT — $database down (as $role): $reason"
+            down=1
         fi
     done
+
+    return "$down"
 }
 
 case "${1:-start}" in

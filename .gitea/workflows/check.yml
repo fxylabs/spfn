@@ -187,6 +187,14 @@ jobs:
                       *) exit "$IN_SCOPE" ;;
                   esac
 
+            # Auth's database files are skipped, not failed, when their database
+            # does not answer (`describe.skipIf(!dbAvailable)`), so a green Test
+            # could come from suites that never ran. `status` connects as each
+            # role test-services.sh creates, to its database, through
+            # `localhost` as the tests do, and fails here if any of it is down.
+            - name: Test services reachable
+              run: ./scripts/test-services.sh status
+
             # `--concurrency=1` is not a throttle to relax: the packages share
             # one PostgreSQL and one Redis. TEST_DATABASE_URL and
             # TEST_APP_DATABASE_URL stay unset, so each package's helper uses
