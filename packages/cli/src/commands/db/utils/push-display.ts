@@ -8,7 +8,7 @@ import chalk from 'chalk';
 import type { ClassificationResult, ClassifiedStatement } from './sql-classifier.js';
 import type { PendingFunctionMigrations } from '@spfn/core/db';
 import { qualifiedName, quoteIdent } from '../tenant/plan.js';
-import type { UnchangedCheck } from './unchanged-checks.js';
+import type { UncomparedCheck } from './changed-checks.js';
 
 // ============================================================================
 // Helpers
@@ -113,38 +113,32 @@ export function displayApplySummary(applied: number, skipped: number): void
 }
 
 /**
- * How a check push leaves as it is stands against the stored one: what the
- * comparison found, not more (see unchangedChecks)
+ * Name each existing check push could not compare before applying (see
+ * compareChecks), why, and that it stays as it is
  */
-function unchangedState(check: UnchangedCheck): string
-{
-    if (check.absentColumn !== undefined)
-    {
-        return `differs from the one in the database: it names a column the table does not have yet (${check.absentColumn})`;
-    }
-
-    return check.error === undefined
-        ? 'differs from the one in the database: PostgreSQL reads the two expressions differently'
-        : `could not be compared with the one in the database (${check.error})`;
-}
-
-/**
- * Warn about each check push leaves as it is (see unchangedChecks), with the
- * two ways to change it
- */
-export function displayUnchangedChecks(checks: UnchangedCheck[]): void
+export function displayUncomparedChecks(checks: UncomparedCheck[]): void
 {
     for (const check of checks)
     {
         const table = qualifiedName({ schema: check.schema, name: check.table });
 
-        console.log(chalk.yellow(`⚠️  Check "${check.name}" on ${table} ${unchangedState(check)}; db push does not change an existing check.`));
-        console.log(chalk.dim('   Run spfn db generate and spfn db migrate, or drop it and push again:'));
-        console.log(chalk.dim(`   ALTER TABLE ${table} DROP CONSTRAINT ${quoteIdent(check.name)};`));
+        console.log(chalk.yellow(`⚠️  Check ${quoteIdent(check.name)} on ${table} was not compared, and stays as it is: ${check.reason}`));
     }
 
     if (checks.length > 0)
     {
         console.log('');
+    }
+}
+
+/**
+ * Name, in one line, the kinds of declared object push does not compare (see
+ * uncomparedKinds), and how to change one; nothing when the schema declares none
+ */
+export function displayUncomparedKinds(kinds: string[]): void
+{
+    if (kinds.length > 0)
+    {
+        console.log(chalk.dim(`ℹ️  Not compared by db push: ${kinds.join(', ')} — to change one, run spfn db generate and spfn db migrate, or drop it and push again\n`));
     }
 }

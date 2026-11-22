@@ -1236,6 +1236,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **spfn: `db push` replaces a check whose expression changed (#442).** drizzle-kit 1.0.0-rc.4's
+  push never alters an existing check (`mode !== "push"` in its diff): PostgreSQL stores a check
+  normalised (`op in ('a', 'b')` reads back as `(op = ANY (ARRAY['a'::text, 'b'::text]))`), so the
+  declared text cannot be compared with the stored one, and the database went on enforcing the old
+  expression — a value added to the list was refused on insert. `db push` now compares each
+  declared check the table holds under its name with PostgreSQL's own normalisation, without
+  touching the table: in a transaction it always rolls back, it builds a temporary table from the
+  table's declared columns (the types the push leaves), adds the declared check to it, and compares
+  the two as PostgreSQL stores them (`pg_get_expr`). One that differs gets one statement in the
+  plan, `ALTER TABLE … DROP CONSTRAINT IF EXISTS "<name>", ADD CONSTRAINT "<name>" CHECK (…)`,
+  after drizzle-kit's statements (a column they drop may have taken the old check already), listed by
+  `--dry-run` and applied with the other project statements in their transaction; it is a warning,
+  not a destructive change (it deletes no data), so it needs no confirmation. Its `ADD` re-checks
+  every row: a row the new expression refuses fails the push with the statement, and the old check
+  stays. A check that cannot be compared before the push is left as it is and named —
+  `Check "<name>" on … was not compared, and stays as it is:`, the reason and PostgreSQL's message —
+  when PostgreSQL refuses the declared check while this push creates an enum or changes its values
+  (through a column of the type or a cast inside the expression; the next push compares it), or
+  when the target refuses the temporary table (a dry run against a read-only database or a
+  standby, which still plans); with nothing else to apply, push then ends with `No statements to
+  apply; the checks above stay as they are`. With no enum to create or change, a declared
+  expression PostgreSQL refuses over the declared columns ends the plan (`Planning failed — nothing
+  was applied`, the SQLSTATE, `In: check "<name>" on …, as declared` and the statement). This
+  replaces the notice of
+  spfn/spfn#167 (`differs from the one in the database … db push does not change an existing
+  check`) and its `EXPLAIN` comparison. What else drizzle-kit's push does not compare — an index's
+  columns (when their number is unchanged) and `WHERE`, view definitions, policy `USING` / `WITH
+  CHECK`, generated column expressions — is named in one line (`Not compared by db push: …`) when
+  the schema declares such an object, above the plan or its closing line.
 - **@spfn/auth: `revoke-all` from an application profile no longer spares a device key that shares
   the profile's key id (#372).** `POST /_auth/keys/revoke-all` spared whatever key id the request
   reported (`getAuth(c).keyId`). For an application profile that is the id its verifier reports, and

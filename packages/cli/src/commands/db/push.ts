@@ -20,9 +20,11 @@ import {
     displayDryRunSummary,
     displayApplySummary,
     displayPendingFunctionMigrations,
-    displayUnchangedChecks,
+    displayUncomparedChecks,
+    displayUncomparedKinds,
 } from './utils/push-display.js';
-import { declaredChecks, unchangedChecks, type UnchangedCheck } from './utils/unchanged-checks.js';
+import { compareChecks, declaredEntities, type UncomparedCheck } from './utils/changed-checks.js';
+import { uncomparedKinds } from './utils/uncompared-kinds.js';
 import {
     discoverFunctionMigrations,
     loadFunctionMigrationPlans,
@@ -45,14 +47,24 @@ export interface PushPlan
 {
     statements: string[];
     hints: PushHint[];
-    /** Existing checks PostgreSQL reads differently from the declared ones, or could not compare: pushSchema leaves them as they are */
-    unchangedChecks: UnchangedCheck[];
+    /** The kinds of declared object push does not compare (uncomparedKinds), each with how many */
+    uncompared: string[];
+    /** Existing checks push could not compare before applying (compareChecks), left as they are */
+    uncomparedChecks: UncomparedCheck[];
 }
 
+/**
+ * The project's plan: pushSchema's hints and statements, then the replacement
+ * of each existing check whose declared expression PostgreSQL stores
+ * differently (compareChecks), compared in `inRolledBackTransaction`: a
+ * transaction on the one session `db` runs on, never a pool's (see
+ * PushConnection.inRolledBackTransaction).
+ */
 export async function resolvePushPlan(
     imports: Record<string, unknown>,
     db: PushConnection['db'],
     schemaFilter: string[],
+    inRolledBackTransaction: PushConnection['inRolledBackTransaction'],
 ): Promise<PushPlan>
 {
     const { pushSchema } = await import('drizzle-kit/api-postgres');
@@ -68,11 +80,14 @@ export async function resolvePushPlan(
     );
     const pushHints = hints as PushHint[];
     const hintStatements = pushHints.flatMap(hint => hint.statement ? [hint.statement] : []);
+    const entities = await declaredEntities(imports, schemaFilter);
+    const checks = await compareChecks(db, inRolledBackTransaction, entities);
 
     return {
-        statements: [...hintStatements, ...sqlStatements],
+        statements: [...hintStatements, ...sqlStatements, ...checks.replacements],
         hints: pushHints,
-        unchangedChecks: await unchangedChecks(db, await declaredChecks(imports, schemaFilter)),
+        uncompared: uncomparedKinds(entities),
+        uncomparedChecks: checks.uncompared,
     };
 }
 
@@ -151,7 +166,11 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  *   refuses any write and the dry run holds no lock between statements. Before
  *   the plan runs, `transaction_read_only` is read once, in one such
  *   transaction; every plan query then opens its transaction with the same
- *   `BEGIN READ ONLY`. When that read is not `on` it exits 1 instead
+ *   `BEGIN READ ONLY`. When that read is not `on` it exits 1 instead. The
+ *   one exception is comparing an existing check (compareChecks): one
+ *   transaction per check, rolled back, that writes only a temporary table
+ *   of its own and never touches the live one; a target that refuses it
+ *   leaves the check not compared, and the plan goes on
  * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
@@ -164,10 +183,12 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  * of the diff: the package's own migrations carry them (step 9).
  *
  * drizzle-kit's push never alters an existing check whose expression changed
- * (an `enumCheck` given another value): push warns about each existing check
- * whose declared expression PostgreSQL reads differently from the stored one,
- * with the remedy, and changes nothing about it (see unchangedChecks for what
- * the comparison does and does not catch).
+ * (an `enumCheck` given another value): push compares each existing check with
+ * PostgreSQL's own normalisation, on a temporary table in a transaction it
+ * rolls back — on a dry run too — and replaces each that differs, naming each
+ * it could not compare (compareChecks). What else drizzle-kit's push does not
+ * compare is named in one line when the schema declares such an object
+ * (uncomparedKinds).
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
@@ -214,7 +235,12 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
     // 4. Connect. A dry run runs each plan query in a read-only transaction
     //    of its own, so PostgreSQL refuses any write attempted on it.
     const connection = await openPushConnectionOrExit(databaseUrl, options.dryRun);
-    const target: PushTarget = { db: connection.db, databaseUrl, schemas: [...grantTarget.schemas] };
+    const target: PushTarget = {
+        db: connection.db,
+        inRolledBackTransaction: connection.inRolledBackTransaction,
+        databaseUrl,
+        schemas: [...grantTarget.schemas],
+    };
 
     try
     {
@@ -262,12 +288,14 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 }
 
 /**
- * Where push writes, as its failure lines need it: the connection (the owner's),
- * its URL to keep out of the output, and the PostgreSQL schemas push manages.
+ * Where push writes, as its failure lines need it: the connection (the owner's)
+ * and its rolled-back transactions, its URL to keep out of the output, and the
+ * PostgreSQL schemas push manages.
  */
 interface PushTarget
 {
     db: PushConnection['db'];
+    inRolledBackTransaction: PushConnection['inRolledBackTransaction'];
     databaseUrl: string;
     schemas: string[];
 }
@@ -314,11 +342,12 @@ async function grantOrExit(grantTarget: AppPrivilegesTarget, target: PushTarget,
 }
 
 /**
- * Plan both halves, reading only: the project diff via pushSchema, the checks
- * it leaves as they are, and each function package's pending migrations.
- * drizzle-kit reads each table it would drop a column of, or drop, for its
- * data-loss check, so a table the owner may not read fails here, before any
- * write — and ends push as a failed write does.
+ * Plan both halves: the project diff via pushSchema and the checks it would
+ * leave as they are (compared on temporary tables that roll back), and each
+ * function package's pending migrations. drizzle-kit reads each table it would
+ * drop a column of, or drop, for its data-loss check, so a table the owner may
+ * not read fails here, before any write — and ends push as a failed write
+ * does; so does a declared check expression PostgreSQL refuses.
  */
 async function planOrExit(
     imports: Record<string, unknown>,
@@ -330,7 +359,7 @@ async function planOrExit(
     try
     {
         return {
-            plan: await resolvePushPlan(imports, target.db, schemaFilter),
+            plan: await resolvePushPlan(imports, target.db, schemaFilter, target.inRolledBackTransaction),
             pending: await pendingFunctionMigrations(target.db, functionPlans),
         };
     }
@@ -401,8 +430,8 @@ async function openPushConnectionOrExit(databaseUrl: string, dryRun?: boolean): 
 }
 
 /**
- * Print pushSchema's hints, the checks it leaves as they are, and the
- * classified project statements, or that the project schema has none.
+ * Print pushSchema's hints, what push does not compare, and the classified
+ * project statements, or that the project schema has none.
  */
 function displayProjectPlan(plan: PushPlan, result: ClassificationResult | undefined, dryRun?: boolean): void
 {
@@ -410,9 +439,10 @@ function displayProjectPlan(plan: PushPlan, result: ClassificationResult | undef
     {
         console.log(chalk.yellow(`⚠️  ${hint.hint}`));
     }
-    displayUnchangedChecks(plan.unchangedChecks);
+    displayUncomparedChecks(plan.uncomparedChecks);
+    displayUncomparedKinds(plan.uncompared);
 
-    if (!result && plan.unchangedChecks.length > 0)
+    if (!result && plan.uncomparedChecks.length > 0)
     {
         console.log(chalk.yellow('No statements to apply; the checks above stay as they are\n'));
     }

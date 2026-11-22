@@ -118,7 +118,10 @@ vi.mock('../utils/drizzle.js', async (importOriginal) => ({
 
 /** One project statement to apply, and no pending package migration to list. */
 vi.mock('drizzle-kit/api-postgres', () => ({ pushSchema: vi.fn(async () => ({ sqlStatements: ['CREATE TABLE "notes" ("id" integer)'], hints: [] })) }));
-vi.mock('../utils/unchanged-checks.js', () => ({ declaredChecks: vi.fn(async () => []), unchangedChecks: vi.fn(async () => []) }));
+vi.mock('../utils/changed-checks.js', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../utils/changed-checks.js')>(),
+    declaredEntities: vi.fn(async () => []),
+}));
 vi.mock('@spfn/core/db', async (importOriginal) => ({
     ...await importOriginal<typeof import('@spfn/core/db')>(),
     pendingFunctionMigrations: vi.fn(async () => []),

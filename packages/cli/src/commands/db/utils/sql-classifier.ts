@@ -26,6 +26,16 @@ export interface ClassificationResult
 }
 
 // ============================================================================
+// Check replacement (checked before the destructive patterns: its DROP
+// CONSTRAINT deletes no data, and the ADD in the same statement re-creates it)
+// ============================================================================
+
+const REPLACE_CHECK = {
+    pattern: /^\s*ALTER\s+TABLE\s+.+?\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+("(?:[^"]|"")+")\s*,\s*ADD\s+CONSTRAINT\s+\1\s+CHECK\b/is,
+    reason: 'Replaces a check (fails if a row violates the new expression)',
+};
+
+// ============================================================================
 // Destructive patterns (checked first — highest priority)
 // ============================================================================
 
@@ -62,7 +72,12 @@ const WARNING_PATTERNS: Array<{ pattern: RegExp; reason: string }> =
  */
 export function classifyStatement(sql: string): ClassifiedStatement
 {
-    // Check destructive first (highest priority)
+    if (REPLACE_CHECK.pattern.test(sql))
+    {
+        return { sql, category: 'warning', reason: REPLACE_CHECK.reason };
+    }
+
+    // Then destructive (highest priority of the patterns)
     for (const { pattern, reason } of DESTRUCTIVE_PATTERNS)
     {
         if (pattern.test(sql))

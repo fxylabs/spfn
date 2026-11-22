@@ -759,6 +759,14 @@ export interface PushConnection
     db: any;
     query: (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
     close: () => Promise<void>;
+    /**
+     * Run `work` in one transaction that always rolls back, on a drizzle
+     * database bound to it — with `readOnly` too: a plain `BEGIN`, so `work`
+     * may write where the target's default allows it, and nothing it writes
+     * stays. It holds its locks until the rollback; run nothing else on the
+     * connection meanwhile.
+     */
+    inRolledBackTransaction: <T>(work: (db: any) => Promise<T>) => Promise<T>;
     /** With `readOnly`: `transaction_read_only` as the server reports it inside one of the read-only transactions */
     transactionReadOnly?: string;
 }
@@ -777,6 +785,8 @@ type Queryable = { query: (...args: any[]) => Promise<any> };
  * holds no lock between statements. The mode is set by a statement, not a
  * startup parameter, so a pooler cannot drop it; `transactionReadOnly` is read
  * back the same way, and the caller checks it before the plan runs.
+ * `inRolledBackTransaction` is the one way to write on it: a transaction
+ * that never commits, on the client itself.
  *
  * Uses `pg` (node-postgres) because drizzle-kit's internal adapter expects
  * `execute()` to return `{ rows: [...] }`, which `pg` provides but
@@ -795,6 +805,7 @@ export async function createPushConnection(databaseUrl: string, options: { readO
         db: drizzle({ client: queryable as typeof client }),
         query: async (text, params) => (await queryable.query(text, params)).rows,
         close: () => client.end(),
+        inRolledBackTransaction: work => inRolledBackTransaction(client, drizzle({ client }), work),
     };
 
     return options.readOnly ? withReadOnlySetting(connection) : connection;
@@ -833,6 +844,20 @@ function readOnlyQueries(client: Queryable): Queryable
             return result;
         },
     };
+}
+
+/** `work` on `db`, bound to `client`, between `BEGIN` and a `ROLLBACK` that runs however `work` ends. */
+async function inRolledBackTransaction<T>(client: Queryable, db: unknown, work: (db: any) => Promise<T>): Promise<T>
+{
+    await client.query('BEGIN');
+    try
+    {
+        return await work(db);
+    }
+    finally
+    {
+        await client.query('ROLLBACK');
+    }
 }
 
 /** Read back, inside one of the read-only transactions, whether the server holds it read-only. */

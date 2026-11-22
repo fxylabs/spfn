@@ -265,15 +265,10 @@ ALTER TABLE "spfn_blog"."posts" DROP CONSTRAINT "posts_status_check", ADD CONSTR
 > does not emit `NOT VALID`. Removing a value fails the `ADD` while a row still holds it:
 > update those rows first.
 
-> **`db push` does not change an existing check.** drizzle-kit's push creates a check the
-> database lacks, but never alters one whose values changed: after a push, the database
-> still refuses the added value and admits the removed one. `spfn db push` (and `--dry-run`)
-> names each such check — `Check "posts_status_check" on "spfn_blog"."posts" differs from
-> the one in the database: PostgreSQL reads the two expressions differently` — and leaves it.
-> For a check `enumCheck` wrote on both sides this is exact: it is named exactly when the
-> value set changed (the `spfn` README says what the comparison catches for other checks).
-> To change it, run `db generate` + `db migrate`, or drop the constraint (the printed
-> `ALTER TABLE … DROP CONSTRAINT`) and push again.
+> **`db push` replaces it too.** drizzle-kit's push never alters an existing check;
+> `spfn db push` compares each with PostgreSQL's own normalisation and, when the values
+> changed, plans one `DROP CONSTRAINT IF EXISTS …, ADD CONSTRAINT …` statement, listed by
+> `--dry-run` (the `spfn` README, `db push`). Its `ADD` re-checks every row as above.
 
 ### `typedJsonb<T>(fieldName)`
 
