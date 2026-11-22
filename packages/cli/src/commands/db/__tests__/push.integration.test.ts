@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
-import { sql } from 'drizzle-orm';
 import { bigint, pgTable, primaryKey } from 'drizzle-orm/pg-core';
 
 import { applyStatements, resolvePushPlan } from '../push.js';
+import { planConnectionOn } from './helpers/pglite-plan.js';
 
 const blocks = pgTable('blocks', {
     blockerUserId: bigint('blocker_user_id', { mode: 'number' }).notNull(),
@@ -12,23 +12,6 @@ const blocks = pgTable('blocks', {
 }, table => [
     primaryKey({ columns: [table.blockerUserId, table.blockedUserId] }),
 ]);
-
-/** A transaction that always rolls back, on PGlite's one session — as push's connection gives the plan */
-function rolledBackOn(db: ReturnType<typeof drizzle>)
-{
-    return async <T>(work: (tx: typeof db) => Promise<T>): Promise<T> =>
-    {
-        await db.execute(sql.raw('BEGIN'));
-        try
-        {
-            return await work(db);
-        }
-        finally
-        {
-            await db.execute(sql.raw('ROLLBACK'));
-        }
-    };
-}
 
 describe('db push', () =>
 {
@@ -49,11 +32,11 @@ describe('db push', () =>
     {
         const db = drizzle({ client });
 
-        const first = await resolvePushPlan({ blocks }, db, ['public'], rolledBackOn(db));
+        const first = await resolvePushPlan({ blocks }, planConnectionOn(client), ['public']);
         expect(first.statements).toHaveLength(1);
         await applyStatements(db, first.statements);
 
-        const second = await resolvePushPlan({ blocks }, db, ['public'], rolledBackOn(db));
+        const second = await resolvePushPlan({ blocks }, planConnectionOn(client), ['public']);
         expect(second.statements).toEqual([]);
         expect(second.hints).toEqual([]);
     });

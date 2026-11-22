@@ -94,12 +94,13 @@ export async function declaredEntities(imports: Record<string, unknown>, schemaF
  * same name, with the stored one. A check the database lacks is not compared:
  * push creates it. A declared expression PostgreSQL refuses over the declared
  * columns ends the plan with its error, unless this push creates or changes a
- * type: then the check is not compared.
+ * type (`changedTypes`, typesThisPushChanges): then the check is not compared.
  */
 export async function compareChecks(
     db: Db,
     inRolledBackTransaction: InRolledBackTransaction,
     entities: DeclaredEntity[],
+    changedTypes: string[],
 ): Promise<CheckComparison>
 {
     const declared = entities.flatMap(entity => entity.entityType === 'checks'
@@ -107,7 +108,6 @@ export async function compareChecks(
         : []);
     const stored = declared.length === 0 ? new Map<string, string>() : await storedChecks(db, declared);
     const existing = declared.filter(check => stored.has(checkKey(check)));
-    const changedTypes = existing.length === 0 ? [] : await typesThisPushChanges(db, entities);
     const comparison: CheckComparison = { replacements: [], uncompared: [] };
 
     for (const check of existing)
@@ -152,8 +152,15 @@ function onTableOf(check: DeclaredCheck, entity: { schema: string; table: string
     return entity.schema === check.schema && entity.table === check.table;
 }
 
-/** The declared enums the database lacks, or holds with other values, each as `"schema"."name"` */
-async function typesThisPushChanges(db: Db, entities: DeclaredEntity[]): Promise<string[]>
+/**
+ * The declared enums the database lacks, or holds with other values, each as
+ * `"schema"."name"`: read on the database as it is before the push, as the
+ * statements that create or change them may already have run where the checks
+ * are compared — in the transaction of a plan in two steps, a value
+ * `ALTER TYPE … ADD VALUE` added is there to read, but PostgreSQL refuses its
+ * use until that transaction commits (55P04).
+ */
+export async function typesThisPushChanges(db: Db, entities: DeclaredEntity[]): Promise<string[]>
 {
     const enums = entities.filter((entity): entity is DeclaredEnum => entity.entityType === 'enums');
     const { rows } = enums.length === 0 ? { rows: [] } : await db.execute(sql`

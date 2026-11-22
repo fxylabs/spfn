@@ -9,6 +9,7 @@ import type { ClassificationResult, ClassifiedStatement } from './sql-classifier
 import type { PendingFunctionMigrations } from '@spfn/core/db';
 import { qualifiedName, quoteIdent } from '../tenant/plan.js';
 import type { UncomparedCheck } from './changed-checks.js';
+import type { Replacement } from './push-steps.js';
 
 // ============================================================================
 // Helpers
@@ -110,6 +111,30 @@ export function displayApplySummary(applied: number, skipped: number): void
     }
 
     console.log('');
+}
+
+/** One kind with objects both removed and added, on one line: `column on "s"."t": "old" removed, "new" added`. */
+export function replacementLine(replacement: Replacement): string
+{
+    const where = replacement.table ? ` on ${replacement.table}` : '';
+
+    return `${replacement.kind}${where}: ${replacement.removed.join(', ')} removed, ${replacement.added.join(', ')} added`;
+}
+
+/**
+ * Say which kinds the plan drops, then creates, rather than renames, and
+ * what to use for a rename
+ */
+export function displayReplacements(replacements: Replacement[]): void
+{
+    if (replacements.length === 0)
+    {
+        return;
+    }
+
+    console.log(chalk.yellow('ℹ️  db push does not rename: what is removed is dropped first, then what is added is created.'));
+    replacements.forEach(replacement => console.log(chalk.yellow(`   ${replacementLine(replacement)}`)));
+    console.log(chalk.dim('   To rename instead, use spfn db generate and spfn db migrate.\n'));
 }
 
 /**

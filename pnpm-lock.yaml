@@ -368,6 +368,9 @@ importers:
       fs-extra:
         specifier: ^11.2.0
         version: 11.3.2
+      minimatch:
+        specifier: ^11.0.1
+        version: 11.0.9
       ora:
         specifier: ^7.0.1
         version: 7.0.1

@@ -1265,6 +1265,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns (when their number is unchanged) and `WHERE`, view definitions, policy `USING` / `WITH
   CHECK`, generated column expressions — is named in one line (`Not compared by db push: …`) when
   the schema declares such an object, above the plan or its closing line.
+- **spfn: `db push` drops, then creates, what one push removes and adds of one kind, instead of
+  dying with `resolver(table) was called without a HintsHandler` (spfn/spfn#173).** Drizzle Kit's
+  `pushSchema` asks whether an object removed and one added of the same kind are a rename and takes
+  no answer, so a push that removed table `a` and added table `b` — or a column, index, unique
+  constraint, check, foreign key or policy in one table, or a schema, enum, sequence or view — ended
+  at the plan stage, `--force`, terminal or not. `db push` does not rename: it plans as before, one
+  `pushSchema` diff, and only when Drizzle Kit throws that error for a kind does it plan that kind in
+  two steps, each with nothing to ask — in one transaction that always rolls back, the drops, then
+  the creates from the state after them — shown as one plan (`ℹ️  db push does not rename`, each kind
+  with what is removed and added), confirmed once, applied in that order. Every other push plans as
+  before. A dry run that needs two steps runs them in that rolled-back transaction instead of
+  read-only ones; such a plan, dry run or not, holds the `ACCESS EXCLUSIVE` locks of its `ALTER
+  TABLE`/`DROP TABLE` on existing tables until the rollback, waiting for them as long as the
+  server's `lock_timeout` lets it (push sets none, as for applying). A primary key replaced by
+  another, which a table cannot hold beside the old, stops push at the plan stage with nothing
+  applied (`Planning stopped — nothing was applied`), naming the kind, the table and both keys.
+  Before the drops are planned push creates the added objects of the reported kind, every added
+  schema, enum, sequence, table and column, all that is added in an added schema or table, every
+  added object that names one of those by identifier, and the keys a foreign key among them
+  references. An object names an added one when it lists a column its table gains, or when a
+  token of its expressions (an index's expression or predicate, a check, a policy) equals the name
+  of a column its table gains or of a table, view, enum or sequence this push adds in any schema,
+  whatever the token's role there — a cast's type, a function, the object's own column — and
+  whatever schema qualifies it; comments, string literals (`'…'`, `E'…'` with its backslash
+  escapes, dollar-quoted `$$…$$`) and numbers are skipped as PostgreSQL reads them with
+  `standard_conforming_strings` on. The rule reads text, so it can take in an object that only shares
+  a name (an index on `lower("category")` beside a new table `category`, one over
+  `("created"::date)` beside a new column `date`) and miss a dependency through another table (a
+  policy whose subquery names a column another table gains). When what it creates first keeps a
+  name an object the push drops still holds — an index moving from a replaced table, a table named
+  like a dropped enum — push stops at the plan stage with nothing applied (`Planning stopped —
+  nothing was applied`), naming the object, the holder of its name and, when it is created first
+  because it names one, the added object it names by identifier; a missed dependency fails at the
+  plan stage with PostgreSQL's error, nothing applied. Either way: `db generate` + `db migrate`,
+  or push in two pushes. To rename, use `db generate` + `db migrate`. A push planned in two steps
+  compares the existing checks (#442) in its own rolled-back transaction, after both steps, on the
+  tables as they leave them: a check changed on a table the steps leave is replaced after their
+  statements, as on a plain push, and one the steps drop with its column and create as declared
+  is not replaced again. Which enums the push creates or changes is read before the steps, as on a
+  plain push, so a check PostgreSQL refuses there because the steps added an enum value it names
+  (a value is usable only once its transaction commits) is not compared, and the push applies.
+  `DROP VIEW`, `DROP MATERIALIZED VIEW`, `DROP SEQUENCE`,
+  `DROP POLICY` and `ALTER TABLE … DISABLE ROW LEVEL SECURITY` are now destructive, so they wait for
+  `--force` or the confirmation like `DROP TABLE`.
+
 - **@spfn/auth: `revoke-all` from an application profile no longer spares a device key that shares
   the profile's key id (#372).** `POST /_auth/keys/revoke-all` spared whatever key id the request
   reported (`getAuth(c).keyId`). For an application profile that is the id its verifier reports, and

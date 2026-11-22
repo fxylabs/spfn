@@ -37,6 +37,12 @@ const REPLACE_CHECK = {
 
 // ============================================================================
 // Destructive patterns (checked first — highest priority)
+//
+// Only pushSchema's statements are classified; the privileges step after push
+// (app-grants.ts) is not, so its REVOKEs never wait for a confirmation. No
+// pattern for DROP ROLE or REVOKE: in push drizzle-kit 1.0.0-rc.4 plans no
+// privilege (fromDatabaseForDrizzle clears them) and no role (none is admitted
+// without `entities.roles`, which push does not pass).
 // ============================================================================
 
 const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> =
@@ -45,6 +51,11 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> =
         { pattern: /^\s*DROP\s+INDEX/i, reason: 'Drops index' },
         { pattern: /^\s*DROP\s+SCHEMA/i, reason: 'Drops schema' },
         { pattern: /^\s*DROP\s+TYPE/i, reason: 'Drops custom type' },
+        { pattern: /^\s*DROP\s+VIEW/i, reason: 'Drops view' },
+        { pattern: /^\s*DROP\s+MATERIALIZED\s+VIEW/i, reason: 'Drops materialized view and its data' },
+        { pattern: /^\s*DROP\s+SEQUENCE/i, reason: 'Drops sequence and its current value' },
+        { pattern: /^\s*DROP\s+POLICY/i, reason: 'Drops row-level security policy' },
+        { pattern: /ALTER\s+TABLE\s+.*\bDISABLE\s+ROW\s+LEVEL\s+SECURITY\b/i, reason: 'Disables row-level security: every row is visible to every role with access' },
         { pattern: /ALTER\s+TABLE\s+.*\bDROP\s+COLUMN\b/i, reason: 'Drops column' },
         { pattern: /ALTER\s+TABLE\s+.*\bDROP\s+CONSTRAINT\b/i, reason: 'Drops constraint' },
         { pattern: /ALTER\s+TABLE\s+.*ALTER\s+COLUMN\s+.*\bTYPE\b/i, reason: 'Changes column type (potential data loss)' },

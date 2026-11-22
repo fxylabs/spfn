@@ -20,10 +20,19 @@ import {
     displayDryRunSummary,
     displayApplySummary,
     displayPendingFunctionMigrations,
+    displayReplacements,
     displayUncomparedChecks,
     displayUncomparedKinds,
+    replacementLine,
 } from './utils/push-display.js';
-import { compareChecks, declaredEntities, type UncomparedCheck } from './utils/changed-checks.js';
+import {
+    planProject,
+    type HeldName,
+    type PlanConnection,
+    type PushStop,
+    type Replacement,
+} from './utils/push-steps.js';
+import { declaredEntities, type UncomparedCheck } from './utils/changed-checks.js';
 import { uncomparedKinds } from './utils/uncompared-kinds.js';
 import {
     discoverFunctionMigrations,
@@ -47,6 +56,14 @@ export interface PushPlan
 {
     statements: string[];
     hints: PushHint[];
+    /** Each kind drizzle-kit reported removed and added: planned as drops, then creates (push-steps.ts) */
+    replacements: Replacement[];
+    /** Set when push cannot plan such a kind: no statement is planned */
+    stop?: PushStop;
+    /** What push must create before the drops while a removed object holds its name: no statement is planned */
+    heldNames?: HeldName[];
+    /** What PostgreSQL refused of the drops-then-creates steps: no statement is planned */
+    refused?: unknown;
     /** The kinds of declared object push does not compare (uncomparedKinds), each with how many */
     uncompared: string[];
     /** Existing checks push could not compare before applying (compareChecks), left as they are */
@@ -54,38 +71,30 @@ export interface PushPlan
 }
 
 /**
- * The project's plan: pushSchema's hints and statements, then the replacement
- * of each existing check whose declared expression PostgreSQL stores
- * differently (compareChecks), compared in `inRolledBackTransaction`: a
- * transaction on the one session `db` runs on, never a pool's (see
- * PushConnection.inRolledBackTransaction).
+ * Plan the project statements as drizzle-kit's pushSchema plans them, reading
+ * only. Push does not rename: only when drizzle-kit reports a kind with
+ * objects both removed and added is the plan two pushSchema steps — the
+ * drops, then the creates — run in the connection's `inRolledBackTransaction`
+ * (planProject), which must hold one session: on a pool its `BEGIN`, its
+ * statements and its `ROLLBACK` could each run on another connection and
+ * commit what they write. Then the replacement of each existing check whose
+ * declared expression PostgreSQL stores differently (compareChecks): compared
+ * in the same `inRolledBackTransaction` on the database as it is, or, for two
+ * steps, in their transaction after both (planProject).
  */
 export async function resolvePushPlan(
     imports: Record<string, unknown>,
-    db: PushConnection['db'],
+    connection: PlanConnection,
     schemaFilter: string[],
-    inRolledBackTransaction: PushConnection['inRolledBackTransaction'],
 ): Promise<PushPlan>
 {
-    const { pushSchema } = await import('drizzle-kit/api-postgres');
-    const { sqlStatements, hints } = await pushSchema(
-        imports,
-        db,
-        {
-            schemas: schemaFilter,
-            tables: [],
-            entities: undefined,
-            extensions: [],
-        },
-    );
-    const pushHints = hints as PushHint[];
-    const hintStatements = pushHints.flatMap(hint => hint.statement ? [hint.statement] : []);
     const entities = await declaredEntities(imports, schemaFilter);
-    const checks = await compareChecks(db, inRolledBackTransaction, entities);
+    const { steps, checks, ...project } = await planProject(imports, connection, schemaFilter, entities);
 
     return {
-        statements: [...hintStatements, ...sqlStatements, ...checks.replacements],
-        hints: pushHints,
+        statements: [...steps.flatMap(step => step.statements), ...checks.replacements],
+        hints: steps.flatMap(step => step.hints),
+        ...project,
         uncompared: uncomparedKinds(entities),
         uncomparedChecks: checks.uncompared,
     };
@@ -143,15 +152,24 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  * Push schema changes to database with safe-mode protection.
  *
  * Both halves are planned read-only, once, before any write; destructive project
- * statements are settled next. Then each function package's pending migrations
- * apply (one committed transaction per package, as `db migrate`), then the
- * project statements (one transaction), so a project table may reference a
- * package table on an empty database. A database error at any of these stages
- * — planning, a package's migrations, the project statements — ends push the
- * same way: exit 1, the stage named, the error as `describeFailure` prints it,
- * and the ownership remedy when the catalog shows it. So does a connection
- * that cannot be opened, the dry run's read of `transaction_read_only` included
- * (the `connect` stage, with no remedy: there is no session to ask the catalog).
+ * statements are settled next. Push plans as drizzle-kit's pushSchema plans,
+ * and does not rename: when drizzle-kit reports a kind with objects both
+ * removed and added (a table gone and a table new, a column gone and a column
+ * new in one table), that kind is planned in two pushSchema steps — the
+ * drops, then the creates — in one transaction that always rolls back
+ * (push-steps.ts), shown as one plan and applied in that order; a kind push
+ * cannot plan so (a primary key replaced by another) ends push at the plan
+ * stage, naming it (exitOnStop), and so does an object it must create before
+ * the drops whose name an object it drops still holds (exitOnHeldNames). Then each
+ * function package's pending migrations apply (one committed transaction per
+ * package, as `db migrate`), then the project statements (one transaction),
+ * so a project table may reference a package table on an empty database. A
+ * database error at any of these stages — planning, a package's migrations,
+ * the project statements — ends push the same way: exit 1, the stage named,
+ * the error as `describeFailure` prints it, and the ownership remedy when the
+ * catalog shows it. So does a connection that cannot be opened, the dry
+ * run's read of `transaction_read_only` included (the `connect` stage, with
+ * no remedy: there is no session to ask the catalog).
  * Last, as the owner and in a transaction of its own, the app role is granted
  * exactly what the entities declare (`appPrivileges`) and each function
  * package's manifest (app-grants.ts); its failure is the `privileges` stage:
@@ -167,10 +185,14 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  *   the plan runs, `transaction_read_only` is read once, in one such
  *   transaction; every plan query then opens its transaction with the same
  *   `BEGIN READ ONLY`. When that read is not `on` it exits 1 instead. The
- *   one exception is comparing an existing check (compareChecks): one
- *   transaction per check, rolled back, that writes only a temporary table
- *   of its own and never touches the live one; a target that refuses it
- *   leaves the check not compared, and the plan goes on
+ *   exceptions: comparing an existing check (compareChecks), one transaction
+ *   per check, rolled back, that writes only a temporary table of its own
+ *   and never touches the live one — a target that refuses it leaves the
+ *   check not compared, and the plan goes on; and a plan in two steps — only
+ *   for a push drizzle-kit reports a kind removed and added in — which runs
+ *   DDL in a transaction that always rolls back, holding the locks it takes
+ *   (`ACCESS EXCLUSIVE` on a table it alters or drops) until then, with no
+ *   `lock_timeout` of push's own
  * - --schema: schema entry point; otherwise drizzle.config.ts (schema + schemaFilter),
  *   then core's default: the entities folder scan, or its config.ts registry
  *   (DRIZZLE_SCHEMA_PATH) when the folder holds no entity file or exports a table
@@ -186,9 +208,10 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  * (an `enumCheck` given another value): push compares each existing check with
  * PostgreSQL's own normalisation, on a temporary table in a transaction it
  * rolls back — on a dry run too — and replaces each that differs, naming each
- * it could not compare (compareChecks). What else drizzle-kit's push does not
- * compare is named in one line when the schema declares such an object
- * (uncomparedKinds).
+ * it could not compare (compareChecks); a plan in two steps compares them in
+ * its own transaction, on the tables as both steps leave them. What else
+ * drizzle-kit's push does not compare is named in one line when the schema
+ * declares such an object (uncomparedKinds).
  */
 export async function dbPush(options: { force?: boolean; dryRun?: boolean; schema?: string } = {}): Promise<void>
 {
@@ -288,14 +311,12 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 }
 
 /**
- * Where push writes, as its failure lines need it: the connection (the owner's)
- * and its rolled-back transactions, its URL to keep out of the output, and the
- * PostgreSQL schemas push manages.
+ * Where push plans and writes, as its failure lines need it: the connection
+ * (the owner's), its URL to keep out of the output, and the PostgreSQL
+ * schemas push manages.
  */
-interface PushTarget
+interface PushTarget extends PlanConnection
 {
-    db: PushConnection['db'];
-    inRolledBackTransaction: PushConnection['inRolledBackTransaction'];
     databaseUrl: string;
     schemas: string[];
 }
@@ -342,14 +363,44 @@ async function grantOrExit(grantTarget: AppPrivilegesTarget, target: PushTarget,
 }
 
 /**
- * Plan both halves: the project diff via pushSchema and the checks it would
- * leave as they are (compared on temporary tables that roll back), and each
- * function package's pending migrations. drizzle-kit reads each table it would
- * drop a column of, or drop, for its data-loss check, so a table the owner may
- * not read fails here, before any write — and ends push as a failed write
- * does; so does a declared check expression PostgreSQL refuses.
+ * Plan both halves: the project diff via pushSchema — reading only, or in a
+ * transaction that rolls back when it is two steps (resolvePushPlan) — the
+ * checks it would leave as they are (compared on temporary tables that roll
+ * back), and each function package's pending migrations. drizzle-kit reads
+ * each table it would drop a column of, or drop, for its data-loss check, so
+ * a table the owner may not read fails here, before any write — and ends push
+ * as a failed write does; so does a declared check expression PostgreSQL
+ * refuses. A kind push cannot split ends it at the same stage (exitOnStop),
+ * so does a name held by what it drops (exitOnHeldNames), and so does a
+ * statement of the two steps PostgreSQL refuses, with what they were for.
  */
 async function planOrExit(
+    imports: Record<string, unknown>,
+    schemaFilter: string[],
+    functionPlans: FunctionMigrationPlan[],
+    target: PushTarget,
+): Promise<{ plan: PushPlan; pending: PendingFunctionMigrations[] }>
+{
+    const planned = await planBothHalves(imports, schemaFilter, functionPlans, target);
+
+    if (planned.plan.stop)
+    {
+        exitOnStop(planned.plan.stop);
+    }
+    if (planned.plan.heldNames)
+    {
+        exitOnHeldNames(planned.plan.heldNames, planned.plan.replacements);
+    }
+    if (planned.plan.refused)
+    {
+        await exitOnFailure('plan', planned.plan.refused, target, twoStepNote(planned.plan.replacements));
+    }
+
+    return planned;
+}
+
+/** The project plan and each function package's pending migrations, ending push at the `plan` stage when either cannot be read. */
+async function planBothHalves(
     imports: Record<string, unknown>,
     schemaFilter: string[],
     functionPlans: FunctionMigrationPlan[],
@@ -359,7 +410,7 @@ async function planOrExit(
     try
     {
         return {
-            plan: await resolvePushPlan(imports, target.db, schemaFilter, target.inRolledBackTransaction),
+            plan: await resolvePushPlan(imports, target, schemaFilter),
             pending: await pendingFunctionMigrations(target.db, functionPlans),
         };
     }
@@ -367,6 +418,53 @@ async function planOrExit(
     {
         return exitOnFailure('plan', error, target);
     }
+}
+
+/**
+ * End push at the plan stage, nothing applied, when drizzle-kit reports a
+ * kind removed and added that push cannot plan as drops, then creates: the
+ * kind, why, what push reads of it, and the two ways that work.
+ */
+function exitOnStop(stop: PushStop): never
+{
+    console.error(chalk.red(`\n❌ Planning stopped — nothing was applied: drizzle-kit finds a ${stop.kind} removed and another added, `
+        + `and db push does not rename; ${stop.reason}`));
+    stop.replacements.forEach(replacement => console.error(chalk.red(`   ${replacementLine(replacement)}`)));
+    console.log(chalk.yellow('💡 Push twice — first without the removed one, then with the added one — '
+        + 'or use spfn db generate (in a terminal, where it asks whether this is a rename) and spfn db migrate.'));
+    process.exit(1);
+}
+
+/**
+ * End push at the plan stage, nothing applied, when what it must create
+ * before the drops has a name an object it drops still holds: the two orders
+ * contradict, so each such object and its name's holder are named, with the
+ * route that orders them as the change needs.
+ */
+function exitOnHeldNames(heldNames: HeldName[], replacements: Replacement[]): never
+{
+    console.error(chalk.red('\n❌ Planning stopped — nothing was applied: db push does not rename; it drops, then creates, for'));
+    replacements.forEach(replacement => console.error(chalk.red(`   ${replacementLine(replacement)}`)));
+    console.error(chalk.red('and must create before the drops what still has the name of an object it drops:'));
+    heldNames.forEach(({ created, holder, names }) => console.error(chalk.red(`   ${created}: the name is held by ${holder}, which this push drops`
+        + (names ? `; it names ${names} by identifier, so push creates it before the drops` : ''))));
+    console.log(chalk.yellow('💡 Use spfn db generate (in a terminal, where it asks whether this is a rename) and spfn db migrate: '
+        + 'a migration drops and creates in the order the change needs. Or push twice: first without the object named above, then with it.'));
+    process.exit(1);
+}
+
+/** What a plan failure adds when push planned the drops, then the creates. */
+function twoStepNote(replacements: Replacement[]): string | undefined
+{
+    if (replacements.length === 0)
+    {
+        return undefined;
+    }
+
+    return ['db push does not rename: it planned the drops, then the creates, for', ...replacements.map(replacement => `   ${replacementLine(replacement)}`),
+        'and PostgreSQL refused a statement of those two steps (nothing of them stays). When the change needs another order, '
+        + 'push it twice — what is added first, what is removed next, or the other way round — or use spfn db generate and spfn db migrate.']
+        .join('\n');
 }
 
 /** Each stage of push a database error can end, and what its failure leaves behind. */
@@ -430,11 +528,13 @@ async function openPushConnectionOrExit(databaseUrl: string, dryRun?: boolean): 
 }
 
 /**
- * Print pushSchema's hints, what push does not compare, and the classified
- * project statements, or that the project schema has none.
+ * Print the kinds planned as drops, then creates, pushSchema's hints, what
+ * push does not compare, and the classified project statements, or that the
+ * project schema has none.
  */
 function displayProjectPlan(plan: PushPlan, result: ClassificationResult | undefined, dryRun?: boolean): void
 {
+    displayReplacements(plan.replacements);
     for (const hint of plan.hints)
     {
         console.log(chalk.yellow(`⚠️  ${hint.hint}`));
