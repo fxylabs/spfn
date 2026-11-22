@@ -1,13 +1,20 @@
 /**
- * `node --test scripts/lib/` — no filesystem, no Woodpecker, no turbo.
+ * `node --test scripts/lib/` — no Woodpecker, no turbo.
  *
- * `ciScope()` takes the workspace as a directory → name map, so every row of
- * the scope rule is one call with literal inputs. One test per row, named with
- * the row's id from the pull request that introduced the rule.
+ * `ciScope()` and `diffScope()` take the workspace as a directory → name map,
+ * so every row of the scope rule is one call with literal inputs. One test per
+ * row, named with the row's id from the pull request that introduced the rule:
+ * S for the rule and Woodpecker's input, G for the Gitea Actions input (#433).
+ * G6 alone runs git, in a scratch repository, because what it guards is the
+ * diff's own arguments.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ciScope, describeScope, turboFilters } from "./ci-scope.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { changedFilesSince, ciScope, describeScope, diffScope, scopeFromEnvironment, turboFilters } from "./ci-scope.mjs";
 
 /** The workspace as it stands, minus the packages no row mentions. */
 const WORKSPACE = new Map([
@@ -104,4 +111,85 @@ test("a file directly under packages/ or examples/ is not a package and means al
 {
     assertAll(pr(["examples/README.md"]));
     assertAll(pr(["packages"]));
+});
+
+/** A diff that must not be taken: the row's input has to decide without one. */
+function noDiff()
+{
+    throw new Error("the diff was taken");
+}
+
+test("G1: a pull request diff scopes to the owning packages, against the base it was given", () =>
+{
+    const bases = [];
+    const diff = (base) =>
+    {
+        bases.push(base);
+        return ["packages/core/src/a.ts", "examples/01-minimal-api/src/x.ts"];
+    };
+
+    assertNames(diffScope("pull_request", "abc123", diff, WORKSPACE), ["01-minimal-api", "@spfn/core"]);
+    assert.deepEqual(bases, ["abc123"]);
+});
+
+test("G2: a diff with a path outside the packages — the workflow itself — means all", () =>
+{
+    assertAll(diffScope("pull_request", "abc123", () => ["packages/i18n/src/x.ts", ".gitea/workflows/check.yml"], WORKSPACE));
+});
+
+test("G3: a run that is not a pull request is never scoped, base or not", () =>
+{
+    for (const event of ["workflow_dispatch", "push", ""])
+    {
+        assertAll(diffScope(event, "abc123", noDiff, WORKSPACE));
+    }
+});
+
+test("G4: a pull request without a base, or whose diff lists nothing, means all", () =>
+{
+    assertAll(diffScope("pull_request", "", noDiff, WORKSPACE));
+    assertAll(diffScope("pull_request", undefined, noDiff, WORKSPACE));
+    assertAll(diffScope("pull_request", "abc123", () => [], WORKSPACE));
+});
+
+test("G5: CI_SCOPE_EVENT selects the diff; without it Woodpecker's variables are read as before", () =>
+{
+    const woodpecker = { CI_PIPELINE_EVENT: "pull_request", CI_PIPELINE_FILES: JSON.stringify(["packages/i18n/src/x.ts"]) };
+    const actions = { CI_SCOPE_EVENT: "pull_request", CI_SCOPE_DIFF_BASE: "abc123" };
+
+    assertNames(scopeFromEnvironment(woodpecker, noDiff, WORKSPACE), ["@spfn/i18n"]);
+    assertNames(scopeFromEnvironment(actions, () => ["packages/auth/src/x.ts"], WORKSPACE), ["@spfn/auth"]);
+    assertAll(scopeFromEnvironment({ ...woodpecker, CI_SCOPE_EVENT: "workflow_dispatch" }, noDiff, WORKSPACE));
+});
+
+function git(cwd, ...args)
+{
+    return execFileSync("git", ["-c", "user.name=ci-scope", "-c", "user.email=ci-scope@localhost", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
+}
+
+test("G6: a file moved from one package to another lists both, so both packages are in scope", () =>
+{
+    const repository = mkdtempSync(join(tmpdir(), "ci-scope-"));
+
+    try
+    {
+        git(repository, "init", "--quiet", "--initial-branch=main");
+        mkdirSync(join(repository, "packages/core/src"), { recursive: true });
+        writeFileSync(join(repository, "packages/core/src/moved.ts"), "export const moved = 'a file long enough to be found as a rename';\n");
+        git(repository, "add", ".");
+        git(repository, "commit", "--quiet", "-m", "base");
+        const base = git(repository, "rev-parse", "HEAD").trim();
+        mkdirSync(join(repository, "packages/auth/src"), { recursive: true });
+        git(repository, "mv", "packages/core/src/moved.ts", "packages/auth/src/moved.ts");
+        git(repository, "commit", "--quiet", "-m", "move");
+
+        const files = changedFilesSince(base, repository);
+
+        assert.deepEqual(files.sort(), ["packages/auth/src/moved.ts", "packages/core/src/moved.ts"]);
+        assertNames(diffScope("pull_request", base, () => files, WORKSPACE), ["@spfn/auth", "@spfn/core"]);
+    }
+    finally
+    {
+        rmSync(repository, { recursive: true, force: true });
+    }
 });

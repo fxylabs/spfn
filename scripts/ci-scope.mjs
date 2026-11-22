@@ -21,6 +21,11 @@
  *
  * All three print the decision as one line on stderr, for the log.
  *
+ * The changed files come from Woodpecker's `CI_PIPELINE_EVENT` and
+ * `CI_PIPELINE_FILES`, or — when the Gitea Actions workflow sets
+ * `CI_SCOPE_EVENT` — from `git diff --name-only <CI_SCOPE_DIFF_BASE>...HEAD`
+ * (scripts/lib/ci-scope.mjs, `scopeFromEnvironment`).
+ *
  * The selection for `includes` comes from turbo's own graph (`turbo ls`), the
  * same graph `turbo run` will use with the same filters. A second, hand-written
  * graph here would be one more thing to drift.
@@ -30,7 +35,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ciScope, describeScope, turboFilters } from "./lib/ci-scope.mjs";
+import { changedFilesSince, describeScope, scopeFromEnvironment, turboFilters } from "./lib/ci-scope.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -83,7 +88,7 @@ function includes(scope, name)
 
 function main([command, name])
 {
-    const scope = ciScope(process.env.CI_PIPELINE_EVENT, process.env.CI_PIPELINE_FILES, readPackageDirs());
+    const scope = scopeFromEnvironment(process.env, (base) => changedFilesSince(base, ROOT), readPackageDirs());
 
     console.error(describeScope(scope));
 
