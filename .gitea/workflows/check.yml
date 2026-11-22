@@ -1,0 +1,198 @@
+# primitives CI on Gitea Actions — the check, as one reusable job.
+#
+# Called by pr.yml (a manual run on a pull request's branch) and by
+# release.yml (before a publish). It is not started on its own: its only
+# trigger is `workflow_call`, so both callers run the same steps rather than
+# two copies that drift. A reusable workflow rather than a composite action
+# because the job's runner and container are part of the definition, and a
+# composite action holds steps only.
+#
+# It is the Gitea Actions form of .woodpecker/pr.yml, which stays beside it
+# until Actions has passed once (#433); the history of each line is there. What
+# that file did for its Kubernetes pod alone — the storage-limit workarounds,
+# the cluster relocation, the WAL settings, the home relocation — is not here.
+#
+# One job, not two: build output and tests share the workspace, and Actions
+# jobs share nothing.
+#
+# What is not known yet about the runner — its labels, whether jobs run in a
+# container as root with apt, its memory — is decided in two places only: the
+# `runs-on` and `container` of the job below (and of release.yml's `publish`),
+# and the TUNING values in .gitea/ci-tuning.env, which both builds read.
+on:
+    workflow_call:
+        inputs:
+            # The branch to diff against for the scope (pr.yml's `base`).
+            # Empty — release.yml passes none — runs everything.
+            base:
+                type: string
+                required: false
+                default: ""
+
+jobs:
+    check:
+        # RUNNER — the label and image to confirm on the first run. node:22
+        # (Debian bookworm, root, apt) is the image the Woodpecker steps used,
+        # and the service steps below rely on all three.
+        runs-on: ubuntu-latest
+        container:
+            image: node:22
+        defaults:
+            run:
+                shell: bash
+        env:
+            # core and cli turn an unreachable test database into a failure,
+            # not a skip, only when CI is set (runsInCi in
+            # packages/core/src/db/__tests__/helpers/ci.ts).
+            CI: "true"
+        steps:
+            # The whole history: the scope diffs the branch against its base,
+            # and `base...HEAD` needs the merge base present.
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            # `pnpm setup:examples` seeds the examples' gitignored .env.local;
+            # an example's `next build` fails without SPFN_API_URL.
+            - name: Install
+              run: |
+                  corepack enable
+                  pnpm install --frozen-lockfile
+                  pnpm setup:examples
+
+            # The scope input (scripts/lib/ci-scope.mjs): with a base, the run
+            # is scoped as a pull request against `origin/<base>`, fetched here
+            # so an unknown base fails this step; without one, the event (a
+            # manual run or a push) is not a pull request, and that runs
+            # everything. Then one `--filter=...<name>` per changed package, or
+            # nothing for a full run. All three are kept for the later steps
+            # through GITHUB_ENV; FILTERS unquoted there on purpose: several
+            # filters are several arguments, and an empty value is no argument.
+            # A failing ci-scope fails this step.
+            - name: Scope
+              env:
+                  SCOPE_BASE: ${{ inputs.base }}
+                  SCOPE_EVENT: ${{ github.event_name }}
+              run: |
+                  export CI_SCOPE_EVENT="$SCOPE_EVENT" CI_SCOPE_DIFF_BASE=
+                  if [ -n "$SCOPE_BASE" ]
+                  then
+                      git fetch --no-tags origin "+refs/heads/$SCOPE_BASE:refs/remotes/origin/$SCOPE_BASE"
+                      CI_SCOPE_EVENT=pull_request CI_SCOPE_DIFF_BASE="origin/$SCOPE_BASE"
+                  fi
+                  FILTERS="$(node scripts/ci-scope.mjs filters)"
+                  printf '%s\n' "CI_SCOPE_EVENT=$CI_SCOPE_EVENT" "CI_SCOPE_DIFF_BASE=$CI_SCOPE_DIFF_BASE" "FILTERS=$FILTERS" >> "$GITHUB_ENV"
+
+            # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
+            # `--filter` before the script name as its own option. Every
+            # package's `build` ends with the bundle identity check, so there is
+            # no separate `check:bundles` here. Heap and fan-out: TUNING.
+            - name: Build
+              run: |
+                  . .gitea/ci-tuning.env
+                  NODE_OPTIONS="--max-old-space-size=$BUILD_HEAP_MB" pnpm exec turbo run build --concurrency="$BUILD_CONCURRENCY" $FILTERS
+
+            - name: Lint
+              run: pnpm lint
+
+            - name: Type-check
+              run: pnpm exec turbo run type-check $FILTERS
+
+            - name: Repository checks
+              run: |
+                  pnpm check:versions
+                  pnpm check:exports
+                  pnpm test:scripts
+
+            # Boot examples/01-minimal-api (#119). Exit 1 from `includes` means
+            # "not in scope"; anything else is the check itself failing.
+            - name: Smoke examples/01-minimal-api
+              run: |
+                  IN_SCOPE=0
+                  node scripts/ci-scope.mjs includes 01-minimal-api || IN_SCOPE=$?
+                  case "$IN_SCOPE" in
+                      0) node scripts/smoke-example-01.mjs ;;
+                      1) echo "smoke-example-01: skipped, 01-minimal-api is outside this pull request's scope" ;;
+                      *) exit "$IN_SCOPE" ;;
+                  esac
+
+            # PostgreSQL and Redis run in this job's own container, not as
+            # `services:` containers: the cache tests hard-code
+            # redis://localhost:6479–6482, which a service container's own
+            # hostname would not answer. `age` and `sops` are for the CLI's
+            # secret tests, which run the real binaries.
+            - name: Install services
+              run: |
+                  apt-get update
+                  apt-get install -y --no-install-recommends postgresql postgresql-contrib redis-server age
+
+            # sops has no Debian package and the CLI needs 3.10 or later: a
+            # pinned release binary, checked against the digest from that
+            # release's checksums file.
+            - name: Install sops
+              run: |
+                  SOPS_VERSION=v3.13.3
+                  case "$(dpkg --print-architecture)" in
+                      amd64) SOPS_ARCH=amd64; SOPS_SHA256=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b ;;
+                      arm64) SOPS_ARCH=arm64; SOPS_SHA256=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77 ;;
+                      *) echo "no pinned sops binary for $(dpkg --print-architecture)" >&2; exit 1 ;;
+                  esac
+                  curl --fail --silent --show-error --location --output /tmp/sops "https://github.com/getsops/sops/releases/download/$SOPS_VERSION/sops-$SOPS_VERSION.linux.$SOPS_ARCH"
+                  echo "$SOPS_SHA256  /tmp/sops" | sha256sum --check --strict
+                  install -m 0755 /tmp/sops /usr/local/bin/sops
+                  rm /tmp/sops
+                  sops --disable-version-check --version
+                  age --version
+
+            # The cluster the package created, on 5432. Trust, because the
+            # container is thrown away: the roles test-services.sh creates
+            # connect with or without their passwords. `::1/128` as well as
+            # 127.0.0.1: auth's database files connect to `localhost`, and when
+            # that does not connect they are skipped, not failed. Durability
+            # off, as nothing outlives the job; appended, as the last setting
+            # wins. Started, or restarted when the install already started it.
+            - name: Start PostgreSQL
+              run: |
+                  PGVER=$(ls /etc/postgresql | head -n1)
+                  printf '%s\n' 'local all all trust' 'host all all 127.0.0.1/32 trust' 'host all all ::1/128 trust' > "/etc/postgresql/$PGVER/main/pg_hba.conf"
+                  printf '%s\n' 'fsync = off' 'synchronous_commit = off' 'full_page_writes = off' >> "/etc/postgresql/$PGVER/main/postgresql.conf"
+                  if pg_ctlcluster "$PGVER" main status > /dev/null
+                  then
+                      pg_ctlcluster "$PGVER" main restart
+                  else
+                      pg_ctlcluster "$PGVER" main start
+                  fi
+
+            # Four Redis instances and one database and role per package. The
+            # roles are what the two-role tenancy rows in @spfn/core need:
+            # `testuser` owns spfn_test, `authtest` is the other, non-superuser
+            # role they connect as (tenancy-db.ts, appDatabaseUrl).
+            - name: Start test services
+              run: PGUSER=postgres ./scripts/test-services.sh start
+
+            # Boot examples/03-auth under `spfn dev` (#329), in its own database.
+            - name: Smoke examples/03-auth under spfn dev
+              run: |
+                  IN_SCOPE=0
+                  node scripts/ci-scope.mjs includes 03-auth || IN_SCOPE=$?
+                  case "$IN_SCOPE" in
+                      0) createdb -h 127.0.0.1 -U postgres spfn_smoke_dev_03
+                         SMOKE_DATABASE_URL=postgres://postgres@127.0.0.1:5432/spfn_smoke_dev_03 node scripts/smoke-dev-example-03.mjs ;;
+                      1) echo "smoke-dev-example-03: skipped, 03-auth is outside this pull request's scope" ;;
+                      *) exit "$IN_SCOPE" ;;
+                  esac
+
+            # Auth's database files are skipped, not failed, when their database
+            # does not answer (`describe.skipIf(!dbAvailable)`), so a green Test
+            # could come from suites that never ran. `status` connects as each
+            # role test-services.sh creates, to its database, through
+            # `localhost` as the tests do, and fails here if any of it is down.
+            - name: Test services reachable
+              run: ./scripts/test-services.sh status
+
+            # `--concurrency=1` is not a throttle to relax: the packages share
+            # one PostgreSQL and one Redis. TEST_DATABASE_URL and
+            # TEST_APP_DATABASE_URL stay unset, so each package's helper uses
+            # its own role and database on localhost:5432.
+            - name: Test
+              run: pnpm exec turbo run test --concurrency=1 $FILTERS

@@ -1,0 +1,81 @@
+# primitives CI on Gitea Actions — the pull-request check, started by hand.
+#
+# Not on every push. The project runs CI once per pull request, on the head
+# whose reviews are clean, so the check starts only when someone asks for it: a
+# manual run (workflow_dispatch) on the pull request's branch, from the Actions
+# tab or the API (CONTRIBUTING.md has the call). No other trigger, because a run
+# started by an event that is not a request for a check — a label change was one
+# — skips its job, and Gitea posts that skip under the check's own status
+# context and counts it as success.
+#
+# Scope: the packages `git diff origin/<base>...HEAD` touches and everything
+# that depends on them (scripts/ci-scope.mjs). An empty `base` runs everything.
+#
+# Status: Gitea posts no commit status for a workflow_dispatch run
+# (services/actions/commit_status.go, getCommitStatusEventNameAndCommitID), so
+# this workflow posts its own, `ci / check`, on github.sha — the head of the
+# chosen branch when the run was started, the commit the check checks out — and
+# the pull request whose head that is shows it. `pending` first, then the
+# check's result; anything but success is a failure. A run cancelled before
+# `report` leaves `pending`, never green.
+on:
+    workflow_dispatch:
+        inputs:
+            base:
+                description: Branch the pull request merges into; the scope is what this branch changes against it. Empty runs everything.
+                type: string
+                required: false
+                default: main
+
+env:
+    STATUS_CONTEXT: ci / check
+
+jobs:
+    pending:
+        runs-on: ubuntu-latest
+        container:
+            image: node:22
+        # Writing a commit status needs write on the code unit; Gitea maps no
+        # narrower scope (`statuses` is ignored).
+        permissions:
+            contents: write
+        steps:
+            - name: Post pending
+              env:
+                  GITEA_TOKEN: ${{ github.token }}
+                  STATUSES_URL: ${{ github.api_url }}/repos/${{ github.repository }}/statuses/${{ github.sha }}
+                  TARGET_URL: ${{ github.server_url }}${{ github.repository }}/actions/runs/${{ github.run_id }}
+              run: |
+                  curl --fail --silent --show-error --output /dev/null -X POST "$STATUSES_URL" \
+                      -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
+                      -d "{\"context\":\"$STATUS_CONTEXT\",\"state\":\"pending\",\"description\":\"running\",\"target_url\":\"$TARGET_URL\"}"
+
+    check:
+        uses: ./.gitea/workflows/check.yml
+        with:
+            base: ${{ inputs.base }}
+
+    report:
+        needs: [pending, check]
+        if: always()
+        runs-on: ubuntu-latest
+        container:
+            image: node:22
+        permissions:
+            contents: write
+        steps:
+            - name: Post the check's result
+              env:
+                  GITEA_TOKEN: ${{ github.token }}
+                  STATUSES_URL: ${{ github.api_url }}/repos/${{ github.repository }}/statuses/${{ github.sha }}
+                  TARGET_URL: ${{ github.server_url }}${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  RESULT: ${{ needs.check.result }}
+              run: |
+                  STATE=failure
+                  if [ "$RESULT" = success ]
+                  then
+                      STATE=success
+                  fi
+                  curl --fail --silent --show-error --output /dev/null -X POST "$STATUSES_URL" \
+                      -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
+                      -d "{\"context\":\"$STATUS_CONTEXT\",\"state\":\"$STATE\",\"description\":\"check: $RESULT\",\"target_url\":\"$TARGET_URL\"}"

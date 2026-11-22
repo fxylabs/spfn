@@ -303,6 +303,61 @@ will rewrite the entire codebase to the wrong style. Style is enforced via ESLin
 - Update the relevant package `README.md` when you change public behavior — those
   READMEs are the source of truth, including for AI agents.
 
+## The pull-request check on Gitea Actions
+
+The check in `.gitea/workflows/` (build, lint, type-check, the repository checks,
+the example smokes and the test suites) does not start on its own. Someone starts
+it by hand, on the pull request's branch: **Run workflow** on the `pr.yml` workflow
+in the repository's Actions tab, or the API —
+
+```sh
+curl --fail -X POST \
+    -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"ref":"refs/heads/<branch>","inputs":{"base":"main"}}' \
+    https://git.superfunction.xyz/api/v1/repos/superfunction/primitives/actions/workflows/pr.yml/dispatches
+```
+
+(`204 No Content` on success; the token needs write access to the repository, as
+any account that may push to it has.)
+
+- **Scope.** `base` is the branch the pull request merges into (default `main`).
+  The check runs for the packages `git diff origin/<base>...HEAD` touches and
+  everything that depends on them. A base that does not exist fails the run.
+  **An empty `base` (`"inputs":{"base":""}`) runs everything**; nothing else widens
+  or narrows the scope.
+- **Status.** The run checks the branch's head at the moment it was started, and
+  posts the status `ci / check` on that commit: `pending`, then `success` or
+  `failure`. The pull request whose head that commit is shows it. Gitea itself
+  posts no status for a manual run; the workflow does. A later push needs a new run.
+
+Not on every push, because the project runs CI once per pull request, on the head
+whose reviews are clean: a full run takes many minutes of a shared runner, and a
+head that review is still changing would be checked again anyway. Not on a label
+either: Gitea cannot filter labels in `on:`, so every label change would start a
+run, and a run whose job is skipped posts `skipped` under the check's own status,
+which Gitea counts as passing. Until Gitea Actions has passed once, Woodpecker
+(`.woodpecker/`) still checks pull requests as before.
+
+**The publish token is as protected as push access is.** A Gitea repository secret
+(`NPM_PUBLISH_TOKEN`) is handed to a workflow file read from any branch of this
+repository; only a pull request from a fork gets none. A pull request's run reads
+its workflow files from the pull request's head, and a manual run reads them from
+the branch it is started on. So anyone who can push a branch can write a workflow
+that reaches the token. `release.yml`'s `if: github.ref == 'refs/heads/main'`
+stops a manual run on another branch from publishing by accident; it is no
+protection against a branch that changes `release.yml` itself.
+
+**Until `.gitea/workflows` is on `main`, Gitea runs `.github/workflows`.** Gitea
+reads the first of `.gitea/workflows` and `.github/workflows` that the commit it
+runs for has. With Actions enabled and this directory not yet on `main`, that is
+the GitHub workflows: the 14 `publish-*.yml` on a main push changing their
+package's manifest, `check-versions.yml` on main pushes and pull requests,
+`verify-mobile-contract.yml` on changes to the mobile contract, and the daily
+`security-audit.yml`. There is no npm token on Gitea, so they fail or do nothing;
+they are noise, not a publish. They stop for `main` when `.gitea/workflows`
+reaches it. A pull request's run reads the pull request's head, so a branch cut
+before that merge keeps running `check-versions.yml` until it is rebased.
+
 ## Working with AI agents
 
 Most contributors will use AI assistance, and that's welcome. Two expectations:
@@ -324,7 +379,11 @@ Packages are in **beta** (`0.x.y-beta.N`) / alpha. Do not bump a package to a st
 Publishing is a maintainer task. [`.github/PUBLISHING.md`](./.github/PUBLISHING.md)
 describes it: the two registries, the per-package workflows, the `latest` dist-tag
 sync, and the gotchas. `RELEASE.md` describes the retired tag-triggered release and is
-kept for history only; nothing publishes off a git tag any more.
+kept for history only; nothing publishes off a git tag any more. Until the switch
+from Woodpecker, a Gitea Actions release workflow (`.gitea/workflows/release.yml`)
+publishes to the Gitea registry beside Woodpecker's `.woodpecker/publish.yml`, with
+the token in the repository secret **`NPM_PUBLISH_TOKEN`** (a Gitea token allowed
+to write packages under the `superfunction` organisation).
 
 ## DCO
 

@@ -1,0 +1,60 @@
+# primitives CI on Gitea Actions — publish version-bumped packages to the
+# private Gitea registry, after the full check of main has passed.
+#
+# Runs on a main push that changes a package manifest — a release merge, the
+# only push that can carry a version bump; `*` does not cross a `/`, so an
+# example's or the website's manifest is not one — and on a manual run on main
+# (backfill). A manual run on any other branch starts nothing.
+#
+# `publish` needs `check`, the same reusable check pull requests run, here
+# unscoped (the event is not a pull request): a release never goes out from a
+# main that failed its own check. This replaces Woodpecker's `depends_on: [pr]`.
+#
+# The registry is the idempotency guard: scripts/publish-changed.mjs skips a
+# version the registry already has, and a concurrent run's E409 for a version
+# that is there by the time it asks again is not a failure. While Woodpecker's
+# .woodpecker/publish.yml still runs, both publish on the same push; that is
+# safe for the same reason. The concurrency group keeps two runs of this
+# workflow from overlapping: a second one waits for the first (and, as on
+# GitHub, a still newer one replaces it in the queue — harmless, since any run
+# publishes every version the registry lacks).
+on:
+    push:
+        branches: [main]
+        paths: ['packages/*/package.json']
+    workflow_dispatch:
+
+concurrency:
+    group: release-${{ github.repository }}
+    cancel-in-progress: false
+
+jobs:
+    check:
+        if: github.ref == 'refs/heads/main'
+        uses: ./.gitea/workflows/check.yml
+
+    publish:
+        needs: check
+        # RUNNER — the same label and image as check.yml's `check`; change both.
+        runs-on: ubuntu-latest
+        container:
+            image: node:22
+        defaults:
+            run:
+                shell: bash
+        env:
+            # The repository secret NPM_PUBLISH_TOKEN: a Gitea token allowed to
+            # write packages under the superfunction organisation.
+            NPM_PUBLISH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+        steps:
+            - uses: actions/checkout@v4
+
+            # publish-changed.mjs installs and builds the packages itself, with
+            # the check's heap and fan-out (TUNING, .gitea/ci-tuning.env).
+            - name: Publish
+              run: |
+                  . .gitea/ci-tuning.env
+                  test -n "$NPM_PUBLISH_TOKEN" || { echo "the repository secret NPM_PUBLISH_TOKEN is not set" >&2; exit 1; }
+                  printf '%s\n' '@spfn:registry=https://git.superfunction.xyz/api/packages/superfunction/npm/' "//git.superfunction.xyz/api/packages/superfunction/npm/:_authToken=$NPM_PUBLISH_TOKEN" > ~/.npmrc
+                  corepack enable
+                  NODE_OPTIONS="--max-old-space-size=$BUILD_HEAP_MB" BUILD_CONCURRENCY="$BUILD_CONCURRENCY" node scripts/publish-changed.mjs
