@@ -361,7 +361,9 @@ describes it: the two registries, the per-package workflows, the `latest` dist-t
 sync, and the gotchas. `RELEASE.md` describes the retired tag-triggered release and is
 kept for history only; nothing publishes off a git tag any more. Until the switch
 from Woodpecker, a Gitea Actions release workflow (`.gitea/workflows/release.yml`)
-publishes to the Gitea registry beside Woodpecker's `.woodpecker/publish.yml`.
+publishes to the Gitea registry beside Woodpecker's `.woodpecker/publish.yml`, with
+the token in the repository secret **`NPM_PUBLISH_TOKEN`** (a Gitea token allowed
+to write packages under the `superfunction` organisation).
 
 ## DCO
 
