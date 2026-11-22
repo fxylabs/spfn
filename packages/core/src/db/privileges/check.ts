@@ -10,14 +10,18 @@
  * keeps of the plan what concerns what the app role can do. Its drift is the
  * plan's `changes` for the app role, for PUBLIC and for a planned role the app
  * is a member of (the read role), whose grants the app holds too; a schema the
- * app cannot use is the plan's `withoutUsage`; a grant to PUBLIC from another
+ * app cannot use is the plan's `withoutUsage`, and what it holds on a schema
+ * beyond USAGE — CREATE, USAGE's grant option — the plan's `schemaChanges`,
+ * for the same grantees; a grant to PUBLIC from another
  * grantor than the owner, which blocks the step, is the plan's
  * `publicGrantsByOthers`. What the plan leaves the app holding another way —
  * as a member of a role it does not plan for, or from a grantor other than the
  * owner — is `heldElsewhere`, never drift. A relation a planned role owns, or
  * whose owner it inherits (the plan's `ownedRelations`), is outside the step
  * for every grantee, PUBLIC included: nothing is compared on it, and those the
- * app owns are counted apart.
+ * app owns are counted apart. A schema the app owns, or whose owner it
+ * inherits, gets no statement for it (`ownedSchemas`, named); one the read role
+ * owns is compared for the app as any schema is.
  *
  * The catalog tables are readable by every role unless an administrator
  * revoked that, so the app reads what the owner reads (a refused read is an
@@ -40,6 +44,7 @@ import {
     type OwnedRelation,
     type PrivilegeCatalog,
     type RelationKind,
+    type SchemaChange,
 } from './plan';
 
 /** What `spfn db grant` would change for one grantee on one managed relation. */
@@ -61,6 +66,30 @@ export interface AppPrivilegeDrift
     readonly grantOption: readonly string[];
     /** Column grants, never declared, as `update (amount)`: revoked */
     readonly columns: readonly string[];
+}
+
+/** What `spfn db grant` would revoke on one managed schema from one grantee: anything beyond USAGE. */
+export interface AppSchemaDrift
+{
+    readonly schema: string;
+    /** The app role; a role it is a member of, whose grants it holds too; or null for PUBLIC, likewise */
+    readonly grantee: string | null;
+    /** `member of <role>` when `grantee` is a role the app is a member of; else null */
+    readonly through: string | null;
+    /** Held beyond USAGE (CREATE), so the app can create — and own — tables there: revoked */
+    readonly excess: readonly string[];
+    /** USAGE held `WITH GRANT OPTION`: the option is revoked */
+    readonly grantOption: readonly string[];
+}
+
+/** A privilege beyond USAGE the app role holds on a managed schema in a way `spfn db grant` does not change. */
+export interface AppSchemaPrivilegeHeldElsewhere
+{
+    readonly schema: string;
+    /** `create`, or `usage with grant option` */
+    readonly privilege: string;
+    /** `member of <role>`, `granted by <role>`, or `granted to PUBLIC by <role>` */
+    readonly through: string;
 }
 
 /** A privilege the app role holds beyond its declaration in a way `spfn db grant` does not change. */
@@ -92,10 +121,16 @@ export interface AppPrivilegesCheck
     readonly drift: readonly AppPrivilegeDrift[];
     /** The managed schemas the app role cannot use: `spfn db grant` grants USAGE */
     readonly schemasWithoutUsage: readonly string[];
+    /** What `spfn db grant` would revoke on the schemas, in its order */
+    readonly schemaDrift: readonly AppSchemaDrift[];
     /** Grants to PUBLIC the owner cannot revoke: they block `spfn db grant` */
     readonly publicGrantsByOthers: readonly AppPublicGrantByOther[];
     /** What it holds beyond its declarations that `spfn db grant` reports and does not change */
     readonly heldElsewhere: readonly AppPrivilegeHeldElsewhere[];
+    /** What it holds on the schemas beyond USAGE that `spfn db grant` reports and does not change */
+    readonly schemaHeldElsewhere: readonly AppSchemaPrivilegeHeldElsewhere[];
+    /** The managed schemas the app role owns or inherits the owner of: no `spfn db grant` statement for it there, and what it holds there not compared; with a read role, PUBLIC's and the read role's grants there are, as on any schema */
+    readonly ownedSchemas: readonly string[];
     /** How many managed tables, views and materialized views the app role owns or inherits the owner of: declared, not enforced */
     readonly ownedTables: number;
     /** How many managed tables, views and materialized views were compared — none a planned role owns; their sequences are compared too */
@@ -129,7 +164,8 @@ export async function checkAppPrivileges(db: CatalogDb, target: AppPrivilegesTar
 /**
  * The step's plan for `roles` on `catalog` against `target`, as far as it
  * concerns what the app role can do: the changes for it, for PUBLIC and for a
- * role it is a member of; its schemas without USAGE; the grants to PUBLIC that
+ * role it is a member of, on relations and schemas; its schemas without
+ * USAGE; the schemas it owns; the grants to PUBLIC that
  * block the plan; what the plan leaves it holding. Nothing the owner alone can
  * see is in a catalog read as the app, so the plan is never asked whether it
  * is blocked otherwise.
@@ -138,15 +174,17 @@ export function compareAppPrivileges(catalog: PrivilegeCatalog, target: AppPrivi
 {
     const plan = planAppPrivileges(catalog, target, roles);
     const memberOf = catalog.roles.find(role => role.name === roles.app)?.memberOf ?? [];
+    const reachesApp = (change: { readonly grantee: string | null }) => change.grantee === null || change.grantee === roles.app || memberOf.includes(change.grantee);
 
     return {
-        drift: plan.changes
-            .filter(change => change.grantee === null || change.grantee === roles.app || memberOf.includes(change.grantee))
-            .map(change => driftOf(change, roles.app)),
+        drift: plan.changes.filter(reachesApp).map(change => driftOf(change, roles.app)),
         schemasWithoutUsage: plan.withoutUsage.filter(entry => entry.role === roles.app).map(entry => entry.schema),
+        schemaDrift: plan.schemaChanges.filter(reachesApp).map(change => schemaDriftOf(change, roles.app)),
         publicGrantsByOthers: plan.publicGrantsByOthers.map(({ schema, name, privilege, grantor, statement }) => ({ schema, table: name, privilege, grantor, statement })),
         heldElsewhere: plan.heldElsewhere.filter(entry => entry.role === roles.app)
             .map(({ schema, name, privilege, through }) => ({ schema, table: name, privilege, through })),
+        schemaHeldElsewhere: plan.schemaHeldElsewhere.filter(entry => entry.role === roles.app).map(({ schema, privilege, through }) => ({ schema, privilege, through })),
+        ownedSchemas: plan.ownedSchemas.filter(entry => entry.role === roles.app).map(entry => entry.schema),
         ownedTables: tableCount(plan.ownedRelations.filter(relation => relation.role === roles.app)),
         checkedTables: tableCount(catalog.relations) - tableCount(distinctRelations(plan.ownedRelations)),
         publicMayCreateInPublic: plan.publicMayCreateInPublic,
@@ -165,6 +203,17 @@ function driftOf(change: GranteeChange, app: string): AppPrivilegeDrift
         excess: change.excess,
         grantOption: change.grantOption,
         columns: change.columns.map(grant => `${grant.privilege} (${grant.column})`),
+    };
+}
+
+function schemaDriftOf(change: SchemaChange, app: string): AppSchemaDrift
+{
+    return {
+        schema: change.schema,
+        grantee: change.grantee,
+        through: change.grantee === null || change.grantee === app ? null : `member of ${change.grantee}`,
+        excess: change.excess,
+        grantOption: change.grantOption,
     };
 }
 

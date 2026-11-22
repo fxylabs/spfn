@@ -328,6 +328,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (two-role databases): spfn, @spfn/core: the app role holds `USAGE` on each managed
+  schema and nothing else — `spfn db grant`, and the privileges step of `db push`, `db migrate` and
+  `spfn add`, revoke the rest; `db status` reports it (#435).** On 0.4.0-beta.2 the step compared
+  each relation's access list with its declaration, but of a schema it asked only whether the role
+  could use it, and granted `USAGE` where it could not: a `GRANT CREATE ON SCHEMA … TO <app role>`
+  stayed, the app could create — and so own, and alter, and drop — tables there, and `db status`
+  said "holds what is declared". The step now reads each managed schema's access list as it reads a
+  relation's and, on the project's schemas, each function package's and `drizzle`, revokes what the
+  schema's owner gave the app role or the read role beyond `USAGE` — `CREATE`, and the grant option
+  of `USAGE` (`REVOKE CREATE ON SCHEMA …`, `REVOKE GRANT OPTION FOR USAGE ON SCHEMA …`) — and the
+  `CREATE` it gave PUBLIC, except on `public`, where PUBLIC is every role of the database and the
+  existing warning stays. `USAGE` is never revoked, PUBLIC's included. What reaches the role
+  through a group role, from another grantor, or through PUBLIC from another grantor is reported,
+  never revoked. Every `REVOKE` is plain: one PostgreSQL refuses because the app passed the
+  privilege on (2BP01) changes nothing and is reported as on a table. The app role or the read role
+  that owns a schema, or inherits its owner, gets no statement there, and the step names it
+  (`db status` names one the app role owns, never one the read role owns); the other role, and
+  PUBLIC, are planned there as on any schema — on a schema the read role owns the app role still
+  gets `USAGE` (or the step is blocked, the schema named, when the owner role cannot grant there),
+  and `db status` reports it when it lacks it. A table the app role already created in such a schema
+  stays its own — PostgreSQL's `REVOKE CREATE` takes no table — and, as before, blocks `db grant`
+  (exit 1, the table named) unless the owner role may grant on it; `db status` counts it as owned.
+  **On upgrade**, a deployment whose app role holds `CREATE` on a managed schema, or `USAGE` there
+  with its grant option, loses it at the next push, migrate, add or `db grant`: an app that creates
+  tables at run time in a managed schema fails with 42501 — create them in a migration instead. So
+  does a migration the server runs itself, as the `afterInfrastructure` example of
+  `@spfn/core/server` showed (`migrate(getDatabase(), …)`): the server connects as the app role,
+  which changes no structure — run `spfn db migrate` as the owner before it starts. Only a
+  single-role project (no `DATABASE_OWNER_URL`, its `DATABASE_URL` role owning the tables) may still
+  migrate there; the example and the server README now say so.
+  `db status --json`'s `privileges` gains `schemaDrift: [{ schema, grantee, through, excess,
+  grantOption }]`, `schemaHeldElsewhere: [{ schema, privilege, through }]` and `ownedSchemas`;
+  "holds what is declared" now needs the first two empty. `@spfn/core/db`: `CatalogSchema` gains
+  `owner` and `grants`; `AppPrivilegesPlan` gains `schemaChanges`, `ownedSchemas`,
+  `schemaHeldElsewhere` and `foreignOwnedSchemas` (a schema with something to revoke that the
+  owner cannot revoke on blocks the plan, as a foreign-owned table does); `RevokeGrantsByOthers.name`
+  is absent for a REVOKE on a schema; `AppPrivilegesCheck` gains `schemaDrift`,
+  `schemaHeldElsewhere` and `ownedSchemas`.
 - **@spfn/auth: the "API access" line no longer carries the user's e-mail address (#429).** The
   info line `@spfn/auth:middleware` writes for each request `authenticate` admits, by Bearer or by
   clientProofV1, and each one `optionalAuth` admits by clientProofV1 (its Bearer path writes no

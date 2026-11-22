@@ -123,6 +123,7 @@ async function readAppPrivileges(cwd: string, url: string | undefined): Promise<
         return {
             ...check,
             heldElsewhere: read.readRole.checked ? check.heldElsewhere : check.heldElsewhere.filter(held => !held.through.startsWith('member of ')),
+            schemaHeldElsewhere: read.readRole.checked ? check.schemaHeldElsewhere : check.schemaHeldElsewhere.filter(held => !held.through.startsWith('member of ')),
             source,
             readRole: read.readRole,
         };

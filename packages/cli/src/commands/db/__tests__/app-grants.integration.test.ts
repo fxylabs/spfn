@@ -66,8 +66,12 @@
  *   where the app owns a relation or a read role is set;
  * - P22 (rv428i N1) a `DATABASE_READ_URL` that does not answer reported as
  *   the database being unreachable, unnamed, and hiding the app role's result;
- * - I1, checked in P3, P4, P10, P11, P14b, P16, P18-P21, P23: status and `db grant
- *   --dry-run` disagreeing on any (relation, grantee, privilege, kind) —
+ * - P24 (#435) CREATE on a managed schema granted to the app role, and USAGE
+ *   on `drizzle` WITH GRANT OPTION: `db status` reading them as clean, `db
+ *   grant` keeping them — the app still creates, and so owns, tables there —
+ *   or a second run issuing statements again;
+ * - I1, checked in P3, P4, P10, P11, P14b, P16, P18-P21, P23, P24: status and `db grant
+ *   --dry-run` disagreeing on any (relation or schema, grantee, privilege, kind) —
  *   status reporting what the step does not change, or missing what it does
  *   (a grant option, a column grant, a PUBLIC grant, a sequence or a
  *   partition passing as clean); compared entry by entry, so a disagreement
@@ -428,8 +432,11 @@ describe('the app privileges step', () =>
                 { ...unchanged, schema: 'i405d_grant', table: 'notes', grantee: appRole, missing: ['insert'] },
             ],
             schemasWithoutUsage: [],
+            schemaDrift: [],
             publicGrantsByOthers: [],
             heldElsewhere: [],
+            schemaHeldElsewhere: [],
+            ownedSchemas: [],
             publicMayCreateInPublic: false,
             readRole: { checked: true },
         });
@@ -848,6 +855,35 @@ describe('the app privileges step', () =>
         await expectStatusAgreesWithDryRun(undefined, ownerRole);
         await expectStatusAgreesWithDryRun(OWNER_URL, ownerRole);
     });
+
+    it('P24 (#435) CREATE on a managed schema granted to the app: status reports it, db grant revokes it, the app\'s CREATE TABLE is refused, and a second run changes nothing', async () =>
+    {
+        writeProjectMigrations();
+        await dbMigrate();
+        await owner.unsafe(`GRANT CREATE ON SCHEMA i405d_grant TO "${appRole}"`);
+        await owner.unsafe(`GRANT USAGE ON SCHEMA drizzle TO "${appRole}" WITH GRANT OPTION`);
+
+        expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [], schemaDrift: [
+            { schema: 'drizzle', grantee: appRole, through: null, excess: [], grantOption: ['usage'] },
+            { schema: 'i405d_grant', grantee: appRole, through: null, excess: ['create'], grantOption: [] },
+        ] });
+        await expectStatusAgreesWithDryRun();
+
+        output.length = 0;
+        await dbGrant();
+
+        expect(output.join('\n')).toContain(`REVOKE CREATE ON SCHEMA "i405d_grant" FROM "${appRole}";`);
+        expect(await asApp('CREATE TABLE i405d_grant.t (id integer)')).toBe('42501');
+        expect(await asApp('CREATE TABLE drizzle.t (id integer)')).toBe('42501');
+        expect(await asApp('SELECT * FROM i405d_grant.notes')).toBe('ok');
+
+        output.length = 0;
+        await dbGrant();
+
+        expect(output.join('\n')).toContain('nothing to change');
+        expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [], schemaDrift: [] });
+        await expectStatusAgreesWithDryRun();
+    });
 });
 
 /** The fields of `db status --json`'s `privileges` that I1 compares. */
@@ -855,6 +891,7 @@ interface StatusPrivileges
 {
     drift: { schema: string; table: string; grantee: string | null; missing: string[]; excess: string[]; grantOption: string[]; columns: string[] }[];
     schemasWithoutUsage: string[];
+    schemaDrift: { schema: string; grantee: string | null; excess: string[]; grantOption: string[] }[];
     publicGrantsByOthers: { schema: string; table: string; privilege: string }[];
 }
 
@@ -875,6 +912,10 @@ function statusEntries(privileges: StatusPrivileges, appRole: string): string[]
             return [...of('GRANT', entry.missing), ...of('REVOKE', entry.excess), ...of('REVOKE GRANT OPTION FOR', entry.grantOption), ...of('REVOKE', entry.columns)];
         }),
         ...privileges.schemasWithoutUsage.flatMap(schema => entries('GRANT', `schema ${schema}`, appRole, ['usage'])),
+        ...privileges.schemaDrift.flatMap(entry => [
+            ...entries('REVOKE', `schema ${entry.schema}`, entry.grantee ?? 'PUBLIC', entry.excess),
+            ...entries('REVOKE GRANT OPTION FOR', `schema ${entry.schema}`, entry.grantee ?? 'PUBLIC', entry.grantOption),
+        ]),
         ...privileges.publicGrantsByOthers.flatMap(grant => entries('BLOCKED', `${grant.schema}.${grant.table}`, 'PUBLIC', [grant.privilege])),
     ];
 }

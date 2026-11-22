@@ -728,19 +728,24 @@ export interface ServerConfig
          * Hook: Run after infrastructure (DB/Redis) is initialized
          * Database and Redis instances are available via getDatabase() and getRedis()
          * Use this for:
-         * - Running migrations
          * - Seeding initial data
          * - Initializing services that depend on DB/Redis
+         * - Running migrations, in a single-role project only: one without
+         *   `DATABASE_OWNER_URL`, whose `DATABASE_URL` role owns the tables.
+         *   With the owner role split off, the server connects as the app role,
+         *   which changes no structure — `spfn db grant` leaves it `USAGE` on
+         *   the managed schemas and `SELECT` on `drizzle`, so a migration run
+         *   here is refused (42501) — and never holds `DATABASE_OWNER_URL`: run
+         *   `spfn db migrate` as the owner before the server starts instead.
          *
          * @example
          * ```typescript
+         * // A single-role project (no DATABASE_OWNER_URL)
          * import { getDatabase } from '@spfn/core/db';
          * import { migrate } from 'drizzle-orm/postgres-js/migrator';
          *
          * afterInfrastructure: async () => {
-         *   const db = getDatabase();
-         *   await migrate(db, { migrationsFolder: './drizzle' });
-         *   await seedInitialData(db);
+         *   await migrate(getDatabase(), { migrationsFolder: './drizzle' });
          * }
          * ```
          */

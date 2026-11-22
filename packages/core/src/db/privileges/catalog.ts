@@ -3,7 +3,7 @@
  * apply the plan (plan.ts) in one transaction, as the owner
  *
  * The step never uses `ALTER DEFAULT PRIVILEGES`: it reads the access lists of
- * every table and sequence of the managed schemas, so a table created by any
+ * the managed schemas and of every relation in them, so a table created by any
  * role, a hand GRANT and a hand REVOKE are all seen, and issues only the
  * statements that bring them to the declaration. A second run issues none.
  */
@@ -172,13 +172,27 @@ export async function readRoles(db: CatalogDb, roleNames: string[]): Promise<Cat
     return rows as unknown as CatalogRole[];
 }
 
-/** Each existing managed schema, per role: whether it may use it, and whether the connected role may grant on it. */
+/**
+ * Each existing managed schema, per role: whether it may use it, and whether
+ * the connected role may grant on it; with the schema's owner and its access
+ * list (the owner's default one when it has none), each entry with its grant
+ * option. A grantee of 0 is PUBLIC.
+ */
 export async function readSchemas(db: CatalogDb, schemas: readonly string[], roleNames: string[]): Promise<CatalogSchema[]>
 {
     const rows = catalogRows(await db.execute(sql`
         SELECT n.nspname::text AS name, r.name AS role,
             pg_catalog.has_schema_privilege(r.name, n.oid, 'USAGE') AS usage,
-            pg_catalog.pg_has_role(n.nspowner, 'USAGE') AS "mayGrant"
+            pg_catalog.pg_has_role(n.nspowner, 'USAGE') AS "mayGrant",
+            pg_catalog.pg_get_userbyid(n.nspowner)::text AS owner,
+            (
+                SELECT coalesce(json_agg(json_build_object(
+                    'grantee', CASE a.grantee WHEN 0 THEN NULL ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END,
+                    'grantor', pg_catalog.pg_get_userbyid(a.grantor)::text,
+                    'privilege', lower(a.privilege_type),
+                    'grantable', a.is_grantable)), '[]'::json)
+                FROM pg_catalog.aclexplode(coalesce(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a
+            ) AS grants
         FROM pg_catalog.pg_namespace n
         CROSS JOIN unnest(${sql.param(roleNames)}::text[]) WITH ORDINALITY AS r(name, position)
         WHERE n.nspname = ANY(${sql.param([...schemas])}::text[])

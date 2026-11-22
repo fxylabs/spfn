@@ -52,12 +52,31 @@
  * - G23 (rv428h X3) a privilege the app holds as a member of the read role,
  *   which the step revokes from the read role, reported by both commands as
  *   one `db grant` does not change, and missing from status's drift.
+ * - G24 (#435) CREATE on a managed schema, or USAGE on it WITH GRANT OPTION,
+ *   that the schema's owner gave the app: kept by the step — the app creates,
+ *   and owns, tables there, or hands USAGE to any role — and read by status
+ *   as clean; one from another grantor or a group role revoked, or unreported;
+ *   the CREATE the app passed on missing from what a refusal (2BP01) lists;
+ * - G25 (#435) a schema the app role alone owns given a statement — a REVOKE
+ *   the owner grants itself back, drift that never clears — or compared by status;
+ * - G26 (#435) PUBLIC's CREATE on a managed schema, which the app holds too,
+ *   kept; or PUBLIC's CREATE on `public`, database-wide, revoked;
+ * - G27 (i436f1) a schema the read role owns taken out of the plan for the
+ *   app as well: the app without USAGE there — refused on every table of it,
+ *   whose grants it still gets — `db status` clean, and `db grant` neither
+ *   granting it nor blocked when the owner may not; PUBLIC's CREATE there,
+ *   which the app holds too, kept.
+ * - G28 (i436f2) on a schema the app role owns, with a read role planned,
+ *   what the app holds there from another grantor reported as held elsewhere
+ *   — `db status` warning that it holds, beyond USAGE, a privilege on a
+ *   schema it owns — or what the read role holds there left out with it, or
+ *   listed by `db status` as the app's.
  */
 
 import { describe, expect, it } from 'vitest';
 
 import { compareAppPrivileges, type AppPrivilegeDrift } from '../check';
-import { planAppPrivileges, type AppPrivilegesTarget, type CatalogGrant, type CatalogRelation, type PrivilegeCatalog } from '../plan';
+import { planAppPrivileges, type AppPrivilegesTarget, type CatalogGrant, type CatalogRelation, type CatalogSchema, type PrivilegeCatalog } from '../plan';
 import { DEFAULT_APP_PRIVILEGES } from '../declaration';
 
 const OWNER = 'app_owner';
@@ -81,6 +100,10 @@ function ownerGrants(kind: 'table' | 'sequence', owner = OWNER): CatalogGrant[]
 const ownedBy = (owner: string, name: string, grants: CatalogGrant[] = []): CatalogRelation =>
     ({ ...table(name), owner, grants: [...ownerGrants('table', owner), ...grants] });
 
+/** A managed schema as `role` sees it: usable, the owner's, with the owner's default access list. */
+const schemaRow = (name: string, role = APP, facts: Partial<CatalogSchema> = {}): CatalogSchema =>
+    ({ name, role, usage: true, mayGrant: true, owner: OWNER, grants: ['usage', 'create'].map(privilege => ({ grantee: OWNER, grantor: OWNER, privilege, grantable: true })), ...facts });
+
 const toApp = (...privileges: string[]): CatalogGrant[] => privileges.map(privilege => ({ grantee: APP, grantor: OWNER, privilege }));
 
 function catalog(relations: CatalogRelation[], overrides: Partial<PrivilegeCatalog> = {}): PrivilegeCatalog
@@ -88,7 +111,7 @@ function catalog(relations: CatalogRelation[], overrides: Partial<PrivilegeCatal
     return {
         roles: [{ name: APP, inheritsOwner: false, memberOf: [] }],
         missingRoles: [],
-        schemas: [...new Set(relations.map(relation => relation.schema))].map(name => ({ name, role: APP, usage: true, mayGrant: true })),
+        schemas: [...new Set(relations.map(relation => relation.schema))].map(name => schemaRow(name)),
         relations,
         foreignOwned: [],
         publicMayCreateInPublic: false,
@@ -112,7 +135,7 @@ describe('planAppPrivileges', () =>
     it('G1 grants a fresh table the default set, its sequence USAGE, and a schema the app cannot use USAGE', () =>
     {
         const state = catalog([table('notes'), sequence('notes_id_seq')], {
-            schemas: [{ name: 'acme', role: APP, usage: false, mayGrant: true }],
+            schemas: [schemaRow('acme', APP, { usage: false })],
         });
 
         expect(planAppPrivileges(state, target(), { app: APP }).statements).toEqual([
@@ -200,7 +223,7 @@ describe('planAppPrivileges', () =>
             sequence('__drizzle_migrations_id_seq', toApp('usage'), 'drizzle'),
         ], {
             roles: [{ name: APP, inheritsOwner: false, memberOf: [] }, { name: 'app_reader', inheritsOwner: false, memberOf: [] }],
-            schemas: [{ name: 'drizzle', role: APP, usage: false, mayGrant: true }, { name: 'drizzle', role: 'app_reader', usage: false, mayGrant: true }],
+            schemas: [schemaRow('drizzle', APP, { usage: false }), schemaRow('drizzle', 'app_reader', { usage: false })],
         });
 
         expect(planAppPrivileges(state, target(), { app: APP, read: 'app_reader' }).statements).toEqual([
@@ -215,7 +238,7 @@ describe('planAppPrivileges', () =>
         const foreign = { schema: 'acme', name: 'imported', kind: 'table' as const, owner: 'app_user' };
         const foreignOwned = planAppPrivileges(catalog([table('notes'), { ...table('imported'), owner: 'app_user' }], { foreignOwned: [foreign] }), target(), { app: APP });
         const ungrantable = planAppPrivileges(catalog([table('notes')], {
-            schemas: [{ name: 'acme', role: APP, usage: true, mayGrant: true }, { name: 'public', role: APP, usage: false, mayGrant: false }],
+            schemas: [schemaRow('acme'), schemaRow('public', APP, { usage: false, mayGrant: false })],
         }), target([], ['acme', 'public', 'drizzle']), { app: APP });
 
         expect(foreignOwned.blocked).toBe(true);
@@ -229,7 +252,7 @@ describe('planAppPrivileges', () =>
     {
         const state = catalog([table('notes', [{ grantee: null, grantor: OWNER, privilege: 'select' }])], {
             roles: [{ name: APP, inheritsOwner: true, memberOf: [OWNER] }],
-            schemas: [{ name: 'acme', role: APP, usage: false, mayGrant: true }],
+            schemas: [schemaRow('acme', APP, { usage: false })],
         });
 
         const plan = planAppPrivileges(state, target(), { app: APP });
@@ -363,8 +386,8 @@ describe('planAppPrivileges', () =>
             { ...table('imported', [], [], 'other_app'), owner: 'someone' },
         ], {
             schemas: [
-                { name: 'acme', role: APP, usage: true, mayGrant: true },
-                { name: 'other_app', role: APP, usage: false, mayGrant: false },
+                schemaRow('acme'),
+                schemaRow('other_app', APP, { usage: false, mayGrant: false }),
             ],
             foreignOwned: [{ schema: 'other_app', name: 'imported', kind: 'table', owner: 'someone' }],
         });
@@ -430,7 +453,7 @@ describe('planAppPrivileges', () =>
             ownedBy(APP, 'mine', [{ grantee: null, grantor: APP, privilege: 'insert' }]),
         ], {
             roles: [{ name: APP, inheritsOwner: false, memberOf: ['staff'] }],
-            schemas: [{ name: 'acme', role: APP, usage: false, mayGrant: false }],
+            schemas: [schemaRow('acme', APP, { usage: false, mayGrant: false })],
         });
         const declared = target([appendOnly, { schema: 'acme', table: 'mine', privileges: 'default' }]);
         const status = compareAppPrivileges(state, declared, { app: APP });
@@ -461,7 +484,7 @@ describe('planAppPrivileges', () =>
             table('notes', DEFAULT_TO_APP),
         ], {
             roles: [{ name: APP, inheritsOwner: false, memberOf: ['owners'] }, { name: READ, inheritsOwner: false, memberOf: [] }],
-            schemas: [{ name: 'acme', role: APP, usage: true, mayGrant: true }, { name: 'acme', role: READ, usage: true, mayGrant: true }],
+            schemas: [schemaRow('acme'), schemaRow('acme', READ)],
         });
         const plan = planAppPrivileges(state, target(), { app: APP, read: READ });
         const status = compareAppPrivileges(state, target(), { app: APP, read: READ });
@@ -505,7 +528,7 @@ describe('planAppPrivileges', () =>
             { grantee: READ, grantor: OWNER, privilege: 'truncate' },
         ])], {
             roles: [{ name: APP, inheritsOwner: false, memberOf: [READ] }, { name: READ, inheritsOwner: false, memberOf: [] }],
-            schemas: [{ name: 'acme', role: APP, usage: true, mayGrant: true }, { name: 'acme', role: READ, usage: true, mayGrant: true }],
+            schemas: [schemaRow('acme'), schemaRow('acme', READ)],
         });
         const plan = planAppPrivileges(state, target(), { app: APP, read: READ });
         const status = compareAppPrivileges(state, target(), { app: APP, read: READ });
@@ -514,5 +537,100 @@ describe('planAppPrivileges', () =>
         expect(plan.heldElsewhere).toEqual([]);
         expect(status.drift).toEqual([drift('notes', { grantee: READ, through: `member of ${READ}`, excess: ['truncate'] })]);
         expect(status.heldElsewhere).toEqual([]);
+    });
+
+    it('G24 CREATE on a managed schema and the grant option of USAGE, from its owner, are revoked, and status agrees; from another grantor or a group role, reported', () =>
+    {
+        const toAppOnSchema = (privilege: string, grantor = OWNER) => ({ grantee: APP, grantor, privilege, grantable: true });
+        const passedOn = { grantee: 'auditor', grantor: APP, privilege: 'create' };
+        const acme = schemaRow('acme', APP, { grants: [...schemaRow('acme').grants, toAppOnSchema('usage'), toAppOnSchema('create'), passedOn] });
+        const shared = schemaRow('shared', APP, { grants: [...schemaRow('shared').grants, toAppOnSchema('create', 'delegate'), { grantee: 'staff', grantor: OWNER, privilege: 'create' }] });
+        const state = catalog([table('notes', DEFAULT_TO_APP)], { schemas: [acme, shared], roles: [{ name: APP, inheritsOwner: false, memberOf: ['staff'] }] });
+        const plan = planAppPrivileges(state, target([], ['acme', 'shared']), { app: APP });
+        const status = compareAppPrivileges(state, target([], ['acme', 'shared']), { app: APP });
+
+        expect(plan.statements).toEqual([
+            'REVOKE CREATE ON SCHEMA "acme" FROM "app_user"',
+            'REVOKE GRANT OPTION FOR USAGE ON SCHEMA "acme" FROM "app_user"',
+        ]);
+        expect(plan.schemaHeldElsewhere).toEqual([
+            { role: APP, schema: 'shared', privilege: 'create', through: 'granted by delegate' },
+            { role: APP, schema: 'shared', privilege: 'create', through: 'member of staff' },
+        ]);
+        expect(plan.grantsByOthers).toEqual([
+            { statement: 'REVOKE CREATE ON SCHEMA "acme" FROM "app_user"', schema: 'acme', grants: [{ ...passedOn, grantable: false }] },
+        ]);
+        expect(status.schemaDrift).toEqual([{ schema: 'acme', grantee: APP, through: null, excess: ['create'], grantOption: ['usage'] }]);
+        expect(status.schemaHeldElsewhere).toHaveLength(2);
+    });
+
+    it('G25 a schema the app role alone owns is outside the plan, and status compares nothing on it', () =>
+    {
+        const appOwned = { owner: APP, grants: [{ grantee: APP, grantor: APP, privilege: 'create', grantable: true }, { grantee: null, grantor: APP, privilege: 'create' }] };
+        const state = catalog([table('notes', DEFAULT_TO_APP)], { schemas: [schemaRow('acme', APP, appOwned)] });
+        const plan = planAppPrivileges(state, target([], ['acme']), { app: APP });
+        const status = compareAppPrivileges(state, target([], ['acme']), { app: APP });
+
+        expect(plan.statements).toEqual([]);
+        expect(plan.ownedSchemas).toEqual([{ role: APP, schema: 'acme' }]);
+        expect([plan.schemaChanges, plan.schemaHeldElsewhere, plan.withoutUsage]).toEqual([[], [], []]);
+        expect([status.schemaDrift, status.ownedSchemas]).toEqual([[], ['acme']]);
+    });
+
+    it('G26 PUBLIC\'s CREATE from the owner is revoked on a managed schema and left on public, which publicMayCreateInPublic reports; another grantor\'s is reported', () =>
+    {
+        const toPublic = (grantor = OWNER) => ({ grantee: null, grantor, privilege: 'create' });
+        const state = catalog([table('notes', DEFAULT_TO_APP)], {
+            schemas: [
+                schemaRow('acme', APP, { grants: [...schemaRow('acme').grants, toPublic(), toPublic('delegate')] }),
+                schemaRow('public', APP, { grants: [...schemaRow('public').grants, toPublic()] }),
+            ],
+            publicMayCreateInPublic: true,
+        });
+        const plan = planAppPrivileges(state, target([], ['acme', 'public']), { app: APP });
+
+        expect(plan.statements).toEqual(['REVOKE CREATE ON SCHEMA "acme" FROM PUBLIC']);
+        expect(plan.schemaHeldElsewhere).toEqual([{ role: APP, schema: 'acme', privilege: 'create', through: 'granted to PUBLIC by delegate' }]);
+        expect(compareAppPrivileges(state, target([], ['acme', 'public']), { app: APP }).schemaDrift)
+            .toEqual([{ schema: 'acme', grantee: null, through: null, excess: ['create'], grantOption: [] }]);
+    });
+
+    it('G27 on a schema the read role owns, the app is planned as on any schema: USAGE granted, or blocked when the owner may not grant, PUBLIC\'s CREATE revoked; status reports it', () =>
+    {
+        const READ = 'app_read';
+        const readOwned = { owner: READ, grants: [{ grantee: READ, grantor: READ, privilege: 'create', grantable: true }] };
+        const ledger = { ...readOwned, grants: [...readOwned.grants, { grantee: null, grantor: READ, privilege: 'create' }] };
+        const state = (mayGrant: boolean) => catalog([table('notes', [...DEFAULT_TO_APP, { grantee: READ, grantor: OWNER, privilege: 'select' }])], {
+            roles: [{ name: APP, inheritsOwner: false, memberOf: [] }, { name: READ, inheritsOwner: false, memberOf: [] }],
+            schemas: [
+                schemaRow('acme', APP, { ...readOwned, usage: false, mayGrant }), schemaRow('acme', READ, { ...readOwned, mayGrant }),
+                schemaRow('ledger', APP, { ...ledger, mayGrant }), schemaRow('ledger', READ, { ...ledger, mayGrant }),
+            ],
+        });
+        const roles = { app: APP, read: READ };
+        const plan = planAppPrivileges(state(true), target([], ['acme', 'ledger']), roles);
+        const refused = planAppPrivileges(state(false), target([], ['acme', 'ledger']), roles);
+        const status = compareAppPrivileges(state(true), target([], ['acme', 'ledger']), roles);
+
+        expect(plan.statements).toEqual(['GRANT USAGE ON SCHEMA "acme" TO "app_user"', 'REVOKE CREATE ON SCHEMA "ledger" FROM PUBLIC']);
+        expect(plan.ownedSchemas).toEqual([{ role: READ, schema: 'acme' }, { role: READ, schema: 'ledger' }]);
+        expect([refused.blocked, refused.statements, refused.ungrantableSchemas]).toEqual([true, [], [{ schema: 'acme', role: APP }]]);
+        expect([status.schemasWithoutUsage, status.schemaDrift.map(entry => [entry.schema, entry.grantee]), status.ownedSchemas]).toEqual([['acme'], [['ledger', null]], []]);
+    });
+
+    it('G28 on a schema the app role owns, with a read role planned, what the read role holds from another grantor is held elsewhere and what the app holds is not', () =>
+    {
+        const READ = 'app_read';
+        const fromDelegate = (grantee: string) => ({ grantee, grantor: 'delegate', privilege: 'create' });
+        const appOwned = { owner: APP, grants: [{ grantee: APP, grantor: APP, privilege: 'create', grantable: true }, fromDelegate(APP), fromDelegate(READ)] };
+        const state = catalog([table('notes', DEFAULT_TO_APP)], {
+            roles: [{ name: APP, inheritsOwner: false, memberOf: [] }, { name: READ, inheritsOwner: false, memberOf: [] }],
+            schemas: [schemaRow('acme', APP, appOwned), schemaRow('acme', READ, appOwned)],
+        });
+        const roles = { app: APP, read: READ };
+
+        expect(planAppPrivileges(state, target([], ['acme']), roles).schemaHeldElsewhere)
+            .toEqual([{ role: READ, schema: 'acme', privilege: 'create', through: 'granted by delegate' }]);
+        expect(compareAppPrivileges(state, target([], ['acme']), roles).schemaHeldElsewhere).toEqual([]);
     });
 });

@@ -827,13 +827,13 @@ the declaration — a second run issues none.
 
 | Object (in the managed schemas) | App role | Read role (`DATABASE_READ_URL`, when another role) | PUBLIC |
 |---|---|---|---|
-| the project's schemas, each function package's (`spfn_auth`, …) | `USAGE` | `USAGE` | — |
+| the project's schemas, each function package's (`spfn_auth`, …) | `USAGE`, nothing else — `CREATE` revoked | `USAGE`, nothing else | `USAGE` untouched; `CREATE` revoked, except on `public` |
 | their tables, foreign tables included | the declared set, else `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT`, when the set has it | revoked |
 | their views (`pgView`) | `SELECT`; a `security_invoker` view (PostgreSQL 15+) with no rule but its SELECT rule and no INSTEAD OF trigger: `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT` | revoked |
 | their materialized views (`pgMaterializedView`) | `SELECT` | `SELECT` | revoked |
 | a partition, at any level | nothing — access goes through its root table | — | revoked |
 | their sequences (`id()` is a `bigserial`; `nextval` needs it) | `USAGE` | — | revoked |
-| `drizzle`, where migrations are recorded | `USAGE`, `SELECT` on its tables — never a write | — | revoked |
+| `drizzle`, where migrations are recorded | `USAGE` on it, nothing else; `SELECT` on its tables — never a write | nothing beyond `USAGE` | revoked; `CREATE` on it revoked |
 
 - **Managed schemas:** the project's (from the entities on `db push`; from
   `src/server/drizzle/privileges.json` on `db migrate` and `spfn add`, which load no app source; on
@@ -866,6 +866,24 @@ the declaration — a second run issues none.
   brought to exactly what the table above gives it, `USAGE` and `SELECT`: anything else the owner
   granted it on the managed schemas — a write, a sequence's privilege, a `drizzle` table's — is
   revoked the same way.
+- **Schemas:** on each managed schema the app role and the read role hold `USAGE` and nothing
+  else. The step reads the schema's access list as it reads a table's: `USAGE` is granted when the
+  role cannot use the schema by any path, and never revoked; what the schema's owner gave the role
+  beyond it — `CREATE`, with which the role creates, and so owns, tables there, and the grant
+  option of `USAGE` — is revoked (`REVOKE CREATE ON SCHEMA …`, `REVOKE GRANT OPTION FOR USAGE ON
+  SCHEMA …`), and `db status` reports it as drift. PUBLIC keeps `USAGE` — it gives the app nothing
+  it does not hold, and other roles the schema's functions and types — and loses a `CREATE` the
+  owner gave it, as on a table; on `public`, where PUBLIC is every role of the database, PUBLIC's
+  `CREATE` is reported, never revoked (below). `CREATE` that reaches the app role through a group
+  role, from another grantor, or through PUBLIC from another grantor, is reported, never revoked.
+  `REVOKE CREATE` takes no table the role already created: PostgreSQL keeps it, owned by that role
+  (see "A table the app role owns"). A role that owns a schema, or inherits its owner, cannot be
+  restricted there: the app role or the read role that does gets no statement on it, and the step
+  names it (`db status` lists one the app role owns). The other role still needs `USAGE` there to
+  reach its tables, and it and PUBLIC are brought to it as on any schema: a schema the read role
+  owns gets the app role `USAGE`, or is listed as one the owner role cannot grant on. Only a schema
+  every planned role owns is outside the step, as an owned table is. A managed schema with something to revoke that the owner role neither owns nor
+  inherits the owner of is listed, nothing is changed, and the command exits 1 — as for a table.
 - **A grant that depends on one the step revokes** — one the app role made with a grant option the
   step takes — makes PostgreSQL refuse that `REVOKE` (2BP01). Every `REVOKE` is plain, never
   `CASCADE`, which would take a privilege from a role the step does not manage, and whether one is
@@ -922,7 +940,8 @@ the declaration — a second run issues none.
   after it.
 - **PUBLIC `CREATE` on schema `public`** (PostgreSQL before 15) lets any role, the app's too, create —
   and so own — tables there. The step and `db status` report it; neither revokes it, as the change is
-  database-wide. As the database owner: `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`.
+  database-wide — on `public` only: on every other managed schema PUBLIC's `CREATE` from the owner
+  is revoked (above). As the database owner: `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`.
 - **`spfn_queue`** (jobs, pg-boss) is created and owned by the app role at its first start, so the app
   role needs `CREATE` on the database once (`GRANT CREATE ON DATABASE acme TO app_user;`); the step
   leaves the schema alone.
@@ -933,12 +952,14 @@ every access list entry with its grant option, every column grant — for the ro
 plan on it, and keeps what concerns what the app role can do. It says "holds what is declared" only
 when the step has no statement that changes what the app role or PUBLIC can do — none on a relation
 for the app role, PUBLIC or a role the app is a member of (the read role), none granting the app
-role USAGE on a schema — and no grant to PUBLIC blocks it; USAGE on a schema for the read role
+role USAGE on a schema, none revoking what it or PUBLIC holds on a schema beyond USAGE — and no
+grant to PUBLIC blocks it; USAGE on a schema for the read role
 changes nothing the app can do, so status does not report it. Per relation (tables, views, materialized views,
 sequences) and grantee — the app role; PUBLIC, whose grants the app holds too; a role the app is a
 member of, likewise, named with its path — it lists what is missing, what is held beyond the
 declaration (a lost restriction), a declared privilege held `WITH GRANT OPTION` (the app can pass it
-on), and column grants; each managed schema the app role cannot use; and each grant to PUBLIC from
+on), and column grants; each managed schema the app role cannot use; per schema and grantee, what it
+holds there beyond `USAGE`; and each grant to PUBLIC from
 another grantor than the owner, which the app holds and which blocks the step, with the `REVOKE`
 its grantor can run. What the step leaves the app role holding — as a member of a role the step does
 not plan for, or from a grantor other than the owner — it reports apart, as the step does. A table
@@ -948,8 +969,8 @@ the privileges unchecked, with the error). What the app role cannot see is the o
 does not know which role `DATABASE_OWNER_URL` connects as, so not whether that role may grant on
 each relation and schema, nor whether PostgreSQL would refuse a `REVOKE` (2BP01) — it predicts no
 refusal; `spfn db grant --dry-run` runs the statements and reports one. `--json` carries it as
-`privileges` (`drift`, `schemasWithoutUsage`, `publicGrantsByOthers`, `heldElsewhere`,
-`ownedTables`, `publicMayCreateInPublic`, `readRole`); a read role it cannot look up through
+`privileges` (`drift`, `schemasWithoutUsage`, `schemaDrift`, `publicGrantsByOthers`, `heldElsewhere`,
+`schemaHeldElsewhere`, `ownedTables`, `ownedSchemas`, `publicMayCreateInPublic`, `readRole`); a read role it cannot look up through
 `DATABASE_READ_URL` is reported as not checked, with the reason, beside the app role's and PUBLIC's
 part. `drift` has one entry per relation and grantee, so one
 table can appear more than once (for the app role and for PUBLIC, say): key it by schema, table and

@@ -39,12 +39,16 @@ export type {
     GrantByOther,
     GranteeChange,
     ForeignOwnedRelation,
+    ForeignOwnedSchema,
     PrivilegeCatalog,
     OwnedRelation,
+    OwnedSchema,
     PrivilegeHeldElsewhere,
     PublicGrantByOther,
     RelationKind,
     RevokeGrantsByOthers,
+    SchemaChange,
+    SchemaPrivilegeHeldElsewhere,
 } from './plan';
 
 export { applyAppPrivileges, readPrivilegeCatalog } from './catalog';
@@ -54,4 +58,11 @@ export { foreignOwnedObjects } from './ownership';
 export type { CatalogDb, ForeignOwnedObject } from './ownership';
 
 export { checkAppPrivileges, compareAppPrivileges } from './check';
-export type { AppPrivilegeDrift, AppPrivilegeHeldElsewhere, AppPrivilegesCheck, AppPublicGrantByOther } from './check';
+export type {
+    AppPrivilegeDrift,
+    AppPrivilegeHeldElsewhere,
+    AppPrivilegesCheck,
+    AppPublicGrantByOther,
+    AppSchemaDrift,
+    AppSchemaPrivilegeHeldElsewhere,
+} from './check';

@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { AppPrivilegeDrift } from '@spfn/core/db';
+import type { AppPrivilegeDrift, AppSchemaDrift } from '@spfn/core/db';
 
 import { validateDatabasePrerequisites } from './utils/drizzle.js';
 import {
@@ -70,16 +70,24 @@ export interface DbStatusReportV1
  * declared; a lost restriction), `grantOption` (declared, and held `WITH GRANT
  * OPTION`, so the app can pass it on) and `columns` (column grants, never
  * declared: `update (amount)`). `schemasWithoutUsage` are the managed schemas
- * the app role cannot use. `publicGrantsByOthers` are grants to PUBLIC from
+ * the app role cannot use. `schemaDrift` is what `db grant` would revoke on a
+ * managed schema, per schema and grantee as `drift`: `excess` (held beyond
+ * USAGE: CREATE, with which the app creates — and owns — tables there) and
+ * `grantOption` (USAGE held `WITH GRANT OPTION`). `publicGrantsByOthers` are grants to PUBLIC from
  * another grantor than the owner, which the app holds and which block `db
  * grant` until their grantor runs `statement`. Status reports drift exactly
  * when `db grant` has a statement that changes what the app role or PUBLIC
- * can do: one on a relation for the app role, PUBLIC or a role the app is a
- * member of, or USAGE on a schema for the app role. USAGE for the read role
+ * can do: one on a relation or schema for the app role, PUBLIC or a role the
+ * app is a member of, or USAGE on a schema for the app role. USAGE for the read role
  * changes nothing the app can do, so it is no drift. It does not say whether
  * PostgreSQL would refuse a statement (`db grant --dry-run` does). `heldElsewhere` is what the app role holds beyond its
  * declarations as a member of a role `db grant` does not plan for or from
- * another grantor than the owner, which `db grant` reports and does not change.
+ * another grantor than the owner, which `db grant` reports and does not change;
+ * `schemaHeldElsewhere` the same on a schema beyond USAGE (`through` may also
+ * be `granted to PUBLIC by <role>`). `ownedSchemas` names the managed schemas
+ * the app role owns or inherits the owner of, where `db grant` has no
+ * statement for it and what it holds is not compared; with a read role, what
+ * PUBLIC and the read role hold there is, as on any schema.
  * `ownedTables` counts the tables the app role owns or inherits the owner of,
  * which are outside `db grant` — no statement on them for any role or PUBLIC —
  * and compared for nothing: declared, not enforced, and not under row-level
@@ -110,8 +118,11 @@ export type DbStatusPrivileges =
             columns: string[];
         }[];
         schemasWithoutUsage: string[];
+        schemaDrift: { schema: string; grantee: string | null; through: string | null; excess: string[]; grantOption: string[] }[];
         publicGrantsByOthers: { schema: string; table: string; privilege: string; grantor: string; statement: string }[];
         heldElsewhere: { schema: string; table: string; privilege: string; through: string }[];
+        schemaHeldElsewhere: { schema: string; privilege: string; through: string }[];
+        ownedSchemas: string[];
         publicMayCreateInPublic: boolean;
         readRole: { checked: true } | { checked: false; detail: string };
     };
@@ -177,8 +188,11 @@ function privilegesReport(privileges: AppPrivilegesStatus): DbStatusPrivileges
             columns: [...entry.columns],
         })),
         schemasWithoutUsage: [...privileges.schemasWithoutUsage],
+        schemaDrift: privileges.schemaDrift.map(entry => ({ ...entry, excess: [...entry.excess], grantOption: [...entry.grantOption] })),
         publicGrantsByOthers: privileges.publicGrantsByOthers.map(entry => ({ ...entry })),
         heldElsewhere: privileges.heldElsewhere.map(entry => ({ ...entry })),
+        schemaHeldElsewhere: privileges.schemaHeldElsewhere.map(entry => ({ ...entry })),
+        ownedSchemas: [...privileges.ownedSchemas],
         publicMayCreateInPublic: privileges.publicMayCreateInPublic,
         readRole: { ...privileges.readRole },
     };
@@ -306,7 +320,7 @@ function printMigrationTargets(targets: ReturnType<typeof migrationTargets>): vo
 /**
  * The app role's privileges against the declarations: what `db grant` would
  * change, the grants to PUBLIC that block it, what it holds another way, the
- * tables it owns, a read role it could not look up, PUBLIC CREATE on public.
+ * tables and schemas it owns, a read role it could not look up, PUBLIC CREATE on public.
  * "Holds what is declared" only when there is none of the first three and the
  * read role was looked up.
  */
@@ -326,11 +340,18 @@ function printPrivileges(privileges: AppPrivilegesStatus): void
         console.log(chalk.dim(`🔐 The app role owns ${privileges.ownedTables} managed table(s), or inherits their owner: their declarations are not enforced, nothing is compared on them, and row-level security does not apply to it.`));
     }
 
+    if (privileges.ownedSchemas.length > 0)
+    {
+        console.log(chalk.dim(`🔐 The app role owns schema ${privileges.ownedSchemas.join(', ')}, or inherits their owner: what it holds there is not compared (with a read role, what PUBLIC and the read role hold there is), and it can create — and so own — tables there.`));
+    }
+
     printGrantWork(privileges);
     privileges.publicGrantsByOthers.forEach(grant => console.log(chalk.yellow(`⚠️  PUBLIC holds ${privilegeText(grant.privilege)} on ${grant.schema}.${grant.table}, `
         + `granted by ${grant.grantor}, so the app role holds it too — spfn db grant is blocked until ${grant.grantor} runs: ${grant.statement};`)));
     privileges.heldElsewhere.forEach(held => console.log(chalk.yellow(`⚠️  The app role holds ${privilegeText(held.privilege)} on ${held.schema}.${held.table} `
         + `beyond its declaration, ${held.through} — spfn db grant does not change it: the step changes no other role`)));
+    privileges.schemaHeldElsewhere.forEach(held => console.log(chalk.yellow(`⚠️  The app role holds ${privilegeText(held.privilege)} on schema ${held.schema} `
+        + `beyond USAGE, ${held.through} — spfn db grant does not change it: the step changes no other role`)));
 
     printReadRoleOrClean(privileges);
 
@@ -356,17 +377,17 @@ function printReadRoleOrClean(privileges: Extract<AppPrivilegesStatus, { checked
         return;
     }
 
-    if (privileges.drift.length + privileges.schemasWithoutUsage.length + privileges.publicGrantsByOthers.length + privileges.heldElsewhere.length === 0
-        && privileges.checkedTables > 0)
+    if (privileges.drift.length + privileges.schemasWithoutUsage.length + privileges.schemaDrift.length + privileges.publicGrantsByOthers.length
+        + privileges.heldElsewhere.length + privileges.schemaHeldElsewhere.length === 0 && privileges.checkedTables > 0)
     {
         console.log(chalk.green(`🔐 The app role holds what is declared on ${privileges.checkedTables} table(s)${privileges.ownedTables > 0 ? ' it does not own' : ''}`));
     }
 }
 
-/** What `db grant` would change: each schema the app cannot use, each relation and grantee whose privileges differ. */
+/** What `db grant` would change: each schema the app cannot use or holds more than USAGE on, each relation and grantee whose privileges differ. */
 function printGrantWork(privileges: Extract<AppPrivilegesStatus, { checked: true }>): void
 {
-    if (privileges.drift.length + privileges.schemasWithoutUsage.length === 0)
+    if (privileges.drift.length + privileges.schemasWithoutUsage.length + privileges.schemaDrift.length === 0)
     {
         return;
     }
@@ -374,11 +395,12 @@ function printGrantWork(privileges: Extract<AppPrivilegesStatus, { checked: true
     console.log(chalk.yellow('⚠️  The app role\'s privileges differ from the declarations — as the owner, run: pnpm spfn db grant '
         + '(--dry-run first shows whether PostgreSQL refuses a statement)'));
     privileges.schemasWithoutUsage.forEach(schema => console.log(chalk.yellow(`      schema ${schema}: no USAGE`)));
+    privileges.schemaDrift.forEach(entry => console.log(chalk.yellow(`      schema ${entry.schema}${granteeText(entry)}: ${schemaDriftText(entry)}`)));
     privileges.drift.forEach(entry => console.log(chalk.yellow(`      ${entry.schema}.${entry.table}${granteeText(entry)}: ${driftText(entry)}`)));
 }
 
 /** Whose grants an entry is about, when not the app role's own: ` (PUBLIC)`, or ` (member of app_read)`. */
-function granteeText(entry: AppPrivilegeDrift): string
+function granteeText(entry: Pick<AppPrivilegeDrift, 'grantee' | 'through'>): string
 {
     return entry.grantee === null ? ' (PUBLIC)' : entry.through === null ? '' : ` (${entry.through})`;
 }
@@ -392,6 +414,14 @@ function driftText(entry: AppPrivilegeDrift): string
         entry.excess.length > 0 && `beyond the declaration ${list(entry.excess)}`,
         entry.grantOption.length > 0 && `WITH GRANT OPTION on ${list(entry.grantOption)}`,
         entry.columns.length > 0 && `column grants ${list(entry.columns)}`,
+    ].filter(Boolean).join('; ');
+}
+
+function schemaDriftText(entry: AppSchemaDrift): string
+{
+    return [
+        entry.excess.length > 0 && `beyond USAGE ${entry.excess.map(privilegeText).join(', ')}`,
+        entry.grantOption.length > 0 && `WITH GRANT OPTION on ${entry.grantOption.map(privilegeText).join(', ')}`,
     ].filter(Boolean).join('; ');
 }
 

@@ -29,8 +29,8 @@
  *   the owner or inherits it: one note, since row-level security does not
  *   apply to that app either.
  *
- * A failure is thrown — a database error, or `AppGrantRefusal` for a table the
- * owner cannot grant on, for roles that disagree and for a REVOKE PostgreSQL
+ * A failure is thrown — a database error, or `AppGrantRefusal` for a table or
+ * schema the owner cannot grant on, for roles that disagree and for a REVOKE PostgreSQL
  * refuses because grants depend on it (2BP01), after which nothing is changed —
  * for the command to end through its own failure path. No URL is ever printed.
  */
@@ -317,6 +317,7 @@ function printRun(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOp
     }
 
     printOwnedRelations(plan);
+    printOwnedSchemas(plan);
 
     if (options.dryRun || run.applied)
     {
@@ -347,6 +348,21 @@ function printOwnedRelations(plan: AppPrivilegesRun['plan']): void
     }
 }
 
+/**
+ * Each role's managed schemas it owns, or whose owner it inherits: nothing is
+ * planned there for it; another planned role and PUBLIC are planned as anywhere.
+ */
+function printOwnedSchemas(plan: AppPrivilegesRun['plan']): void
+{
+    for (const role of new Set(plan.ownedSchemas.map(entry => entry.role)))
+    {
+        const schemas = plan.ownedSchemas.filter(entry => entry.role === role).map(entry => entry.schema);
+
+        console.log(chalk.dim(`   ${role} owns schema ${schemas.join(', ')}, or inherits their owner — nothing is granted or revoked there to it: `
+            + 'it can create — and so own — tables there, whose declarations are not enforced.'));
+    }
+}
+
 /** What the plan reports and does not change: privileges held another way, absent tables, PUBLIC CREATE; on a dry run, what stops it. */
 function printReports(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOptions): void
 {
@@ -355,6 +371,12 @@ function printReports(run: AppPrivilegesRun, roles: GrantRoles, options: GrantSt
     for (const held of plan.heldElsewhere)
     {
         console.log(chalk.yellow(`   ⚠️  ${held.role} holds ${held.privilege.toUpperCase()} on ${held.schema}.${held.name} beyond its declaration, ${held.through} — `
+            + 'not revoked: the step changes no other role'));
+    }
+
+    for (const held of plan.schemaHeldElsewhere)
+    {
+        console.log(chalk.yellow(`   ⚠️  ${held.role} holds ${held.privilege.toUpperCase()} on schema ${held.schema} beyond USAGE, ${held.through} — `
             + 'not revoked: the step changes no other role'));
     }
 
@@ -404,7 +426,10 @@ function missingRolesReason(plan: AppPrivilegesRun['plan'], roles: GrantRoles): 
 function ownershipReason(plan: AppPrivilegesRun['plan']): string
 {
     const relations = plan.foreignOwned.map(relation => `${relation.kind} ${relation.schema}.${relation.name} (owner ${relation.owner})`);
-    const schemas = plan.ungrantableSchemas.map(entry => `schema ${entry.schema}, which ${entry.role} may not use`);
+    const schemas = [
+        ...plan.ungrantableSchemas.map(entry => `schema ${entry.schema}, which ${entry.role} may not use`),
+        ...plan.foreignOwnedSchemas.map(entry => `schema ${entry.schema} (owner ${entry.owner}), where a role holds more than USAGE`),
+    ];
 
     return relations.length + schemas.length === 0 ? '' : `The owner cannot grant on ${[...relations, ...schemas].join(', ')}. `
         + 'Move them to the owner (REASSIGN OWNED, or ALTER … OWNER TO — the @spfn/core db README, "Database roles"), then run spfn db grant.';
@@ -428,12 +453,18 @@ function publicGrantsReason(plan: AppPrivilegesRun['plan']): string
 function refusalReason(refused: RefusedRevoke): string
 {
     const grants = refused.grantsByOthers;
-    const listing = grants === undefined ? '' : `\n   The grants on ${grants.schema}.${grants.name} of what it revokes that roles other than its owner made, `
+    const listing = grants === undefined ? '' : `\n   The grants on ${grantsObject(grants)} of what it revokes that roles other than its owner made, `
         + `with a grant option they held; the ones that depend on what it removes are among them:\n     ${grants.grants.map(grantLine).join('\n     ')}`;
 
     return `PostgreSQL refused ${refused.statement}: other grants depend on the grant option it takes (2BP01).${listing}\n   `
         + 'Either their grantors revoke them, or the owner runs the refused statement with CASCADE, which removes the grants that depend on it '
         + '(the step never cascades: that decision is yours). Then run spfn db grant; it reports the next statement PostgreSQL refuses, if any, the same way.';
+}
+
+/** `schema.relation`, or `schema <name>` for a REVOKE on the schema itself. */
+function grantsObject(grants: NonNullable<RefusedRevoke['grantsByOthers']>): string
+{
+    return grants.name === undefined ? `schema ${grants.schema}` : `${grants.schema}.${grants.name}`;
 }
 
 /** `grantor → grantee: PRIVILEGE (column)`, and whether it was given with its grant option. */

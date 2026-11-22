@@ -10,7 +10,7 @@
  *
  * | Object | App role | Read role (another role than the app's) | PUBLIC |
  * |---|---|---|---|
- * | schema | USAGE | USAGE, except `drizzle` | untouched |
+ * | schema | USAGE, nothing else | USAGE, except `drizzle`; nothing else | USAGE untouched; nothing else, except on `public` |
  * | table, foreign table | its declared set, else the default | `select` when the set has it | nothing |
  * | view | `select`; the default when every write through it is checked as the app | `select` | nothing |
  * | materialized view | `select` | `select` | nothing |
@@ -45,8 +45,28 @@
  * step does not change other roles. A grant to another planned role (the app
  * a member of the read role) is that role's to plan: one the plan revokes is
  * not reported as held. PUBLIC is brought to nothing whoever
- * granted it. A schema's USAGE is granted only when the role cannot use the
- * schema at all, by any path; nothing on a schema is revoked.
+ * granted it.
+ *
+ * A schema is compared the same way, its access list (`nspacl`) read as a
+ * relation's: USAGE is granted only when the role cannot use the schema at
+ * all, by any path, and never revoked; anything else the schema's owner gave
+ * a planned role — CREATE, with which it creates and so owns tables there,
+ * and the grant option of USAGE — is revoked. PUBLIC keeps USAGE, which gives
+ * the app nothing it does not hold and other roles the schema's functions and
+ * types, and loses the CREATE the owner gave it, as on a relation — except on
+ * `public`, the database's shared schema, where PUBLIC is every role of the
+ * database and CREATE is its default before PostgreSQL 15: that is reported
+ * (`publicMayCreateInPublic`), never revoked. What reaches a planned role
+ * another way — as a member of a role the plan does not manage, from another
+ * grantor, or through PUBLIC from another grantor — is reported
+ * (`schemaHeldElsewhere`), never revoked. A REVOKE of CREATE takes no table
+ * the role already created there: PostgreSQL keeps it, owned by that role,
+ * which is the owned-relation case below. A planned role that owns a schema,
+ * or inherits its owner (`ownedSchemas`), cannot be restricted there and gets
+ * no statement on it; that says nothing about another planned role, which
+ * still needs USAGE to reach its tables: it, and PUBLIC, whose grants reach
+ * it, are planned there as on any schema. Only a schema every planned role
+ * owns is outside the plan, as an owned relation is.
  *
  * Every REVOKE is plain (RESTRICT): the plan never cascades, which would
  * take a privilege from a role the step does not manage. Whether a REVOKE is
@@ -73,9 +93,10 @@
  * superuser is connected would make `db status`, which cannot tell who is,
  * disagree with the step in one setup or the other. `ALTER TABLE … OWNER TO`
  * the owner role brings it under the plan. A role name that is no
- * role (`missingRoles`), a relation another role owns, or a schema the role
- * cannot use and the owner cannot grant, blocks the plan (`blocked`): the
- * caller applies none of it.
+ * role (`missingRoles`), a relation another role owns, a schema the role
+ * cannot use and the owner cannot grant, or a schema the owner cannot revoke
+ * on (`foreignOwnedSchemas`), blocks the plan (`blocked`): the caller applies
+ * none of it.
  */
 
 import { APP_PRIVILEGES, type AppPrivilege, type AppTablePrivileges } from './declaration';
@@ -129,6 +150,9 @@ export interface CatalogSchema
     readonly usage: boolean;
     /** Whether the connected role owns the schema (or inherits its owner), so may grant on it */
     readonly mayGrant: boolean;
+    readonly owner: string;
+    /** The schema's access list (the owner's default one when it has none), the same for each role */
+    readonly grants: readonly CatalogGrant[];
 }
 
 /** A planned role as the catalog knows it. */
@@ -209,15 +233,16 @@ export interface GrantByOther
 
 /**
  * A REVOKE of the plan, and every grant of a privilege it names that a role
- * other than the relation's owner made on that relation, relation-level and
- * column-level. PostgreSQL refuses the REVOKE (2BP01) when one of them
- * depends on the grant option it takes; which one, PostgreSQL decides.
+ * other than the object's owner made on that relation — relation-level and
+ * column-level — or schema. PostgreSQL refuses the REVOKE (2BP01) when one of
+ * them depends on the grant option it takes; which one, PostgreSQL decides.
  */
 export interface RevokeGrantsByOthers
 {
     readonly statement: string;
     readonly schema: string;
-    readonly name: string;
+    /** The relation; absent for a REVOKE on the schema itself */
+    readonly name?: string;
     readonly grants: readonly GrantByOther[];
 }
 
@@ -240,6 +265,46 @@ export interface GranteeChange
     readonly grantOption: readonly string[];
     /** Column grants `excess` does not take with the table-level REVOKE: revoked */
     readonly columns: readonly { readonly privilege: string; readonly column: string }[];
+}
+
+/**
+ * What the plan revokes from one grantee on one managed schema: what the
+ * schema's owner gave it beyond USAGE.
+ */
+export interface SchemaChange
+{
+    readonly schema: string;
+    /** null for PUBLIC */
+    readonly grantee: string | null;
+    /** Held beyond USAGE (CREATE): revoked */
+    readonly excess: readonly string[];
+    /** USAGE held `WITH GRANT OPTION`: the option is revoked */
+    readonly grantOption: readonly string[];
+}
+
+/** A managed schema a planned role owns, or whose owner it inherits. */
+export interface OwnedSchema
+{
+    readonly role: string;
+    readonly schema: string;
+}
+
+/** A managed schema with something to revoke whose owner the connected role is not, nor inherits. */
+export interface ForeignOwnedSchema
+{
+    readonly schema: string;
+    readonly owner: string;
+}
+
+/** A privilege beyond USAGE a planned role holds on a managed schema that the owner's REVOKE does not take back. */
+export interface SchemaPrivilegeHeldElsewhere
+{
+    readonly role: string;
+    readonly schema: string;
+    /** `create`, or `usage with grant option` */
+    readonly privilege: string;
+    /** `member of <role>`, `granted by <role>`, or `granted to PUBLIC by <role>` */
+    readonly through: string;
 }
 
 /** A relation a planned role owns, or whose owner it inherits. */
@@ -268,15 +333,20 @@ export interface AppPrivilegesPlan
     readonly statements: readonly string[];
     /** What the relation statements change, per relation and grantee; one with nothing to change is left out */
     readonly changes: readonly GranteeChange[];
+    /** What the schema REVOKEs take, per schema and grantee; one with nothing to revoke is left out */
+    readonly schemaChanges: readonly SchemaChange[];
     /** Each planned role and managed schema it cannot use, by any path: USAGE is granted, or the schema is in `ungrantableSchemas` */
     readonly withoutUsage: readonly { readonly schema: string; readonly role: string }[];
     /** Planned roles that are the owner or inherit it: nothing is planned for them */
     readonly ownerRoles: readonly string[];
     /** Each relation the owner may grant on that a planned role owns or inherits the owner of: nothing is planned there, for any grantee */
     readonly ownedRelations: readonly OwnedRelation[];
+    /** Each managed schema and planned role that owns it or inherits its owner: no statement there for that role */
+    readonly ownedSchemas: readonly OwnedSchema[];
     /** Role names that are no role: nothing is planned, and the plan is blocked */
     readonly missingRoles: readonly string[];
     readonly heldElsewhere: readonly PrivilegeHeldElsewhere[];
+    readonly schemaHeldElsewhere: readonly SchemaPrivilegeHeldElsewhere[];
     /** Grants to PUBLIC the owner's REVOKE leaves in place: they block the plan */
     readonly publicGrantsByOthers: readonly PublicGrantByOther[];
     /** Each REVOKE of `statements` whose relation holds a grant of its privileges by another role than the owner */
@@ -286,8 +356,10 @@ export interface AppPrivilegesPlan
     /** Schemas a planned role cannot use and the owner cannot grant */
     readonly ungrantableSchemas: readonly { readonly schema: string; readonly role: string }[];
     readonly foreignOwned: readonly ForeignOwnedRelation[];
+    /** Schemas with something to revoke that the owner cannot revoke on: they block the plan */
+    readonly foreignOwnedSchemas: readonly ForeignOwnedSchema[];
     readonly publicMayCreateInPublic: boolean;
-    /** Whether a missing role, a foreign-owned relation, an ungrantable schema or a grant to PUBLIC by another role forbids applying it */
+    /** Whether a missing role, a foreign-owned relation or schema, an ungrantable schema or a grant to PUBLIC by another role forbids applying it */
     readonly blocked: boolean;
 }
 
@@ -301,25 +373,31 @@ export function planAppPrivileges(fullCatalog: PrivilegeCatalog, target: AppPriv
     const catalog = managedCatalog(fullCatalog, target.schemas);
     const ownerRoles = catalog.roles.filter(role => role.inheritsOwner).map(role => role.name);
     const planned = ownerRoles.includes(roles.app) || catalog.missingRoles.length > 0 ? [] : catalog.roles.filter(role => !role.inheritsOwner);
-    const schemas = planSchemas(catalog.schemas.filter(schema => planned.some(role => role.name === schema.role)), roles);
+    const schemaPlans = planSchemas(catalog.schemas.filter(schema => planned.some(role => role.name === schema.role)), planned, roles);
     const relationPlans = planned.length === 0 ? [] : planRelations(catalog, planned, desiredPrivileges(target, roles));
     const foreignOwned = planned.length === 0 ? [] : catalog.foreignOwned;
+    const ungrantableSchemas = schemaPlans.flatMap(plan => plan.ungrantable);
+    const foreignOwnedSchemas = schemaPlans.flatMap(plan => plan.foreignOwned);
 
     return {
-        statements: [...schemas.statements, ...relationPlans.flatMap(plan => plan.statements.map(planned => planned.statement))],
+        statements: [...schemaPlans, ...relationPlans].flatMap(plan => plan.statements.map(planned => planned.statement)),
         changes: relationPlans.flatMap(plan => plan.changes),
-        withoutUsage: schemas.lacking,
+        schemaChanges: schemaPlans.flatMap(plan => plan.changes),
+        withoutUsage: schemaPlans.flatMap(plan => plan.lacking),
         ownerRoles,
         ownedRelations: relationPlans.flatMap(plan => plan.owned),
+        ownedSchemas: schemaPlans.flatMap(plan => plan.owned),
         missingRoles: catalog.missingRoles,
         heldElsewhere: relationPlans.flatMap(plan => plan.heldElsewhere),
+        schemaHeldElsewhere: schemaPlans.flatMap(plan => plan.heldElsewhere),
         publicGrantsByOthers: relationPlans.flatMap(plan => plan.publicGrantsByOthers),
-        grantsByOthers: relationPlans.flatMap(plan => plan.grantsByOthers),
+        grantsByOthers: [...schemaPlans, ...relationPlans].flatMap(plan => plan.grantsByOthers),
         absentTables: absentTables(catalog, target),
-        ungrantableSchemas: schemas.ungrantable,
+        ungrantableSchemas,
         foreignOwned,
+        foreignOwnedSchemas,
         publicMayCreateInPublic: catalog.publicMayCreateInPublic,
-        blocked: catalog.missingRoles.length > 0 || foreignOwned.length > 0 || schemas.ungrantable.length > 0
+        blocked: catalog.missingRoles.length > 0 || foreignOwned.length > 0 || ungrantableSchemas.length > 0 || foreignOwnedSchemas.length > 0
             || relationPlans.some(plan => plan.publicGrantsByOthers.length > 0),
     };
 }
@@ -419,26 +497,137 @@ function writesCheckedAsUser(relation: AppRelation): boolean
     return relation.securityInvoker === true && relation.writeRule !== true && relation.insteadOfTrigger !== true;
 }
 
-/** USAGE for each planned role that cannot use a managed schema; the read role needs none on `drizzle`. */
-function planSchemas(schemas: readonly CatalogSchema[], roles: AppRoles): SchemaPlan
+/** `public`, the database's shared schema: PUBLIC there is every role of the database, so its PUBLIC entries are reported, never planned. */
+const SHARED_SCHEMA = 'public';
+
+/** Each managed schema's plan, from its rows: one per planned role. */
+function planSchemas(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles): SchemaPlan[]
 {
-    const lacking = schemas.filter(schema => !schema.usage && (schema.role === roles.app || schema.name !== BOOKKEEPING_SCHEMA));
-    const entry = (schema: CatalogSchema) => ({ schema: schema.name, role: schema.role });
+    return [...new Set(rows.map(row => row.name))].map(name => planSchema(rows.filter(row => row.name === name), planned, roles));
+}
+
+/**
+ * USAGE for each planned role that cannot use the schema — the read role
+ * needs none on `drizzle` — and a REVOKE of what the schema's owner gave a
+ * planned role, or PUBLIC, beyond it. A planned role that owns the schema or
+ * inherits its owner gets no statement there and is listed as `owned`; the
+ * other planned roles, and PUBLIC, whose grants reach them, are planned as on
+ * any schema; when every planned role owns it, nothing is planned there.
+ * `rows` share the schema's name, owner, access list and `mayGrant`.
+ */
+function planSchema(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles): SchemaPlan
+{
+    const [schema] = rows;
+    const owners = planned.filter(role => role.name === schema.owner || role.memberOf.includes(schema.owner));
+    const owned = owners.map(role => ({ role: role.name, schema: schema.name }));
+    const others = rows.filter(row => !owners.some(role => role.name === row.role));
+
+    if (others.length === 0)
+    {
+        return { ...NO_SCHEMA_PLAN, owned };
+    }
+
+    const lacking = others.filter(row => !row.usage && (row.role === roles.app || row.name !== BOOKKEEPING_SCHEMA))
+        .map(row => ({ schema: row.name, role: row.role }));
+    const changes = [...others.map(row => row.role), ...(schema.name === SHARED_SCHEMA ? [] : [null])]
+        .map(grantee => schemaChange(schema, grantee))
+        .filter(change => change.excess.length + change.grantOption.length > 0);
+    const statements = [
+        ...lacking.map(entry => ({ statement: `GRANT USAGE ON SCHEMA ${quoteIdentifier(entry.schema)} TO ${quoteIdentifier(entry.role)}`, revokes: [] })),
+        ...changes.flatMap(schemaChangeStatements),
+    ];
 
     return {
-        statements: lacking.filter(schema => schema.mayGrant)
-            .map(schema => `GRANT USAGE ON SCHEMA ${quoteIdentifier(schema.name)} TO ${quoteIdentifier(schema.role)}`),
-        lacking: lacking.map(entry),
-        ungrantable: lacking.filter(schema => !schema.mayGrant).map(entry),
+        lacking,
+        ungrantable: schema.mayGrant ? [] : lacking,
+        foreignOwned: schema.mayGrant || changes.length === 0 ? [] : [{ schema: schema.name, owner: schema.owner }],
+        changes,
+        owned,
+        statements: schema.mayGrant ? statements : [],
+        heldElsewhere: planned.filter(role => !owners.includes(role)).flatMap(role => schemaHeldElsewhere(schema, role, changes)),
+        grantsByOthers: schema.mayGrant ? statements.flatMap(planned => schemaRevokeGrantsByOthers(schema, planned)) : [],
     };
 }
 
-/** The schema statements, each role's schema without USAGE, and those of them the owner cannot grant. */
+/** One schema's plan, as `planSchema` describes it. */
 interface SchemaPlan
 {
-    statements: string[];
     lacking: { schema: string; role: string }[];
     ungrantable: { schema: string; role: string }[];
+    foreignOwned: ForeignOwnedSchema[];
+    changes: SchemaChange[];
+    owned: OwnedSchema[];
+    statements: PlannedStatement[];
+    heldElsewhere: SchemaPrivilegeHeldElsewhere[];
+    grantsByOthers: RevokeGrantsByOthers[];
+}
+
+const NO_SCHEMA_PLAN: SchemaPlan = { lacking: [], ungrantable: [], foreignOwned: [], changes: [], owned: [], statements: [], heldElsewhere: [], grantsByOthers: [] };
+
+/** What the schema's owner gave `grantee` beyond USAGE, and the grant option of USAGE; PUBLIC can hold no option. */
+function schemaChange(schema: CatalogSchema, grantee: string | null): SchemaChange
+{
+    const fromOwner = schema.grants.filter(grant => grant.grantee === grantee && grant.grantor === schema.owner);
+
+    return {
+        schema: schema.name,
+        grantee,
+        excess: fromOwner.filter(grant => grant.privilege !== 'usage').map(grant => grant.privilege),
+        grantOption: fromOwner.filter(grant => grant.privilege === 'usage' && grant.grantable === true).map(grant => grant.privilege),
+    };
+}
+
+/** REVOKE the excess, which takes its grant option too, then the grant option of USAGE. */
+function schemaChangeStatements(change: SchemaChange): PlannedStatement[]
+{
+    const object = `SCHEMA ${quoteIdentifier(change.schema)}`;
+    const role = granteeName(change.grantee);
+
+    return [
+        ...(change.excess.length > 0 ? [{ statement: `REVOKE ${privilegeList(change.excess)} ON ${object} FROM ${role}`, revokes: change.excess }] : []),
+        ...(change.grantOption.length > 0
+            ? [{ statement: `REVOKE GRANT OPTION FOR ${privilegeList(change.grantOption)} ON ${object} FROM ${role}`, revokes: change.grantOption }]
+            : []),
+    ];
+}
+
+/** `planned`, when it is a REVOKE, with the grants of what it revokes on `schema` that another role than its owner made; else nothing. */
+function schemaRevokeGrantsByOthers(schema: CatalogSchema, planned: PlannedStatement): RevokeGrantsByOthers[]
+{
+    const grants = schema.grants
+        .filter(grant => grant.grantor !== schema.owner && planned.revokes.includes(grant.privilege))
+        .map(({ grantor, grantee, privilege, grantable }) => ({ grantor, grantee, privilege, grantable: grantable === true }));
+
+    return grants.length === 0 ? [] : [{ statement: planned.statement, schema: schema.name, grants }];
+}
+
+/**
+ * What `role` holds on `schema` beyond USAGE that `changes` leave: through a
+ * role it is a member of — unless the plan revokes that role's grant — from
+ * another grantor, or through PUBLIC from another grantor (on `public`,
+ * `publicMayCreateInPublic` reports PUBLIC); USAGE's grant option included.
+ */
+function schemaHeldElsewhere(schema: CatalogSchema, role: CatalogRole, changes: readonly SchemaChange[]): SchemaPrivilegeHeldElsewhere[]
+{
+    const revoked = (grant: CatalogGrant) => grant.grantor === schema.owner
+        && changes.some(change => change.grantee === grant.grantee && change.excess.includes(grant.privilege));
+    const throughOf = (grant: CatalogGrant) => grant.grantee === role.name
+        ? (grant.grantor === schema.owner ? undefined : `granted by ${grant.grantor}`)
+        : grant.grantee === null
+            ? (grant.grantor === schema.owner || schema.name === SHARED_SCHEMA ? undefined : `granted to PUBLIC by ${grant.grantor}`)
+            : (role.memberOf.includes(grant.grantee) && !revoked(grant) ? `member of ${grant.grantee}` : undefined);
+    const optionOnly = (grant: CatalogGrant) => grant.privilege === 'usage' && grant.grantable === true && grant.grantee === role.name;
+    const entries = schema.grants
+        .filter(grant => grant.privilege !== 'usage' || optionOnly(grant))
+        .flatMap(grant =>
+        {
+            const through = throughOf(grant);
+            const privilege = optionOnly(grant) ? `${grant.privilege} with grant option` : grant.privilege;
+
+            return through === undefined ? [] : [{ role: role.name, schema: schema.name, privilege, through }];
+        });
+
+    return entries.filter((entry, index) => entries.findIndex(other => sameEntry(entry, other)) === index);
 }
 
 /** A statement of the plan, and the privileges it revokes: none for a GRANT. */
@@ -636,7 +825,7 @@ function revokedBy(changes: readonly GranteeChange[], relation: CatalogRelation,
         && (change.excess.includes(grant.privilege) || change.columns.some(column => column.privilege === grant.privilege && column.column === grant.column));
 }
 
-function sameEntry(a: PrivilegeHeldElsewhere, b: PrivilegeHeldElsewhere): boolean
+function sameEntry(a: Pick<PrivilegeHeldElsewhere, 'privilege' | 'through'>, b: Pick<PrivilegeHeldElsewhere, 'privilege' | 'through'>): boolean
 {
     return a.privilege === b.privilege && a.through === b.through;
 }

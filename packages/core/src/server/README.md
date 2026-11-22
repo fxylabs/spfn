@@ -179,6 +179,13 @@ defineServerConfig()
     .build();
 ```
 
+Migrating from `afterInfrastructure` fits a single-role project only — one without
+`DATABASE_OWNER_URL`, whose `DATABASE_URL` role owns the tables. With the owner role split off
+(the db README, "Database roles"), the server connects as the app role, which changes no structure:
+`spfn db grant` leaves it `USAGE` on the managed schemas and `SELECT` on `drizzle`, so a migration
+run there is refused (42501), and the server never holds `DATABASE_OWNER_URL`. Run `spfn db migrate`
+as the owner before the server starts.
+
 Hook signatures (`ServerConfig['lifecycle']`):
 
 | Hook | Signature | When |
@@ -912,6 +919,8 @@ export default defineServerConfig()
     .healthCheck({ path: '/api/health', detailed: true })
     .shutdown({ timeout: 280000 })
     .lifecycle({
+        // A single-role project only (no DATABASE_OWNER_URL): with the owner role split off,
+        // the app role changes no structure — run `spfn db migrate` as the owner instead
         afterInfrastructure: async () =>
         {
             await migrate(getDatabase(), { migrationsFolder: './drizzle' });
