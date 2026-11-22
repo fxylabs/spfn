@@ -306,19 +306,37 @@ will rewrite the entire codebase to the wrong style. Style is enforced via ESLin
 ## The pull-request check on Gitea Actions
 
 The check in `.gitea/workflows/` (build, lint, type-check, the repository checks,
-the example smokes and the test suites) does not start on its own. It runs when:
+the example smokes and the test suites) does not start on its own. Someone starts
+it by hand, on the pull request's branch: **Run workflow** on the `pr.yml` workflow
+in the repository's Actions tab, or the API —
 
-- a maintainer adds the label **`ci`** to the pull request — it checks the head at
-  that moment, scoped to the packages the pull request changes and everything that
-  depends on them; to check a later head, remove the label and add it again; or
-- someone starts it by hand (**Run workflow** on the `pr.yml` workflow in the
-  repository's Actions tab), on a branch, which checks everything.
+```sh
+curl --fail -X POST \
+    -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"ref":"refs/heads/<branch>","inputs":{"base":"main"}}' \
+    https://git.superfunction.xyz/api/v1/repos/superfunction/primitives/actions/workflows/pr.yml/dispatches
+```
+
+(`204 No Content` on success; the token needs write access to the repository, as
+any account that may push to it has.)
+
+- **Scope.** `base` is the branch the pull request merges into (default `main`).
+  The check runs for the packages `git diff origin/<base>...HEAD` touches and
+  everything that depends on them. A base that does not exist fails the run.
+  **An empty `base` (`"inputs":{"base":""}`) runs everything**; nothing else widens
+  or narrows the scope.
+- **Status.** The run checks the branch's head at the moment it was started, and
+  posts the status `ci / check` on that commit: `pending`, then `success` or
+  `failure`. The pull request whose head that commit is shows it. Gitea itself
+  posts no status for a manual run; the workflow does. A later push needs a new run.
 
 Not on every push, because the project runs CI once per pull request, on the head
 whose reviews are clean: a full run takes many minutes of a shared runner, and a
-head that review is still changing would be checked again anyway. Until Gitea
-Actions has passed once, Woodpecker (`.woodpecker/`) still checks pull requests as
-before.
+head that review is still changing would be checked again anyway. Not on a label
+either: Gitea cannot filter labels in `on:`, so every label change would start a
+run, and a run whose job is skipped posts `skipped` under the check's own status,
+which Gitea counts as passing. Until Gitea Actions has passed once, Woodpecker
+(`.woodpecker/`) still checks pull requests as before.
 
 ## Working with AI agents
 

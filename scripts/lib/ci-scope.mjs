@@ -14,8 +14,9 @@
  *   fetches the pull request's commit alone, from a private repository, and no
  *   later step has credentials — there is no `origin/main` to diff against.
  * - Gitea Actions hands over no list, but its checkout can fetch the history.
- *   Its workflow sets `CI_SCOPE_EVENT` and, for a pull request,
- *   `CI_SCOPE_DIFF_BASE`; the files are `git diff <base>...HEAD`.
+ *   Its workflow sets `CI_SCOPE_EVENT` and, for a run asked to check a pull
+ *   request's branch against its base, `CI_SCOPE_DIFF_BASE`; the files are
+ *   `git diff <base>...HEAD`.
  *
  * Pure functions, so the tests need no Woodpecker and no turbo:
  * `ciScope()` and `diffScope()` take the event, the changed files and a map
@@ -188,9 +189,11 @@ export function ciScope(event, rawFiles, packageDirs)
 /**
  * The scope of one Gitea Actions run, by the same rule as `ciScope()`.
  *
- * - `event` is `CI_SCOPE_EVENT`, the workflow's `github.event_name`.
- * - `base` is `CI_SCOPE_DIFF_BASE`, the pull request's base commit. Empty or
- *   unset, there is nothing to diff against, and that means all.
+ * - `event` is `CI_SCOPE_EVENT`: `pull_request` when the run was given a base
+ *   to diff against, the workflow's `github.event_name` otherwise.
+ * - `base` is `CI_SCOPE_DIFF_BASE`, the base branch as fetched
+ *   (`origin/<base>`). Empty or unset, there is nothing to diff against, and
+ *   that means all.
  * - `diffFiles(base)` returns the paths `git diff <base>...HEAD` lists — in
  *   the pipeline `changedFilesSince()`. It is called only for a pull request
  *   with a base.

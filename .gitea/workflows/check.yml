@@ -1,6 +1,6 @@
 # primitives CI on Gitea Actions — the check, as one reusable job.
 #
-# Called by pr.yml (a pull request labelled `ci`, or a manual run) and by
+# Called by pr.yml (a manual run on a pull request's branch) and by
 # release.yml (before a publish). It is not started on its own: its only
 # trigger is `workflow_call`, so both callers run the same steps rather than
 # two copies that drift. A reusable workflow rather than a composite action
@@ -21,6 +21,13 @@
 # and the TUNING values in the job's `env`.
 on:
     workflow_call:
+        inputs:
+            # The branch to diff against for the scope (pr.yml's `base`).
+            # Empty — release.yml passes none — runs everything.
+            base:
+                type: string
+                required: false
+                default: ""
 
 jobs:
     check:
@@ -39,12 +46,6 @@ jobs:
             # packages/core/src/db/__tests__/helpers/ci.ts).
             CI: "true"
 
-            # The scope input (scripts/lib/ci-scope.mjs): the event, and for a
-            # pull request the base to diff against. Empty on any other event,
-            # which runs everything — release.yml's call included.
-            CI_SCOPE_EVENT: ${{ github.event_name }}
-            CI_SCOPE_DIFF_BASE: ${{ github.event.pull_request.base.sha }}
-
             # TUNING — the one place for the build's heap and fan-out. In a
             # memory-limited container every Node process sizes its heap
             # against that one limit; two builds at 3 GB each is what fit
@@ -52,8 +53,8 @@ jobs:
             BUILD_CONCURRENCY: "2"
             BUILD_HEAP_MB: "3072"
         steps:
-            # The whole history: the scope diffs the pull request against its
-            # base, and `base...HEAD` needs the merge base present.
+            # The whole history: the scope diffs the branch against its base,
+            # and `base...HEAD` needs the merge base present.
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
@@ -66,14 +67,28 @@ jobs:
                   pnpm install --frozen-lockfile
                   pnpm setup:examples
 
-            # One `--filter=...<name>` per changed package, or nothing for a full
-            # run. Kept for the later steps through GITHUB_ENV, and unquoted
-            # there on purpose: several filters are several arguments, and an
-            # empty value is no argument. A failing ci-scope fails this step.
+            # The scope input (scripts/lib/ci-scope.mjs): with a base, the run
+            # is scoped as a pull request against `origin/<base>`, fetched here
+            # so an unknown base fails this step; without one, the event (a
+            # manual run or a push) is not a pull request, and that runs
+            # everything. Then one `--filter=...<name>` per changed package, or
+            # nothing for a full run. All three are kept for the later steps
+            # through GITHUB_ENV; FILTERS unquoted there on purpose: several
+            # filters are several arguments, and an empty value is no argument.
+            # A failing ci-scope fails this step.
             - name: Scope
+              env:
+                  SCOPE_BASE: ${{ inputs.base }}
+                  SCOPE_EVENT: ${{ github.event_name }}
               run: |
+                  export CI_SCOPE_EVENT="$SCOPE_EVENT" CI_SCOPE_DIFF_BASE=
+                  if [ -n "$SCOPE_BASE" ]
+                  then
+                      git fetch --no-tags origin "+refs/heads/$SCOPE_BASE:refs/remotes/origin/$SCOPE_BASE"
+                      CI_SCOPE_EVENT=pull_request CI_SCOPE_DIFF_BASE="origin/$SCOPE_BASE"
+                  fi
                   FILTERS="$(node scripts/ci-scope.mjs filters)"
-                  echo "FILTERS=$FILTERS" >> "$GITHUB_ENV"
+                  printf '%s\n' "CI_SCOPE_EVENT=$CI_SCOPE_EVENT" "CI_SCOPE_DIFF_BASE=$CI_SCOPE_DIFF_BASE" "FILTERS=$FILTERS" >> "$GITHUB_ENV"
 
             # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
             # `--filter` before the script name as its own option. Every
