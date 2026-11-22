@@ -1,0 +1,167 @@
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+    ],
+    "tables": [
+        {
+            "schema": "spfn_auth",
+            "table": "account_deletion_requests",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "account_exists_notices",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "auth_metadata",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "device_authorizations",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "device_links",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "key_revoke_all_tokens",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "mfa_attempt_budgets",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "mfa_challenges",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "mfa_recovery_codes",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "mfa_totp",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "mfa_verifications",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "oauth2_authorization_codes",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "oauth2_clients",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "oauth2_grants",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "oauth2_tokens",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "ops_tokens",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "passkeys",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "password_reset_tokens",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "permissions",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "role_permissions",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "roles",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "signup_link_tokens",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_invitations",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_permissions",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_profiles",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_public_keys",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_settings",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "user_social_accounts",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "users",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "verification_codes",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_auth",
+            "table": "webauthn_challenges",
+            "privileges": "default"
+        }
+    ]
+}

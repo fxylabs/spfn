@@ -28,6 +28,8 @@ import {
     id, uuid, timestamps, foreignKey, tenantKey, enumText, typedJsonb, createSchema,
     // Error mapping
     fromPostgresError,
+    // App privileges (privileges/)
+    appPrivileges,
 } from '@spfn/core/db';
 ```
 
@@ -54,6 +56,12 @@ Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyOnDelete`, `T
 `TenancyTableOptions`, `TenantListOptions`, `TenantListTable`, `TenantListWhereValue`, `TenantBindingKey`,
 `TenantSource`
 
+**App privileges** (`privileges/` — see [App privileges](#app-privileges-appprivileges)):
+`appPrivileges`, `declaredAppPrivileges`, `isAppPrivilege`, `readAppPrivilegesManifest`, `readMigrationsAppPrivileges`,
+`renderAppPrivilegesManifest`, `writeAppPrivilegesManifest`, `AppPrivilegesError` (class), `AppPrivilegesManifestError` (class), `APP_PRIVILEGES`,
+`DEFAULT_APP_PRIVILEGES`, `APP_PRIVILEGES_MARKER`, `APP_PRIVILEGES_MANIFEST_FILE`, `APP_PRIVILEGES_MANIFEST_VERSION`
+Types: `AppPrivilege`, `AppPrivilegesManifest`, `AppTablePrivileges`, `MigrationsAppPrivileges`
+
 **PostgreSQL error mapping** (`postgres-errors.ts`):
 `fromPostgresError`
 
@@ -62,7 +70,7 @@ Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyOnDelete`, `T
 `setDatabaseProvider`, `closeDatabase`,
 `getDatabaseInfo`, `forceReconnectDatabase`, `createDatabaseConnection`, `checkConnection`,
 `reportDatabaseError`, `isConnectionLevelError`, `resetConnectionErrorCounter`,
-`getDrizzleConfig`, `detectDialect`, `generateDrizzleConfigFile`, `renderDrizzleConfig` (0.3.0-beta.9: `getDrizzleConfig` returns `schemaSource` and `schemaRegistry`; the `autoDetectSchemas` option is gone — the CLI derives PostgreSQL schemas from the loaded modules, and a hand-written config passes `schemaFilter` itself)
+`getDrizzleConfig`, `detectDialect`, `drizzleKitSchemaFiles` (the files drizzle-kit loads for a config's `schema`, no database URL needed), `renderSchemaFilesConfig` (a project's drizzle.config.ts with its `schema` replaced by such files, each matching only itself in drizzle-kit's glob), `generateDrizzleConfigFile`, `renderDrizzleConfig` (0.3.0-beta.9: `getDrizzleConfig` returns `schemaSource` and `schemaRegistry`; the `autoDetectSchemas` option is gone — the CLI derives PostgreSQL schemas from the loaded modules, and a hand-written config passes `schemaFilter` itself)
 Types: `DatabaseClients`, `DatabaseInitOptions`, `DatabaseOptions`, `DatabaseProvider`,
 `DatabaseTransaction`, `DefaultDatabase`, `DrizzleDatabase`, `PoolConfig`, `RetryConfig`,
 `DrizzleConfigOptions`
@@ -940,6 +948,98 @@ line elsewhere — local development usually runs as the `postgres` superuser. A
 `tenantList` is checked with them: its policy does not apply to such a role either. A check
 that cannot run logs one warning and the server starts. An app without tenancy tables sends no
 query.
+
+### App privileges: `appPrivileges`
+
+A table can declare what the app role may do on it, next to the table:
+
+```typescript
+import { text } from 'drizzle-orm/pg-core';
+import { appPrivileges, createSchema, id } from '@spfn/core/db';
+
+const schema = createSchema('@acme/ledger');
+
+// Append-only: the app may read and add entries, never change or remove one
+export const entries = appPrivileges(schema.table('entries', {
+    id: id(),
+    body: text('body').notNull(),
+}), ['select', 'insert']);
+```
+
+**This release only records the declaration.** Nothing grants or revokes from it yet; the app
+role keeps whatever the owner granted it by hand (above). A later release adds the step that
+applies it — after `db push`, `db migrate` and `spfn add`, as the owner — and from then on the app
+role holds exactly the declared set on each table: missing privileges are granted, any other
+(a hand `GRANT TRUNCATE`, an `UPDATE` revoked by hand on a table that does not declare it) is
+taken back, and a restriction comes back whenever the table is created again.
+
+- **Values:** `select`, `insert`, `update`, `delete`, plus `truncate`, `references` and `trigger`
+  as explicit opt-ins (`APP_PRIVILEGES`). Table-level only; no column lists.
+- **Default:** a table without a declaration has `DEFAULT_APP_PRIVILEGES` —
+  `select`, `insert`, `update`, `delete`. `SELECT … FOR UPDATE` needs `update`.
+- **Refused where it is written:** an unknown privilege (`'udpate'`), an empty list, or a second,
+  different declaration on one table throws `AppPrivilegesError` naming the table (its `schema` and `table`),
+  so the schema module fails to load. The same list declared twice is accepted.
+- **One shape for every table:** it returns the table it is given, so it wraps `pgTable`,
+  `schema.table` (`createSchema`), `tenancy.table` and a function package's table alike. The
+  declaration is a `Symbol.for('spfn.app.privileges')` property on the table object
+  (`APP_PRIVILEGES_MARKER`), like the tenancy markers, so the CLI reads it through any copy of
+  `@spfn/core` the app's schema loads.
+
+**The manifest.** `spfn db migrate` loads no app source, so the declarations travel as a generated
+file: `spfn db generate` writes `privileges.json` beside the migrations of the run, in the `out`
+of the drizzle config it hands drizzle-kit — `src/server/drizzle`, the folder `db migrate` reads,
+unless the project's own `drizzle.config.ts` names another — listing the tables of that config's
+schema files. A function package ships its own in its migrations folder (`pnpm db:generate` in
+the package writes it); `@spfn/auth`, `@spfn/notification`, `@spfn/monitor`, `@spfn/cms` and
+`@spfn/workflow` do. It is generated: never edit it, regenerate it.
+
+**No file means the default set.** A migrations folder without `privileges.json` — a package
+published before this format, or one that never declares a privilege — declares nothing: every
+table its migrations create has `DEFAULT_APP_PRIVILEGES`. That is the contract the grant step
+reads by (`readMigrationsAppPrivileges` below). "No file" is read from the folder's listing: a
+`privileges.json` that is there and cannot be read — a dangling symlink, a loop, no permission —
+or is not a manifest is an error, never read as no file; so is a folder that cannot be listed,
+including one that does not exist (a wrong path would otherwise grant the defaults on a guess).
+
+```json
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": ["select", "insert", "update", "delete"],
+    "tables": [
+        { "schema": "acme_ledger", "table": "entries", "privileges": ["select", "insert"] },
+        { "schema": "acme_ledger", "table": "notes", "privileges": "default" }
+    ]
+}
+```
+
+(The file itself puts each list item on its own line.) Every table of the schema is listed — a
+function package's tables are in the package's folder, not the project's — its schema and name as
+two fields (a quoted identifier may hold a dot, so `"a.b"."c"` and `"a"."b.c"` are two tables),
+with its declared list, in `APP_PRIVILEGES` order, or `"default"`; the default set is recorded
+once. A table a file does not list is not one of its schema's tables, which is not the same as a
+table with the default set. Tables are sorted by schema, then table, and the format is fixed, so
+regenerating from unchanged entities writes the same bytes. `db generate` rewrites the file on every run, also when a
+changed declaration changes no DDL and drizzle-kit writes no migration.
+
+**A stale manifest is drift**, like a stale migration: an entity added or a declaration changed
+without `spfn db generate` afterwards. Today nothing reads the file. Once the grant step ships,
+`db migrate` applies the file, not the entities: a stale file grants the old set — a new table
+gets nothing until the next generate, and a restriction declared but not generated is not applied.
+Run `spfn db generate` after every entity change and commit the file with the migrations.
+
+For tools (the CLI, the later grant step): `declaredAppPrivileges(values)` returns the
+declarations of the tables among `values` (a schema module's exports) as `{ schema, table,
+privileges }` entries (`AppTablePrivileges`), sorted. `readMigrationsAppPrivileges(migrationsDir)`
+returns what a migrations folder declares: `{ kind: 'manifest', file, manifest }`, or
+`{ kind: 'none', default }` when the folder's listing holds no `privileges.json`.
+`readAppPrivilegesManifest(file)` reads and checks one file and throws
+`AppPrivilegesManifestError` naming the file on unreadable JSON, a version other than
+`APP_PRIVILEGES_MANIFEST_VERSION` (1), a table entry that is not a schema, a table and a privilege
+list or `"default"`, or one table listed twice; `readMigrationsAppPrivileges` throws the same for
+a file that is there, and for a folder it cannot list. `renderAppPrivilegesManifest` / `writeAppPrivilegesManifest` produce the
+file (`APP_PRIVILEGES_MANIFEST_FILE`).
 
 ---
 

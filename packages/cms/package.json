@@ -43,7 +43,7 @@
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\"",
     "watch": "tsup --watch",
     "clean": "rm -rf dist",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate && tsx scripts/write-privileges-manifest.ts",
     "rebuild-cache": "tsx src/scripts/rebuild-published-cache.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

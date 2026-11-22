@@ -7,10 +7,8 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { initDatabase, closeDatabase } from '@spfn/core/db';
+import { authMigrations, MIGRATIONS_FOLDER } from './migrations';
 
 // Integration tests run against the local PostgreSQL instance, one logical
 // database per package. Override with TEST_DATABASE_URL to point elsewhere.
@@ -50,9 +48,6 @@ const TEST_CONNECTION_OPTIONS = {
         client_min_messages: 'warning',
     },
 };
-
-// The package's committed migrations (./migrations), resolved from this file.
-const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 
 let testDb: ReturnType<typeof drizzle> | null = null;
 let testClient: ReturnType<typeof postgres> | null = null;
@@ -197,9 +192,8 @@ export async function clearTables(db: ReturnType<typeof drizzle>)
  * behind. Starts from a clean schema each run so a reused database keeps no
  * stale state.
  *
- * Layout is drizzle-kit 1.0: one directory per migration, named
- * `<utc-timestamp>_<label>`, each holding `migration.sql`. The timestamp prefix
- * is fixed width, so sorting the directory names sorts the migrations.
+ * The migrations are read by the reader `spfn db migrate` uses, in the order
+ * it applies them (./migrations.ts).
  */
 async function applyMigrations(db: ReturnType<typeof drizzle>)
 {
@@ -208,28 +202,12 @@ async function applyMigrations(db: ReturnType<typeof drizzle>)
     await db.execute(sql`DROP SCHEMA IF EXISTS spfn_auth CASCADE`);
     await db.execute(sql`DROP SCHEMA IF EXISTS drizzle CASCADE`);
 
-    const directories = readdirSync(MIGRATIONS_FOLDER, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name)
-        .filter(name => /^\d{14}_[A-Za-z0-9_-]+$/.test(name))
-        .sort();
+    const migrations = authMigrations();
 
-    if (directories.length === 0)
+    if (migrations.length === 0)
     {
         throw new Error(`No migrations found in ${MIGRATIONS_FOLDER}`);
     }
-
-    const migrations = directories.map((name) =>
-    {
-        const content = readFileSync(resolve(MIGRATIONS_FOLDER, name, 'migration.sql'), 'utf8');
-
-        return {
-            statements: content
-                .split('--> statement-breakpoint')
-                .map(statement => statement.trim())
-                .filter(Boolean),
-        };
-    });
 
     await db.transaction(async (tx) =>
     {

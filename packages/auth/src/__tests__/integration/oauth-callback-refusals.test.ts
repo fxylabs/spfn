@@ -17,10 +17,10 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Hono } from 'hono';
-import { readdirSync, readFileSync } from 'node:fs';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrations } from '../helpers/migrations';
 import { mountAuthApp, resetMemoryRateLimitStore } from '../helpers/oauth2';
 import { userPublicKeys, userSocialAccounts, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
@@ -52,7 +52,6 @@ const PASSWORD = 'Password123!';
 const OWNER_EMAIL = 'owner@refusals.test';
 const ACTIVE_KEY = `active:${Buffer.alloc(32, 7).toString('base64')}`;
 const RETIRED_KEY = `retired:${Buffer.alloc(32, 9).toString('base64')}`;
-const MIGRATIONS = new URL('../../../migrations/', import.meta.url);
 
 /** The identity the owner already has linked: no email, like Battle.net's. */
 const LINKED: NormalizedIdentity = { providerUserId: 'kakao-linked', email: null, emailVerified: false };
@@ -473,10 +472,7 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
     /** The two statements of the migration that adds the `(user_id, provider)` constraint. */
     function uniqueProviderMigration(): { remove: string; constrain: string }
     {
-        const statements = readdirSync(MIGRATIONS)
-            .filter(name => /^\d{14}_/.test(name))
-            .flatMap(name => readFileSync(new URL(`${name}/migration.sql`, MIGRATIONS), 'utf8').split('--> statement-breakpoint'))
-            .map(statement => statement.trim());
+        const statements = authMigrations().flatMap(migration => migration.statements);
         const constrain = statements.find(statement => statement.includes('"user_social_accounts_user_provider_unique_idx" ON'))!;
         const remove = statements[statements.indexOf(constrain) - 1]!;
 

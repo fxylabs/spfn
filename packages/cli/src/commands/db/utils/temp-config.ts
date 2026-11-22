@@ -1,7 +1,8 @@
 /**
  * The drizzle config a command writes for drizzle-kit when the project has no
  * drizzle.config.ts of its own (`db generate`, `db check`, `db drop`,
- * `db studio`)
+ * `db studio`), and the one `db generate` writes over a project's own to name
+ * the schema files it expanded
  *
  * The file carries a database URL, password included, so it is created
  * exclusively and readable by its owner only, and it is removed however the

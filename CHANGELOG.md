@@ -11,6 +11,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/core: `appPrivileges(table, [...])` declares what the app role may do on a table, and
+  `spfn db generate` records it in `privileges.json` (#405).** Nothing grants or revokes from it in
+  this release: the declaration and the manifest are recorded only, for the grant step a later
+  release adds. The helper takes `select`, `insert`, `update`, `delete`, and `truncate`,
+  `references`, `trigger` as opt-ins, table-level, and returns the table, so it wraps `pgTable`,
+  `schema.table` and `tenancy.table` alike; an unknown privilege, an empty list or a second, different
+  declaration on one table throws `AppPrivilegesError` naming the table when the schema module
+  loads. A table without one has `DEFAULT_APP_PRIVILEGES` (`select`, `insert`, `update`, `delete`).
+  `spfn db generate` writes `privileges.json` beside the migrations of the run — in the `out` of
+  the config it hands drizzle-kit, `src/server/drizzle` (the folder `db migrate` reads) unless the
+  project's own `drizzle.config.ts` names another — on every run, a change of declaration alone
+  included: format version 1, the default set once, every table of the schema files that config
+  names, each file loaded on its own as drizzle-kit loads it, every top-level export — `default`
+  included, nothing nested in an exported object or array — as drizzle-kit collects a migration's
+  tables, as `{ schema, table, privileges }` —
+  two fields, since a quoted identifier may hold a dot — with its list or `"default"`, sorted by
+  schema, then table, so an unchanged schema regenerates the same bytes. drizzle-kit is handed
+  those very files — with a project's own `drizzle.config.ts`, a config of the run that spreads it
+  and replaces its `schema` with them — so a `**` glob reaching a nested `node_modules`, which
+  drizzle-kit's glob does not skip, cannot put a table in the migration and not in the manifest. With its own
+  `drizzle.config.ts` a project needs no `DATABASE_URL` for it, and a schema module that fails to
+  load or two tables of one name declaring different lists stop the command before drizzle-kit
+  writes anything; a `privileges.json` that cannot be written stops it after (exit 1), naming the
+  file, that the migrations were written, and to rerun `spfn db generate`. `@spfn/auth`, `@spfn/notification`, `@spfn/monitor`, `@spfn/cms` and
+  `@spfn/workflow` ship their own in `migrations/privileges.json` (`pnpm db:generate` writes it;
+  every table has the default set), and each package's tests fail while the committed file differs
+  from its entities. A migrations folder without the file — a package published before this
+  release — declares nothing: every table its migrations create has the default set. For a later
+  grant step and the CLI, `@spfn/core/db` exports `declaredAppPrivileges(values)` (the markers of
+  loaded tables, read by their `Symbol.for` key, so through any copy of core, as sorted
+  `AppTablePrivileges` entries), `readMigrationsAppPrivileges(migrationsDir)` (the folder's
+  manifest, or `kind: 'none'` with the default set when the folder's listing holds no file; a
+  folder that cannot be listed — missing, unreadable, not a folder — or a listed file that cannot be
+  read, a dangling symlink included, throws `AppPrivilegesManifestError` naming the file) and
+  `readAppPrivilegesManifest(file)` (throws `AppPrivilegesManifestError` naming the file on
+  unreadable JSON, an unknown version, a malformed entry or a table listed twice; so does the
+  folder reader for a file that is there), with `renderAppPrivilegesManifest`,
+  `writeAppPrivilegesManifest`, `APP_PRIVILEGES`, `APP_PRIVILEGES_MARKER`,
+  `APP_PRIVILEGES_MANIFEST_FILE` and `APP_PRIVILEGES_MANIFEST_VERSION`; and
+  `drizzleKitSchemaFiles(schema, cwd?)`, the files drizzle-kit loads for a config's `schema`,
+  resolved without a database URL, and `renderSchemaFilesConfig(projectConfig, files)`, that
+  project config naming those files only.
 - **@spfn/core: a repository read can ask for the primary — `{ primary: true }`** (and the
   `ReadOptions` type from `@spfn/core/db`). A replica can lag behind the primary; a read that must
   see a write made a moment ago passes it. `TenantRepository`: `_findOne(tenantId, table, where,
@@ -206,6 +248,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: spfn: `spfn db generate` with a project `drizzle.config.ts` loads the schema modules
+  itself, as ESM, the way `db push` and `spfn dev` do (#405).** Before, with its own config, it
+  handed the file to drizzle-kit and loaded no entity in its own process. It now writes
+  `privileges.json`, and an `appPrivileges` declaration lives on the table object, not in the
+  source text, so every schema module is imported here, under the CLI's module hook, before
+  drizzle-kit runs; the config's `schema` and `out` are read the same way. An entity that only
+  drizzle-kit's loader could run — it reads `__dirname` or `__filename`, or calls `require` — now
+  stops `db generate` with the module's error (exit 1, before drizzle-kit writes anything). The
+  remedy is the ESM form: `import.meta.dirname`, `import.meta.filename`, `import`.
 - **BREAKING (two-role databases): spfn: every command that changes the schema connects as the
   table owner (#405).** `spfn db push` — its `--dry-run` and the function package migrations it
   applies too — and `spfn add` connect with `DATABASE_OWNER_URL`, else `DATABASE_URL`, as `db

@@ -1,0 +1,27 @@
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+    ],
+    "tables": [
+        {
+            "schema": "spfn_monitor",
+            "table": "error_events",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_monitor",
+            "table": "error_groups",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_monitor",
+            "table": "logs",
+            "privileges": "default"
+        }
+    ]
+}

@@ -45,7 +45,7 @@
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate && tsx scripts/write-privileges-manifest.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "check:circular": "madge --circular --extensions ts src/",
@@ -92,6 +92,7 @@
     "drizzle-orm": "1.0.0-rc.4",
     "madge": "^8.0.0",
     "tsup": "^9.0.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.3.3",
     "vitest": "^4.0.6"
   },

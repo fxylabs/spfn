@@ -78,7 +78,8 @@ Codegen and migrations (in packages/apps that use them):
 
 ```bash
 pnpm codegen            # spfn codegen run — regenerates route maps etc.
-pnpm db:generate        # drizzle-kit generate — create a migration from schema changes
+pnpm db:generate        # drizzle-kit generate — create a migration from schema changes;
+                        # in a function package, then migrations/privileges.json
 ```
 
 ## Version floors are a security surface

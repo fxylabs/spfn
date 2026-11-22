@@ -9,13 +9,15 @@
  * - an explicit entry is expanded the way drizzle-kit expands it: a file as-is, a
  *   directory one level deep, a glob with glob syntax and literal parentheses,
  *   nothing filtered; a missing file yields nothing
+ * - drizzleKitSchemaFiles expands a config's schema the same way, without a
+ *   database URL, a file reached by two entries counted once
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { getDrizzleConfig } from '../config-generator';
+import { drizzleKitSchemaFiles, getDrizzleConfig } from '../config-generator';
 import { toPosixPath } from '../path-utils';
 
 const DB_URL = 'postgresql://user:pass@localhost:5432/testdb';
@@ -352,6 +354,36 @@ describe('getDrizzleConfig packageFilter', () =>
         expect(schemas[0].endsWith('thing.entity.ts')).toBe(true);
 
         rmSync(join(cwd, '..', '..'), { recursive: true, force: true });
+    });
+});
+
+describe('drizzleKitSchemaFiles', () =>
+{
+    let cwd: string;
+
+    beforeEach(() =>
+    {
+        cwd = mkdtempSync(join(tmpdir(), 'spfn-config-gen-'));
+        mkdirSync(join(cwd, 'db', 'nested'), { recursive: true });
+        writeFileSync(join(cwd, 'db', 'a.ts'), 'export const a = {};');
+        writeFileSync(join(cwd, 'db', 'b.ts'), 'export const b = {};');
+        writeFileSync(join(cwd, 'db', 'nested', 'c.ts'), 'export const c = {};');
+    });
+
+    afterEach(() =>
+    {
+        rmSync(cwd, { recursive: true, force: true });
+        vi.unstubAllEnvs();
+    });
+
+    it('expands as getDrizzleConfig does, with no DATABASE_URL, each file once', () =>
+    {
+        vi.stubEnv('DATABASE_URL', '');
+
+        expect(drizzleKitSchemaFiles(['./db', './db/*.ts', './db/a.ts'], cwd).sort())
+            .toEqual([join(cwd, 'db', 'a.ts'), join(cwd, 'db', 'b.ts')]);
+        expect(drizzleKitSchemaFiles('./db/**/*.ts', cwd).sort())
+            .toEqual(schemasOf(expanded(cwd, './db/**/*.ts')).sort());
     });
 });
 

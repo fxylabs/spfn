@@ -37,12 +37,11 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { Hono } from 'hono';
 import { and, desc, eq, sql } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrations } from '../helpers/migrations';
 import { createTestUser, mountAuthApp, resetMemoryRateLimitStore, TEST_PASSWORD } from '../helpers/oauth2';
 import { accountDeletionRequests, mfaTotp, mfaVerifications, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -77,7 +76,6 @@ const dbAvailable = await isDatabaseAvailable();
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
-const MIGRATIONS = join(__dirname, '..', '..', '..', 'migrations');
 const PURGE_AT = new Date('2031-03-04T05:06:07.000Z');
 /** The keyring second-factor enrolment encrypts the TOTP secret with (T3). */
 const ACTIVE_KEY = `active:${Buffer.alloc(32, 7).toString('base64')}`;
@@ -581,33 +579,22 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
     // migrations, and leaves it fully migrated.
     // ========================================================================
 
-    /** Every migration directory, in order, split at the one that adds `users.deletion`. */
-    function migrationsAroundThisChange(): { before: string[]; from: string[] }
+    /** Every migration, in order, split at the one that adds `users.deletion`. */
+    function migrationsAroundThisChange(): { before: string[][]; from: string[][] }
     {
-        const directories = readdirSync(MIGRATIONS, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory() && /^\d{14}_/.test(entry.name))
-            .map((entry) => entry.name)
-            .sort();
-        const index = directories.findIndex((name) => migrationOf(name).includes('ADD COLUMN "deletion"'));
+        const migrations = authMigrations().map((migration) => migration.statements);
+        const index = migrations.findIndex((statements) => statements.some((statement) => statement.includes('ADD COLUMN "deletion"')));
 
         expect(index).toBeGreaterThan(0);
 
-        return { before: directories.slice(0, index), from: directories.slice(index) };
+        return { before: migrations.slice(0, index), from: migrations.slice(index) };
     }
 
-    function migrationOf(directory: string): string
+    async function apply(migrations: string[][]): Promise<void>
     {
-        return readFileSync(join(MIGRATIONS, directory, 'migration.sql'), 'utf8');
-    }
-
-    async function apply(directories: string[]): Promise<void>
-    {
-        for (const statement of directories.flatMap((name) => migrationOf(name).split('--> statement-breakpoint')))
+        for (const statement of migrations.flat())
         {
-            if (statement.trim())
-            {
-                await getTestDb().execute(sql.raw(statement));
-            }
+            await getTestDb().execute(sql.raw(statement));
         }
     }
 

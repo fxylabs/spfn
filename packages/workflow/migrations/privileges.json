@@ -1,0 +1,22 @@
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+    ],
+    "tables": [
+        {
+            "schema": "spfn_workflow",
+            "table": "executions",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_workflow",
+            "table": "step_executions",
+            "privileges": "default"
+        }
+    ]
+}

@@ -46,7 +46,9 @@ const DECLARATION_PATTERN = /\.d\.[mc]?ts$/;
  * Directories a walk never enters. drizzle-kit's glob runs with its default
  * `dot: false`, so dot-directories (.git, .next) are skipped there too;
  * node_modules is skipped on purpose so a `**` pattern cannot pull a
- * dependency's file into the project schema.
+ * dependency's file into the project schema. drizzle-kit's glob does not skip
+ * it, so `db generate` hands drizzle-kit this walk's files, never the raw
+ * glob (`renderSchemaFilesConfig`).
  */
 const SKIPPED_DIRECTORIES = /^(\.|node_modules$)/;
 
@@ -291,6 +293,23 @@ function expandSchemaEntry(entry: string, cwd: string): string[]
 
     // A directory entry is read one level deep, the way drizzle-kit reads it
     return stat.isDirectory() ? scanDirectory(path, 1) : [path];
+}
+
+/**
+ * The files drizzle-kit loads for a config's `schema`: each entry expanded as
+ * drizzle-kit expands it (see `expandSchemaEntry`), a file reached twice
+ * counted once. Needs no database URL, unlike `getDrizzleConfig`, so a tool
+ * may read the schema of a project's own drizzle.config.ts the way
+ * drizzle-kit does without connecting anywhere.
+ *
+ * @param schema - The config's `schema` entry: file(s), directories or glob pattern(s)
+ * @param cwd - Base for relative entries, drizzle-kit's working directory (default: process.cwd())
+ */
+export function drizzleKitSchemaFiles(schema: string | string[], cwd: string = process.cwd()): string[]
+{
+    const entries = Array.isArray(schema) ? schema : [schema];
+
+    return Array.from(new Set(entries.flatMap(entry => expandSchemaEntry(entry, cwd))));
 }
 
 /**
@@ -696,6 +715,44 @@ export default defineConfig({
     dialect: '${config.dialect}',
     dbCredentials: ${JSON.stringify(config.dbCredentials, null, 4)},${schemaFilterLine}${migrationsLine}
 });
+`;
+}
+
+/**
+ * `path` as a pattern drizzle-kit's glob (glob 7, minimatch 3) matches only
+ * itself with: every entry of a config's `schema` is globbed, a file path too.
+ * Each of `? * ( ) [ ]` goes in a class of its own; braces are
+ * backslash-escaped, since a class does not stop brace expansion.
+ *
+ * @internal
+ */
+function literalGlob(path: string): string
+{
+    return path.replace(/[?*()[\]]/g, '[$&]').replace(/[{}]/g, '\\$&');
+}
+
+/**
+ * A drizzle.config.ts that is the project's own `projectConfig` with its
+ * `schema` replaced by `files`, each matching only itself. `db generate`
+ * hands it to drizzle-kit with the files `drizzleKitSchemaFiles` expanded,
+ * so drizzle-kit reads the very files the run loaded for the manifest:
+ * one expansion, not drizzle-kit's glob beside core's copy of it.
+ *
+ * @param projectConfig - Absolute path of the project's drizzle.config.ts
+ * @param files - Absolute schema file paths
+ */
+export function renderSchemaFilesConfig(projectConfig: string, files: string[]): string
+{
+    const schema = files.map(file => `        ${JSON.stringify(literalGlob(toPosixPath(file)))},`).join('\n');
+
+    return `import project from ${JSON.stringify(toPosixPath(projectConfig))};
+
+export default {
+    ...project,
+    schema: [
+${schema}
+    ],
+};
 `;
 }
 

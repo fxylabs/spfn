@@ -2,11 +2,9 @@
  * Test database setup for CMS repository integration tests.
  */
 
-import { closeDatabase, initDatabase } from '@spfn/core/db';
+import { closeDatabase, initDatabase, readMigrationEntries } from '@spfn/core/db';
 import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 
@@ -75,19 +73,11 @@ async function applyMigrations(db: ReturnType<typeof drizzle>)
     await db.execute(sql`DROP SCHEMA IF EXISTS spfn_cms CASCADE`);
     await db.execute(sql`DROP SCHEMA IF EXISTS drizzle CASCADE`);
 
-    const migrationFiles = readdirSync(MIGRATIONS_FOLDER)
-        .filter(file => file.endsWith('.sql'))
-        .sort();
-
-    for (const file of migrationFiles)
+    // Read as `spfn db migrate` reads them: the journal's migrations, and not
+    // the other files of the folder (privileges.json).
+    for (const migration of readMigrationEntries(MIGRATIONS_FOLDER, '@spfn/cms'))
     {
-        const migration = readFileSync(resolve(MIGRATIONS_FOLDER, file), 'utf8');
-        const statements = migration
-            .split('--> statement-breakpoint')
-            .map(statement => statement.trim())
-            .filter(Boolean);
-
-        for (const statement of statements)
+        for (const statement of migration.statements)
         {
             await db.execute(sql.raw(statement));
         }

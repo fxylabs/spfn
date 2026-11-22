@@ -1,0 +1,27 @@
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+    ],
+    "tables": [
+        {
+            "schema": "spfn_cms",
+            "table": "label_values",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_cms",
+            "table": "labels",
+            "privileges": "default"
+        },
+        {
+            "schema": "spfn_cms",
+            "table": "published_cache",
+            "privileges": "default"
+        }
+    ]
+}

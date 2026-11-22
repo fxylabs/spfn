@@ -714,6 +714,9 @@ importers:
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.20.6
+        version: 4.22.4
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -753,6 +756,9 @@ importers:
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.20.6
+        version: 4.22.4
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -932,6 +938,9 @@ importers:
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(patch_hash=3xsxyj3qu32icn7lid6e5feqtm)(jiti@2.6.1)(postcss@8.5.31)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.20.6
+        version: 4.22.4
       typescript:
         specifier: ^5.3.3
         version: 5.9.3

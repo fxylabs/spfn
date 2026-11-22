@@ -9,12 +9,10 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Hono } from 'hono';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { eq, sql } from 'drizzle-orm';
 import { Type } from '@sinclair/typebox';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrationContaining } from '../helpers/migrations';
 import { mountAuthApp } from '../helpers/oauth2';
 import { userProfiles, userSettings, users } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -56,18 +54,11 @@ const dbAvailable = await isDatabaseAvailable();
 
 const PASSWORD = 'SecurePassword123!';
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
-const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 
 /** The backfill statements of the migration that creates user_settings */
 function backfillStatements(): string[]
 {
-    const folder = readdirSync(MIGRATIONS_FOLDER)
-        .find(name => readFileSync(join(MIGRATIONS_FOLDER, name, 'migration.sql'), 'utf8')
-            .includes('CREATE TABLE "spfn_auth"."user_settings"'))!;
-
-    return readFileSync(join(MIGRATIONS_FOLDER, folder, 'migration.sql'), 'utf8')
-        .split('--> statement-breakpoint')
-        .map(statement => statement.trim())
+    return authMigrationContaining('CREATE TABLE "spfn_auth"."user_settings"').statements
         .filter(statement => statement.startsWith('INSERT INTO "spfn_auth"."user_settings"'));
 }
 

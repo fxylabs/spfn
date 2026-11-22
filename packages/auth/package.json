@@ -77,7 +77,7 @@
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate && tsx scripts/write-privileges-manifest.ts",
     "codegen": "spfn codegen run",
     "export:mobile-contract": "tsx scripts/export-mobile-contract.ts",
     "test": "vitest run",

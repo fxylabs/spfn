@@ -103,7 +103,9 @@ export function discoverFunctionMigrations(cwd: string = process.cwd()): Functio
  * Read a package's migration entries, auto-detecting the folder layout.
  *
  * A `meta/_journal.json` marks the drizzle-kit ≤0.31 layout; without it the
- * directory is read as the drizzle-kit 1.0 layout.
+ * directory is read as the drizzle-kit 1.0 layout, where a migration is a
+ * directory holding `migration.sql`; any other entry of the folder — the
+ * `privileges.json` manifest `spfn db generate` writes beside them — is not one.
  */
 export function readMigrationEntries(migrationsDir: string, packageName: string): FunctionMigrationEntry[]
 {

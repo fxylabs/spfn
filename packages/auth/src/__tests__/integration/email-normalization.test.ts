@@ -19,12 +19,10 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ConflictError } from '@spfn/core/errors';
 import { AccountAlreadyExistsError } from '@spfn/auth/errors';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrationContaining } from '../helpers/migrations';
 import { accountExistsNotices, passwordResetTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 import { hashPassword } from '@/server/helpers/password';
@@ -53,7 +51,6 @@ const dbAvailable = await isDatabaseAvailable();
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const PASSWORD = 'SecurePassword123!';
-const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 
 describe.skipIf(!dbAvailable)('Email normalization', () =>
 {
@@ -458,17 +455,10 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
 
     describe('#156 O1: an address left in another case', () =>
     {
-        /** The committed migration that builds the folded-email index. */
-        function foldedIndexMigration(): string
+        /** The statements of the committed migration that builds the folded-email index. */
+        function foldedIndexMigration(): string[]
         {
-            const sources = readdirSync(MIGRATIONS_FOLDER, { withFileTypes: true })
-                .filter(entry => entry.isDirectory())
-                .map(entry => readFileSync(resolve(MIGRATIONS_FOLDER, entry.name, 'migration.sql'), 'utf8'))
-                .filter(source => source.includes('users_email_folded_idx'));
-
-            expect(sources).toHaveLength(1);
-
-            return sources[0]!;
+            return authMigrationContaining('users_email_folded_idx').statements;
         }
 
         /** The SQL `findByFoldedEmail` sends, captured without running it. */
@@ -561,7 +551,7 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
             await insertRaw('OWNER@example.com');
             await getTestDb().execute(sql`DROP INDEX spfn_auth.users_email_folded_idx`);
 
-            const statements = foldedIndexMigration().split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean);
+            const statements = foldedIndexMigration();
             await getTestDb().transaction(async (tx) =>
             {
                 for (const statement of statements)
@@ -577,7 +567,7 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
 
         it('F9: the generated migration builds a non-unique index on lower(btrim(email))', () =>
         {
-            const source = foldedIndexMigration();
+            const source = foldedIndexMigration().join('\n');
 
             expect(source).toContain('CREATE INDEX "users_email_folded_idx" ON "spfn_auth"."users" (lower(btrim("email")));');
             expect(source).not.toMatch(/UNIQUE/i);

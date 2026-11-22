@@ -26,6 +26,9 @@ import { databaseUrlFor, loadEnvFor, type DatabaseCommand } from '../../../utils
 
 const TLS_SSL_MODES = new Set(['no-verify', 'prefer', 'require', 'verify-ca', 'verify-full']);
 
+/** The project's own drizzle config, as drizzle-kit's `--config` takes it */
+export const PROJECT_DRIZZLE_CONFIG = './drizzle.config.ts';
+
 function parseDatabaseUrl(databaseUrl: string | undefined): URL | undefined
 {
     if (!databaseUrl)
@@ -160,7 +163,7 @@ export async function runDrizzleCommand(command: string, databaseUrl: string | u
 {
     let tempConfig: TempDrizzleConfig | undefined;
 
-    if (!existsSync('./drizzle.config.ts'))
+    if (!existsSync(PROJECT_DRIZZLE_CONFIG))
     {
         if (!databaseUrl)
         {
@@ -172,11 +175,24 @@ export async function runDrizzleCommand(command: string, databaseUrl: string | u
         tempConfig = writeTempDrizzleConfig(await generateTempConfigOrExit({ reconcile: command === 'generate', databaseUrl }));
     }
 
-    const configPath = tempConfig?.path ?? './drizzle.config.ts';
+    try
+    {
+        await runDrizzleKit(command, tempConfig?.path ?? PROJECT_DRIZZLE_CONFIG, databaseUrl);
+    }
+    finally
+    {
+        tempConfig?.remove();
+    }
+}
 
-    // Run drizzle-kit command with spawn to support interactive prompts
-    const args = command.split(' ');
-    args.push(`--config=${configPath}`);
+/**
+ * Run drizzle-kit `command` against the config at `configPath`, with the
+ * terminal attached for its prompts. `databaseUrl` decides only whether TLS
+ * verification is relaxed (`shouldRelaxDbTls`).
+ */
+export function runDrizzleKit(command: string, configPath: string, databaseUrl: string | undefined): Promise<void>
+{
+    const args = [...command.split(' '), `--config=${configPath}`];
 
     return new Promise<void>((resolve, reject) =>
     {
@@ -188,24 +204,8 @@ export async function runDrizzleCommand(command: string, databaseUrl: string | u
                 : { ...process.env },
         });
 
-        drizzleProcess.on('close', (code) =>
-        {
-            tempConfig?.remove();
-            if (code === 0)
-            {
-                resolve();
-            }
-            else
-            {
-                reject(new Error(`drizzle-kit ${command} exited with code ${code}`));
-            }
-        });
-
-        drizzleProcess.on('error', (error) =>
-        {
-            tempConfig?.remove();
-            reject(error);
-        });
+        drizzleProcess.on('close', code => (code === 0 ? resolve() : reject(new Error(`drizzle-kit ${command} exited with code ${code}`))));
+        drizzleProcess.on('error', reject);
     });
 }
 
@@ -315,6 +315,17 @@ export function withoutFunctionPackageObjects(
     if (owners.size === 0) return imports;
 
     return Object.fromEntries(Object.entries(imports).filter(([, value]) => !ownerOf(value, owners)));
+}
+
+/**
+ * `values` less those living in a schema a function package owns, as
+ * `withoutFunctionPackageObjects` leaves a module set's exports
+ */
+export function withoutFunctionPackageValues(values: unknown[], cwd: string = process.cwd()): unknown[]
+{
+    const owners = functionPackageSchemas(cwd);
+
+    return values.filter(value => !ownerOf(value, owners));
 }
 
 /**
@@ -446,12 +457,26 @@ async function resolveTempConfigSchema(config: DrizzleConfig, cwd: string, recon
 }
 
 /**
- * Build the temp drizzle config for a project without drizzle.config.ts.
+ * The temp drizzle config for a project without drizzle.config.ts, with what
+ * it hands drizzle-kit: the schema files and the migrations folder
+ */
+export interface TempConfig
+{
+    /** The drizzle.config.ts source */
+    content: string;
+    /** The schema files the config names */
+    files: string[];
+    /** The config's `out`, relative to the working directory */
+    out: string;
+}
+
+/**
+ * Resolve the temp drizzle config for a project without drizzle.config.ts.
  * drizzle-kit `generate` and `studio` read no schemaFilter, so none is written.
  * `reconcile` loads the entity modules to settle folder versus registry; pass it
  * for a command that reads the schema.
  */
-export async function generateTempConfig(options: { reconcile: boolean; databaseUrl: string }): Promise<string>
+export async function resolveTempConfig(options: { reconcile: boolean; databaseUrl: string }): Promise<TempConfig>
 {
     loadEnv();
 
@@ -469,7 +494,20 @@ export async function generateTempConfig(options: { reconcile: boolean; database
     if (resolved.note) console.log(chalk.yellow(`ℹ️  ${resolved.note}`));
     console.log();
 
-    return renderDrizzleConfig({ ...config, schema: resolved.files }, cwd);
+    return {
+        content: renderDrizzleConfig({ ...config, schema: resolved.files }, cwd),
+        files: resolved.files,
+        out: config.out,
+    };
+}
+
+/**
+ * Build the temp drizzle config's source for a project without drizzle.config.ts
+ * (see resolveTempConfig).
+ */
+export async function generateTempConfig(options: { reconcile: boolean; databaseUrl: string }): Promise<string>
+{
+    return (await resolveTempConfig(options)).content;
 }
 
 /**
@@ -554,7 +592,12 @@ export interface DrizzleConfigSchema
 {
     schema: string | string[];
     schemaFilter?: string[];
+    /** The migrations folder the config names; drizzle-kit writes to `DRIZZLE_KIT_DEFAULT_OUT` when it names none */
+    out?: string;
 }
+
+/** The migrations folder drizzle-kit writes to for a config that names no `out` */
+export const DRIZZLE_KIT_DEFAULT_OUT = 'drizzle';
 
 /** Node's message for a CommonJS-only name read in an ES module. */
 const COMMONJS_GLOBAL = /\b(__dirname|__filename|require|module|exports) is not defined in ES module scope/;
@@ -581,8 +624,8 @@ function drizzleConfigError(configPath: string, error: unknown): Error
 }
 
 /**
- * Read the `schema` and `schemaFilter` entries of the project's drizzle.config.ts,
- * the file `db generate` runs against when the project has one. Imported in
+ * Read the `schema`, `schemaFilter` and `out` entries of the project's
+ * drizzle.config.ts, the file `db generate` runs against when the project has one. Imported in
  * this process, under the CLI's module hook: as ESM in any app.
  *
  * @returns undefined when there is no drizzle.config.ts or it names no schema
@@ -607,7 +650,11 @@ export async function readDrizzleConfigSchema(cwd: string = process.cwd()): Prom
     // drizzle-kit accepts schemaFilter as a string or an array
     const schemaFilter = typeof config.schemaFilter === 'string' ? [config.schemaFilter] : config.schemaFilter;
 
-    return { schema, schemaFilter: Array.isArray(schemaFilter) ? schemaFilter : undefined };
+    return {
+        schema,
+        schemaFilter: Array.isArray(schemaFilter) ? schemaFilter : undefined,
+        out: typeof config.out === 'string' ? config.out : undefined,
+    };
 }
 
 /** Schema named by the user, with where it came from; undefined leaves the resolution to core (the folder scan, or the registry). */
@@ -632,36 +679,47 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
     return fromConfig && { ...fromConfig, label: 'drizzle.config.ts' };
 }
 
+/** A module's exports less `default` */
+const namedExports = (exports: Record<string, unknown>) => Object.fromEntries(Object.entries(exports).filter(([key]) => key !== 'default'));
+
 /**
- * Dynamically import schema files and merge all exports into a single object.
+ * Dynamically import schema files and merge their named exports into a single
+ * object (`default` is left out, as push has always left it).
  * Used to build the `imports` parameter for drizzle-kit's `pushSchema()`.
+ * Two files exporting one name keep the later file's value; a caller that
+ * must see every table loads the modules apart (`loadSchemaModules`).
+ */
+export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<string, unknown>>
+{
+    return Object.assign({}, ...(await loadSchemaModules(schemaFiles)).map(namedExports));
+}
+
+/**
+ * Dynamically import schema files, one record of exports per file, in order,
+ * the way drizzle-kit reads them: each file on its own, every top-level export
+ * of it, `default` included. drizzle-kit (1.0.0-rc.4, `fromExports`) takes
+ * `Object.values` of a module, so a table exported as `default` is in its
+ * migration, and one inside an exported object or array is not.
  *
  * A plain `import()`: `bin/spfn.js` starts this process under tsx with the
  * CLI's module hook, so a `.ts` entity loads as ESM whatever the app's
  * `package.json` says, as `spfn dev` and `spfn build` load it. Without tsx a
  * `.ts` file stops the command naming it (`assertTypeScriptLoadable`).
  */
-export async function loadSchemaImports(schemaFiles: string[]): Promise<Record<string, unknown>>
+export async function loadSchemaModules(schemaFiles: string[]): Promise<Record<string, unknown>[]>
 {
-    const imports: Record<string, unknown> = {};
+    const modules: Record<string, unknown>[] = [];
 
     for (const file of schemaFiles)
     {
         assertTypeScriptLoadable(process.cwd(), file);
 
-        const moduleUrl = pathToFileURL(file).href;
-        const mod = await import(moduleUrl);
+        const mod = await import(pathToFileURL(file).href);
 
-        for (const [key, value] of Object.entries(mod))
-        {
-            if (key !== 'default')
-            {
-                imports[key] = value;
-            }
-        }
+        modules.push({ ...mod });
     }
 
-    return imports;
+    return modules;
 }
 
 /**

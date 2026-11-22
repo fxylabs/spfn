@@ -9,11 +9,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { asc, sql } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrationContaining } from '../helpers/migrations';
 import { userProfiles, userSettings, users } from '@/server/entities';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
@@ -22,20 +20,10 @@ const { userSettingsRepository } = await import('@/server/repositories');
 
 const dbAvailable = await isDatabaseAvailable();
 
-const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
-
 /** The backfill statements of the migration that creates user_settings */
 function backfillStatements(): string[]
 {
-    const folder = readdirSync(MIGRATIONS_FOLDER)
-        .filter(name => readFileSync(join(MIGRATIONS_FOLDER, name, 'migration.sql'), 'utf8')
-            .includes('CREATE TABLE "spfn_auth"."user_settings"'));
-
-    expect(folder).toHaveLength(1);
-
-    return readFileSync(join(MIGRATIONS_FOLDER, folder[0], 'migration.sql'), 'utf8')
-        .split('--> statement-breakpoint')
-        .map(statement => statement.trim())
+    return authMigrationContaining('CREATE TABLE "spfn_auth"."user_settings"').statements
         .filter(statement => statement.startsWith('INSERT INTO "spfn_auth"."user_settings"'));
 }
 

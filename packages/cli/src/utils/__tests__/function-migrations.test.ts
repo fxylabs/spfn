@@ -90,6 +90,16 @@ describe('readMigrationEntries', () =>
         expect(entries[1]?.millis).toBe(Date.UTC(2026, 0, 2, 3, 4, 5));
     });
 
+    it('reads only the migration directories: the privileges.json beside them is not a migration', () =>
+    {
+        dir = mkdtempSync(join(tmpdir(), 'spfn-fnmig-'));
+        mkdirSync(join(dir, '20260101000000_first'));
+        writeFileSync(join(dir, '20260101000000_first', 'migration.sql'), 'CREATE TABLE a (id int);');
+        writeFileSync(join(dir, 'privileges.json'), '{}');
+
+        expect(readMigrationEntries(dir, '@spfn/testpkg').map(e => e.name)).toEqual(['20260101000000_first']);
+    });
+
     it('fails when a journal entry has no SQL file', () =>
     {
         dir = mkdtempSync(join(tmpdir(), 'spfn-fnmig-'));

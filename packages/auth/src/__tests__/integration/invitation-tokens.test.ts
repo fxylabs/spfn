@@ -14,14 +14,12 @@
  * guard over every route's response, is unit/route-response-secrets.test.ts.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { authMigrations } from '../helpers/migrations';
 import { JSON_HEADERS, TEST_PASSWORD, createTestUser, mountAuthApp, resetMemoryRateLimitStore, signIn } from '../helpers/oauth2';
 import { userInvitations, users } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
@@ -35,7 +33,6 @@ const { BadRequestError } = await import('@spfn/core/errors');
 
 const dbAvailable = await isDatabaseAvailable();
 
-const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../migrations', import.meta.url));
 const LEGACY_TOKEN = '55555555-5555-4555-8555-555555555555';
 const BETWEEN_MIGRATIONS_TOKEN = '66666666-6666-4666-8666-666666666666';
 
@@ -46,12 +43,10 @@ const BETWEEN_MIGRATIONS_TOKEN = '66666666-6666-4666-8666-666666666666';
  */
 function tokenHashMigrations(): string[][]
 {
-    const migrations = readdirSync(MIGRATIONS_FOLDER)
-        .filter((directory) => /^\d{14}_/.test(directory))
-        .sort()
-        .map((directory) => readFileSync(path.join(MIGRATIONS_FOLDER, directory, 'migration.sql'), 'utf8'))
-        .filter((migration) => migration.includes('"user_invitations"') && migration.includes('"token_hash"'))
-        .map((migration) => migration.split('--> statement-breakpoint').map((statement) => statement.trim()).filter(Boolean));
+    const migrations = authMigrations()
+        .map((migration) => migration.statements)
+        .filter((statements) => statements.some((statement) => statement.includes('"user_invitations"'))
+            && statements.some((statement) => statement.includes('"token_hash"')));
 
     expect(migrations).toHaveLength(2);
 

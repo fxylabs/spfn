@@ -5,10 +5,8 @@
  * is dropped and rebuilt from the committed migrations.
  */
 
-import { closeDatabase, getDatabase, initDatabase } from '@spfn/core/db';
+import { closeDatabase, getDatabase, initDatabase, readMigrationEntries } from '@spfn/core/db';
 import { sql } from 'drizzle-orm';
-import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Override with TEST_DATABASE_URL to point elsewhere.
@@ -43,20 +41,11 @@ async function applyMigrations(): Promise<void>
 
     await db.execute(sql`DROP SCHEMA IF EXISTS spfn_notification CASCADE`);
 
-    // drizzle-kit 1.0 layout: one <timestamp>_<name>/migration.sql per migration.
-    const folders = readdirSync(MIGRATIONS_FOLDER, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name)
-        .sort();
-
-    for (const folder of folders)
+    // Read as `spfn db migrate` reads them: the migrations, and not the other
+    // files of the folder (privileges.json).
+    for (const migration of readMigrationEntries(MIGRATIONS_FOLDER, '@spfn/notification'))
     {
-        const statements = readFileSync(resolve(MIGRATIONS_FOLDER, folder, 'migration.sql'), 'utf8')
-            .split('--> statement-breakpoint')
-            .map(statement => statement.trim())
-            .filter(Boolean);
-
-        for (const statement of statements)
+        for (const statement of migration.statements)
         {
             await db.execute(sql.raw(statement));
         }

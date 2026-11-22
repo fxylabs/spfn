@@ -38,7 +38,7 @@ export type {
 } from './manager';
 
 // Drizzle Config Generator
-export { getDrizzleConfig, detectDialect, generateDrizzleConfigFile, renderDrizzleConfig } from './manager/config-generator';
+export { getDrizzleConfig, detectDialect, drizzleKitSchemaFiles, generateDrizzleConfigFile, renderDrizzleConfig, renderSchemaFilesConfig } from './manager/config-generator';
 export type { DrizzleConfigOptions, RenderableDrizzleConfig } from './manager/config-generator';
 
 // Schema Helpers
@@ -99,6 +99,25 @@ export {
 export { BaseRepository, RepositoryError } from './repository';
 export type { RepositoryDatabase } from './repository';
 export type { CountOptions, ReadOptions } from './query-utils';
+
+// App privileges: the per-table declaration and its manifest (privileges.json)
+export {
+    APP_PRIVILEGES,
+    APP_PRIVILEGES_MANIFEST_FILE,
+    APP_PRIVILEGES_MANIFEST_VERSION,
+    APP_PRIVILEGES_MARKER,
+    AppPrivilegesError,
+    AppPrivilegesManifestError,
+    DEFAULT_APP_PRIVILEGES,
+    appPrivileges,
+    declaredAppPrivileges,
+    isAppPrivilege,
+    readAppPrivilegesManifest,
+    readMigrationsAppPrivileges,
+    renderAppPrivilegesManifest,
+    writeAppPrivilegesManifest,
+} from './privileges';
+export type { AppPrivilege, AppPrivilegesManifest, AppTablePrivileges, MigrationsAppPrivileges } from './privileges';
 
 // Tenant-aware layer (tenantKey() is exported with the schema helpers)
 export { TenantRepository, defineTenancy, tenantList, TenantMismatchError, listTenancyTables } from './tenant';
