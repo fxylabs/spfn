@@ -145,11 +145,12 @@ function main()
     //
     // Two at a time for the reason in .woodpecker/pr.yml's `verify` step: under a
     // pod memory limit every Node process sizes its heap against that one limit,
-    // so turbo's default fan-out runs out of memory together.
+    // so turbo's default fan-out runs out of memory together. Gitea Actions sets
+    // BUILD_CONCURRENCY from its TUNING (.gitea/ci-tuning.env); Woodpecker does not.
     execFileSync("pnpm", ["install", "--frozen-lockfile"], { cwd: ROOT, stdio: "inherit" });
     execFileSync(
         "pnpm",
-        ["exec", "turbo", "run", "build", "--concurrency=2", "--filter=./packages/*"],
+        ["exec", "turbo", "run", "build", `--concurrency=${process.env.BUILD_CONCURRENCY || "2"}`, "--filter=./packages/*"],
         { cwd: ROOT, stdio: "inherit" },
     );
 

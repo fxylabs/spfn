@@ -49,10 +49,12 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            # publish-changed.mjs installs and builds the packages itself.
+            # publish-changed.mjs installs and builds the packages itself, with
+            # the check's heap and fan-out (TUNING, .gitea/ci-tuning.env).
             - name: Publish
               run: |
+                  . .gitea/ci-tuning.env
                   test -n "$NPM_PUBLISH_TOKEN" || { echo "the repository secret NPM_PUBLISH_TOKEN is not set" >&2; exit 1; }
                   printf '%s\n' '@spfn:registry=https://git.superfunction.xyz/api/packages/superfunction/npm/' "//git.superfunction.xyz/api/packages/superfunction/npm/:_authToken=$NPM_PUBLISH_TOKEN" > ~/.npmrc
                   corepack enable
-                  node scripts/publish-changed.mjs
+                  NODE_OPTIONS="--max-old-space-size=$BUILD_HEAP_MB" BUILD_CONCURRENCY="$BUILD_CONCURRENCY" node scripts/publish-changed.mjs

@@ -18,7 +18,7 @@
 # What is not known yet about the runner — its labels, whether jobs run in a
 # container as root with apt, its memory — is decided in two places only: the
 # `runs-on` and `container` of the job below (and of release.yml's `publish`),
-# and the TUNING values in the job's `env`.
+# and the TUNING values in .gitea/ci-tuning.env, which both builds read.
 on:
     workflow_call:
         inputs:
@@ -45,13 +45,6 @@ jobs:
             # not a skip, only when CI is set (runsInCi in
             # packages/core/src/db/__tests__/helpers/ci.ts).
             CI: "true"
-
-            # TUNING — the one place for the build's heap and fan-out. In a
-            # memory-limited container every Node process sizes its heap
-            # against that one limit; two builds at 3 GB each is what fit
-            # Woodpecker's 7 GiB pod. Unknown for this runner: change here.
-            BUILD_CONCURRENCY: "2"
-            BUILD_HEAP_MB: "3072"
         steps:
             # The whole history: the scope diffs the branch against its base,
             # and `base...HEAD` needs the merge base present.
@@ -93,9 +86,11 @@ jobs:
             # `pnpm exec turbo run`, not `pnpm build --filter=…`: pnpm reads a
             # `--filter` before the script name as its own option. Every
             # package's `build` ends with the bundle identity check, so there is
-            # no separate `check:bundles` here.
+            # no separate `check:bundles` here. Heap and fan-out: TUNING.
             - name: Build
-              run: NODE_OPTIONS="--max-old-space-size=$BUILD_HEAP_MB" pnpm exec turbo run build --concurrency="$BUILD_CONCURRENCY" $FILTERS
+              run: |
+                  . .gitea/ci-tuning.env
+                  NODE_OPTIONS="--max-old-space-size=$BUILD_HEAP_MB" pnpm exec turbo run build --concurrency="$BUILD_CONCURRENCY" $FILTERS
 
             - name: Lint
               run: pnpm lint
