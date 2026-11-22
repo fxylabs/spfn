@@ -48,6 +48,7 @@ export const COMMAND_CONNECTIONS = {
     },
     'db migrate': { connection: 'owner', why: 'runs DDL and writes the migration bookkeeping' },
     'add': { connection: 'owner', why: 'applies the package\'s migrations: DDL and the migration bookkeeping' },
+    'db grant': { connection: 'owner', why: 'grants and revokes the app role\'s privileges on the tables, which only their owner may' },
     'db backup': { connection: 'owner', why: 'pg_dump stops on a table whose row-level security policy applies to its role' },
     'db restore': { connection: 'owner', why: 'COPY FROM is refused into a table whose policy applies to its role' },
     'db drop': { connection: 'owner', why: 'only the owner may drop the tables' },

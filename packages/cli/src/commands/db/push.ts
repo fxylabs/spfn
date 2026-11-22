@@ -2,15 +2,14 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { env } from '@spfn/core/config';
 import { sql } from 'drizzle-orm';
-import { packageNameToSchema, pendingFunctionMigrations, type PendingFunctionMigrations } from '@spfn/core/db';
+import { packageNameToSchema, pendingFunctionMigrations, type AppPrivilegesTarget, type PendingFunctionMigrations } from '@spfn/core/db';
 
 import {
-    loadSchemaImports,
     createPushConnection,
+    loadProjectEntities,
+    resolveProjectSchemaFiles,
     resolvePushSchemaSource,
     resolvePushSchemaFilter,
-    resolveSchemaFiles,
-    withoutFunctionPackageObjects,
     type PushConnection,
     type ResolvedSchema,
     type SchemaSource,
@@ -34,6 +33,7 @@ import { describeFailure, failedStatementOf, sqlStateOf } from '../../utils/data
 import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 import { OWNER_URL_MISSING } from './utils/database.js';
 import { ownershipRemedy } from './utils/foreign-owners.js';
+import { entityGrantTarget, grantRetryNote, runAppGrantStep, SCHEMA_APPLIED_PRIVILEGES_UNCHANGED } from './utils/app-grants.js';
 
 export interface PushHint
 {
@@ -111,11 +111,11 @@ async function loadSchemaSourceOrExit(explicit?: string): Promise<SchemaSource |
  * Resolve the files to load, ending the command when the folder and the registry
  * each define objects the other lacks: no choice would keep every table.
  */
-async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaFiles>[0]): Promise<ResolvedSchema>
+async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSource | undefined): Promise<ResolvedSchema>
 {
     try
     {
-        return await resolveSchemaFiles(config);
+        return await resolveProjectSchemaFiles(databaseUrl, source);
     }
     catch (error)
     {
@@ -137,11 +137,16 @@ async function resolveSchemaFilesOrExit(config: Parameters<typeof resolveSchemaF
  * and the ownership remedy when the catalog shows it. So does a connection
  * that cannot be opened, the dry run's read of `transaction_read_only` included
  * (the `connect` stage, with no remedy: there is no session to ask the catalog).
+ * Last, as the owner and in a transaction of its own, the app role is granted
+ * exactly what the entities declare (`appPrivileges`) and each function
+ * package's manifest (app-grants.ts); its failure is the `privileges` stage:
+ * the schema stays applied, and `spfn db grant` applies the privileges alone.
  *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
- * - --dry-run: shows the classified SQL and each function package's pending
- *   migrations, then stops. Each plan query runs in its own `BEGIN READ ONLY`
+ * - --dry-run: shows the classified SQL, each function package's pending
+ *   migrations and the privilege statements (with the roles and how each was
+ *   found), then stops. Each plan query runs in its own `BEGIN READ ONLY`
  *   transaction on one client, rolled back when the query ends, so PostgreSQL
  *   refuses any write and the dry run holds no lock between statements. Before
  *   the plan runs, `transaction_read_only` is read once, in one such
@@ -172,15 +177,7 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     // 2. Get drizzle config (schema file list + schemaFilter)
     const source = await loadSchemaSourceOrExit(options.schema);
-    const { getDrizzleConfig } = await import('@spfn/core/db');
-    const config = getDrizzleConfig({
-        cwd: process.cwd(),
-        databaseUrl,
-        schema: source?.schema,
-        expandGlobs: true,
-        disablePackageDiscovery: true,
-    });
-    const resolved = await resolveSchemaFilesOrExit(config);
+    const resolved = await resolveSchemaFilesOrExit(databaseUrl, source);
     const label = source?.label ?? resolved.source;
 
     if (resolved.files.length === 0)
@@ -203,19 +200,21 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
     // 3. Load schema imports, less the objects a function package owns: a
     //    registry re-exports one of its tables for a relation, but the package's
     //    own migrations (step 9) create and alter it.
-    const imports = withoutFunctionPackageObjects(resolved.imports ?? await loadSchemaImports(resolved.files));
+    const imports = await loadProjectEntities(resolved);
 
     // 3.5 Which PostgreSQL schemas to diff (see resolvePushSchemaFilter)
     const schemaFilter = resolvePushSchemaFilter(source?.schemaFilter, imports);
 
-    // 3.7 Preflight: parse function package migrations before touching the DB,
-    //     so an incompatible package fails before anything is applied.
+    // 3.7 Preflight: parse function package migrations and every privilege
+    //     declaration before touching the DB, so an incompatible package or an
+    //     unreadable manifest fails before anything is applied.
     const functionPlans = loadFunctionPlansOrExit();
+    const grantTarget = loadGrantTargetOrExit(managedSchemas(schemaFilter, functionPlans), imports, functionPlans);
 
     // 4. Connect. A dry run runs each plan query in a read-only transaction
     //    of its own, so PostgreSQL refuses any write attempted on it.
     const connection = await openPushConnectionOrExit(databaseUrl, options.dryRun);
-    const target: PushTarget = { db: connection.db, databaseUrl, schemas: managedSchemas(schemaFilter, functionPlans) };
+    const target: PushTarget = { db: connection.db, databaseUrl, schemas: [...grantTarget.schemas] };
 
     try
     {
@@ -239,7 +238,8 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         // 7. The one dry-run gate: every write comes after it
         if (options.dryRun)
         {
-            console.log(chalk.cyan('🔍 Dry run: nothing was applied.\n'));
+            await grantOrExit(grantTarget, target, true);
+            console.log(chalk.cyan('\n🔍 Dry run: nothing was applied.\n'));
 
             return;
         }
@@ -251,6 +251,9 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         //    a project table may reference a package table
         const packageMigrationsApplied = await applyFunctionMigrations(functionPlans, target);
         await applyProjectStatements(target, selection, packageMigrationsApplied > 0);
+
+        // 10. Grant the app role what is declared, in a transaction of its own
+        await grantOrExit(grantTarget, target, false);
     }
     finally
     {
@@ -273,6 +276,41 @@ interface PushTarget
 function managedSchemas(schemaFilter: string[], functionPlans: FunctionMigrationPlan[]): string[]
 {
     return [...new Set([...schemaFilter, ...functionPlans.map(plan => packageNameToSchema(plan.packageName)), 'drizzle'])];
+}
+
+/**
+ * What the privileges step grants: the managed schemas, the entities'
+ * declarations, and each function package's manifest — read before any
+ * connection, so an unreadable manifest ends push with nothing applied.
+ */
+function loadGrantTargetOrExit(schemas: string[], imports: Record<string, unknown>, functionPlans: FunctionMigrationPlan[]): AppPrivilegesTarget
+{
+    try
+    {
+        return entityGrantTarget(schemas, imports, functionPlans);
+    }
+    catch (error)
+    {
+        console.error(chalk.red(`\n❌ Invalid app privileges declaration — nothing was applied: ${error instanceof Error ? error.message : String(error)}`));
+        process.exit(1);
+    }
+}
+
+/**
+ * The privileges step: on a dry run it plans on the read-only connection and
+ * a failure ends push at the `plan` stage; otherwise it applies, and a failure
+ * is the `privileges` stage, after the schema changes committed.
+ */
+async function grantOrExit(grantTarget: AppPrivilegesTarget, target: PushTarget, dryRun: boolean): Promise<void>
+{
+    try
+    {
+        await runAppGrantStep(target.db, grantTarget, { dryRun, schemaPending: dryRun });
+    }
+    catch (error)
+    {
+        await exitOnFailure(dryRun ? 'plan' : 'privileges', error, target, dryRun ? undefined : grantRetryNote(error));
+    }
 }
 
 /**
@@ -308,6 +346,7 @@ const FAILED_STAGES = {
     plan: 'Planning failed — nothing was applied',
     packages: 'Failed to apply function package migrations — nothing of the project schema was applied',
     project: 'The project statements were rolled back',
+    privileges: SCHEMA_APPLIED_PRIVILEGES_UNCHANGED,
 } as const;
 
 /**

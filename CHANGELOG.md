@@ -11,10 +11,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **spfn: the app role is granted exactly what is declared — `spfn db grant [--dry-run]`, and a
+  privileges step at the end of `db push`, `db migrate` and `spfn add` (#405).** As the owner
+  (`DATABASE_OWNER_URL`), in a transaction of its own after the schema changes, the step brings the
+  app role to the declarations on the managed schemas — the project's (from the entities on push,
+  from `src/server/drizzle/privileges.json` on migrate and add; `db grant` and `db status` read
+  the manifest when the project has one, else the entities as push loads them, and with neither
+  `db grant` exits 1 and `db status` reports the privileges unknown), each function package's (from its
+  manifest; none means the default set) and `drizzle`: on every table the declared set (default
+  `SELECT`, `INSERT`, `UPDATE`, `DELETE`), `USAGE` on the schemas and sequences, `SELECT` only on the
+  `drizzle` bookkeeping. A table of a managed schema no manifest lists gets the default set, and so
+  does a view every write through which is checked against the app's own rights — created `WITH
+  (security_invoker)` (PostgreSQL 15+), with no rule but its SELECT rule and no INSTEAD OF
+  trigger; any other view, whose writes run with its owner's rights, gets `SELECT` only; a foreign table is a table, a materialized view gets `SELECT`; a
+  partition gets nothing directly, and what the app holds on one is revoked — access goes through
+  the root table, whose declaration applies; a listed table that does not exist is reported by the dry run and otherwise ignored. It reads every access
+  list from the catalog and issues only the statements needed — no `ALTER DEFAULT PRIVILEGES`; a
+  second run issues none. The app role is the `current_user` of `DATABASE_WRITE_URL`, else
+  `DATABASE_URL`; a `DATABASE_READ_URL` connecting as another role gets `USAGE` and `SELECT` only.
+  The new optional setting `DATABASE_APP_ROLE` names the app role when no app URL is set (a migrate
+  job holding only the owner URL); beside an app URL naming another role it is refused, naming both
+  roles, and one naming no role in the database ends the step with exit 1, naming the setting and the
+  role, before any statement. Without `DATABASE_OWNER_URL`, or with an app role that is the owner or inherits it: one
+  note, no statement. With no way to name the app role: one warning, the step skipped, exit 0. A
+  table of a managed schema another role owns is listed and nothing is granted (exit 1), never
+  PostgreSQL's warning swallowed. A grant option the app role holds is revoked, the privilege kept
+  when declared. Every `REVOKE` is plain, never `CASCADE`, and whether one is refused is
+  PostgreSQL's decision, not predicted: when it refuses one because a grant the app role made with
+  such an option depends on it (2BP01), the transaction rolls back, nothing is changed (exit 1), and
+  the refused statement is printed with the grants on its table of what it revokes that roles other
+  than the owner made — the dependent ones among them — and the two ways out: their grantors revoke
+  them, or the owner runs the statement with `CASCADE`, which the step never does. One refusal per
+  run; the next run tries again. A grant to PUBLIC from another grantor than the owner, which the
+  owner's `REVOKE` leaves in place, is listed with the `REVOKE` its grantor can run, and nothing is
+  changed (exit 1). When the step fails the command exits 1 with `Schema applied; no
+  privilege was changed, so new tables have only what the database gives by default`, the error as push prints its failures and its way out, then `spfn db grant`; an
+  unreadable manifest ends `db migrate`, `spfn add` and `db push` before anything is applied.
+  `spfn db grant --dry-run` and `spfn db push --dry-run` print the roles, how each was found, the
+  statements (push: `privileges for N new tables`) and what is held through a group role;
+  `db grant --dry-run` runs the statements in one transaction it always rolls back, on a writable
+  owner connection — taking a run's locks until then: none on a table, each table's catalog row —
+  so it reports a statement PostgreSQL refuses and changes nothing, while push's dry run only plans,
+  in read-only transactions. PUBLIC `CREATE` on schema `public` (PostgreSQL before 15) is reported,
+  never revoked. `spfn_queue` is not managed: the app role creates it, and needs `CREATE` on the
+  database once. A table the app role owns, or whose owner it inherits, is outside the step — no
+  statement on it for any role or PUBLIC, whoever the owner URL connects as (a superuser
+  included), and nothing compared on it by `db status`: it is named, its declaration not enforced;
+  `ALTER TABLE … OWNER TO` the owner role brings it under the step. `spfn db status` reports, as the app, what `db grant`
+  would change for it — the step's own plan, for the same roles, run on the catalog the step
+  reads, so a grant option, a column grant, a statement for PUBLIC or for the read role the app is
+  a member of, and a grant to PUBLIC by another grantor that blocks the step are not clean — and
+  `--json` gains `privileges` (`checked`, `source`, `checkedTables`, `ownedTables`, `drift: [{
+  schema, table, kind, grantee, through, missing, excess, grantOption, columns }]` — one entry per
+  relation and grantee, so a table can appear more than once — `schemasWithoutUsage`,
+  `publicGrantsByOthers`, `heldElsewhere`, `publicMayCreateInPublic`); it does not predict a refusal, which only the owner's
+  `db grant --dry-run` sees; it and `db grant` name the project's declaration they read
+  (`source`: `manifest src/server/drizzle/privileges.json`, or `entities`). `@spfn/core/db` exports the step: `readPrivilegeCatalog`,
+  `planAppPrivileges` (the pure difference), `applyAppPrivileges`, `checkAppPrivileges`,
+  `appRelationPrivileges`, and `foreignOwnedObjects`, the catalog read `db push`'s ownership remedy
+  uses too. The core db README's "Database roles" replaces its hand `GRANT` and `ALTER DEFAULT
+  PRIVILEGES` SQL with the step and a table of what it grants; the multi-tenancy guide drops the
+  database-wide `ALTER DEFAULT PRIVILEGES`, which also gave the app role write access to `drizzle`.
 - **@spfn/core: `appPrivileges(table, [...])` declares what the app role may do on a table, and
-  `spfn db generate` records it in `privileges.json` (#405).** Nothing grants or revokes from it in
-  this release: the declaration and the manifest are recorded only, for the grant step a later
-  release adds. The helper takes `select`, `insert`, `update`, `delete`, and `truncate`,
+  `spfn db generate` records it in `privileges.json` (#405).** The step that applies it, `spfn db
+  grant`, is the next entry. The helper takes `select`, `insert`, `update`, `delete`, and `truncate`,
   `references`, `trigger` as opt-ins, table-level, and returns the table, so it wraps `pgTable`,
   `schema.table` and `tenancy.table` alike; an unknown privilege, an empty list or a second, different
   declaration on one table throws `AppPrivilegesError` naming the table when the schema module
@@ -264,6 +324,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers that arrived, which is what tells a forward that dropped `Authorization` apart, and
   `path` through `loggedPath(c)`. A log query that read a header's value from this line has no
   replacement: the value is the secret. Held by a test row.
+- **BREAKING (two-role databases): spfn: the app role's privileges on the managed tables are reset
+  to the declared set by `db push`, `db migrate`, `spfn add` and `spfn db grant` (#405).** Every
+  privilege the owner granted the app role on a managed table beyond its declaration is revoked —
+  a hand-granted `TRUNCATE`, `REFERENCES` or `TRIGGER`, a column grant, any write on the `drizzle`
+  bookkeeping (the multi-tenancy guide's database-wide `ALTER DEFAULT PRIVILEGES` gave it one), a
+  grant option — and so is every grant to PUBLIC there. A read role (`DATABASE_READ_URL` connecting
+  as another role) is brought to exactly `USAGE` on the schemas and `SELECT` on the tables whose set
+  has it: anything else the owner granted it there — a write, a grant on a sequence or on
+  `drizzle` — is revoked too. One that reaches either role through a group role is reported, not
+  revoked. On a view a write through which runs with its owner's rights, the app role keeps
+  `SELECT` only: a write granted on such a view is a write on every table under it, whatever those
+  tables declare. That is any view not created `WITH (security_invoker)` (PostgreSQL 15+), and also
+  a `security_invoker` view with a rule other than its SELECT rule — PostgreSQL applies
+  `security_invoker` to the SELECT rule only, and a `DO INSTEAD INSERT` rule writes as the owner —
+  or with an INSTEAD OF trigger, whose function may be SECURITY DEFINER. An app that writes
+  through a view makes it `security_invoker`, with neither, or writes the table; a view that is
+  not `security_invoker`, read as its owner, also reads past the row-level security of the tables
+  under it. A privilege revoked by hand that the table does not declare away is granted again:
+  declare it first (`appPrivileges(table, ['select', 'insert'])`, then `spfn db generate`), then
+  push or migrate. Single-role setups (no `DATABASE_OWNER_URL`) see one note and no change.
 - **BREAKING: spfn: `spfn db generate` with a project `drizzle.config.ts` loads the schema modules
   itself, as ESM, the way `db push` and `spfn dev` do (#405).** Before, with its own config, it
   handed the file to drizzle-kit and loaded no entity in its own process. It now writes

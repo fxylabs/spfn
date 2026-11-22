@@ -6,9 +6,10 @@
  * harness therefore keeps two roles apart:
  *
  * - the owner — `TEST_DATABASE_URL` — creates the schema from the SQL drizzle-kit
- *   generates, seeds it, and grants the app role row privileges by hand: the
- *   grants the core db README asks a deployment to run once, since no spfn
- *   command grants anything (`spfn db migrate` only creates, as the owner);
+ *   generates, seeds it, and grants the app role its privileges through the
+ *   step `spfn db push`/`migrate`/`grant` end with (`applyAppPrivileges`, every
+ *   table the default set), so a change to that step that breaks row-level
+ *   isolation fails these rows;
  * - the app — `TEST_APP_DATABASE_URL`, or else the same host and database with
  *   whichever of the two non-superuser roles scripts/test-services.sh creates
  *   (`testuser`, `authtest`) is not the owner — is what `initDatabase` serves to
@@ -28,6 +29,7 @@ import type { TestContext } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api-postgres';
 import { closeDatabase, initDatabase } from '../../manager';
+import { applyAppPrivileges, DEFAULT_APP_PRIVILEGES } from '../../privileges';
 import { runsInCi } from '../../__tests__/helpers/ci';
 import { TEST_DATABASE_URL } from '../../__tests__/helpers/db-fixture';
 import { SEED_ROWS, TENANCY_SCHEMA, TENANCY_TABLES } from './tenancy-fixtures';
@@ -203,7 +205,5 @@ async function createSchema(owner: postgres.Sql, appRole: string): Promise<void>
         await owner.unsafe(statement);
     }
 
-    await owner.unsafe(`GRANT USAGE ON SCHEMA ${TENANCY_SCHEMA} TO ${appRole}`);
-    await owner.unsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${TENANCY_SCHEMA} TO ${appRole}`);
-    await owner.unsafe(`GRANT USAGE ON ALL SEQUENCES IN SCHEMA ${TENANCY_SCHEMA} TO ${appRole}`);
+    await applyAppPrivileges(drizzle({ client: owner }), { schemas: [TENANCY_SCHEMA], tables: [], defaults: DEFAULT_APP_PRIVILEGES }, { app: appRole });
 }

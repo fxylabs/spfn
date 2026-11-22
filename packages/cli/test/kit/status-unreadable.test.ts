@@ -210,7 +210,7 @@ describe.each(OPERATIONS)('$name, on a migration status the database refused to 
 
         expect(result.code).toBe('CLI_MIGRATION_STATUS_UNREADABLE');
         expect(result.exitCode).toBe(KIT_EXIT.REFUSED);
-        expect(result.summary).toContain('grant the app role USAGE on schema drizzle');
+        expect(result.summary).toContain('run spfn db grant: it gives the app role USAGE on schema drizzle');
         expect(calls.some((args) => args.includes('migrate'))).toBe(false);
     });
 

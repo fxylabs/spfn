@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { closeDatabase, collectMigrationStatus, setDatabase, type MigrationStatusDb } from '../../db';
+import { applyAppPrivileges, closeDatabase, collectMigrationStatus, DEFAULT_APP_PRIVILEGES, setDatabase, type MigrationStatusDb } from '../../db';
 import { TEST_DATABASE_URL } from '../../db/__tests__/helpers/db-fixture';
 import { appDatabaseUrl, twoRoleUnavailability } from '../../db/tenant/__tests__/tenancy-db';
 import { serverLogger } from '../logger';
@@ -129,11 +129,10 @@ describe('migration status through an app role that owns nothing', () =>
         expect(warned).not.toContain(new URL(appUrl).password);
     });
 
-    it('MG2 an app role with USAGE and SELECT on drizzle sees what the owner sees', async () =>
+    it('MG2 after the privileges step (USAGE and SELECT on drizzle) the app role sees what the owner sees', async () =>
     {
         await recordAppliedMigration(owner);
-        await owner.unsafe(`GRANT USAGE ON SCHEMA drizzle TO ${appRole}`);
-        await owner.unsafe(`GRANT SELECT ON ALL TABLES IN SCHEMA drizzle TO ${appRole}`);
+        await applyAppPrivileges(drizzle({ client: owner }), { schemas: ['drizzle'], tables: [], defaults: DEFAULT_APP_PRIVILEGES }, { app: appRole });
 
         const ownerStatus = await collectMigrationStatus(drizzle({ client: owner }) as unknown as MigrationStatusDb, cwd);
         const appStatus = await collectMigrationStatus(appDb, cwd);

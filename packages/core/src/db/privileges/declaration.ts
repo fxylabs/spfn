@@ -7,8 +7,9 @@
  * through another copy of `@spfn/core` than its own — the CLI, for one — reads
  * it there. A table without one has the default set.
  *
- * Nothing grants or revokes from this yet: `spfn db generate` records the
- * declarations in the migrations folder's `privileges.json` (see manifest.ts).
+ * `spfn db generate` records the declarations in the migrations folder's
+ * `privileges.json` (see manifest.ts); the privileges step brings the app role
+ * to them (plan.ts, catalog.ts).
  */
 
 import { getTableName, isTable } from 'drizzle-orm';

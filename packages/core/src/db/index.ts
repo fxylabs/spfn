@@ -100,7 +100,7 @@ export { BaseRepository, RepositoryError } from './repository';
 export type { RepositoryDatabase } from './repository';
 export type { CountOptions, ReadOptions } from './query-utils';
 
-// App privileges: the per-table declaration and its manifest (privileges.json)
+// App privileges: the per-table declaration, its manifest (privileges.json), and the step that applies them
 export {
     APP_PRIVILEGES,
     APP_PRIVILEGES_MANIFEST_FILE,
@@ -109,15 +109,56 @@ export {
     AppPrivilegesError,
     AppPrivilegesManifestError,
     DEFAULT_APP_PRIVILEGES,
+    BOOKKEEPING_SCHEMA,
     appPrivileges,
+    appRelationPrivileges,
+    applyAppPrivileges,
+    checkAppPrivileges,
+    compareAppPrivileges,
     declaredAppPrivileges,
+    foreignOwnedObjects,
     isAppPrivilege,
+    planAppPrivileges,
+    quoteIdentifier,
     readAppPrivilegesManifest,
     readMigrationsAppPrivileges,
+    readPrivilegeCatalog,
     renderAppPrivilegesManifest,
     writeAppPrivilegesManifest,
 } from './privileges';
-export type { AppPrivilege, AppPrivilegesManifest, AppTablePrivileges, MigrationsAppPrivileges } from './privileges';
+export type {
+    AppPrivilege,
+    AppPrivilegeDrift,
+    AppPrivilegeHeldElsewhere,
+    AppPrivilegesCheck,
+    AppPrivilegesManifest,
+    AppPrivilegesPlan,
+    AppPrivilegesRun,
+    AppPrivilegesTarget,
+    AppPublicGrantByOther,
+    AppRelation,
+    AppRoles,
+    AppTablePrivileges,
+    CatalogColumnGrant,
+    CatalogDb,
+    CatalogGrant,
+    CatalogRelation,
+    CatalogRole,
+    CatalogSchema,
+    ForeignOwnedObject,
+    ForeignOwnedRelation,
+    GrantByOther,
+    GrantDb,
+    GranteeChange,
+    MigrationsAppPrivileges,
+    OwnedRelation,
+    PrivilegeCatalog,
+    PrivilegeHeldElsewhere,
+    PublicGrantByOther,
+    RefusedRevoke,
+    RelationKind,
+    RevokeGrantsByOthers,
+} from './privileges';
 
 // Tenant-aware layer (tenantKey() is exported with the schema helpers)
 export { TenantRepository, defineTenancy, tenantList, TenantMismatchError, listTenancyTables } from './tenant';

@@ -804,7 +804,7 @@ transaction is bound to the guard's tenant before the handler runs (see R1–R6 
 
 | Role | URL | Used by | Owns the tables |
 |------|-----|---------|-----------------|
-| owner | `DATABASE_OWNER_URL` | every command that changes the schema or the migration bookkeeping: `spfn db push` (its `--dry-run` and the function package migrations it applies too), `db migrate`, `spfn add`; and `db backup`, `restore`, `drop`, `tenant import` | yes — row-level security does not apply to it |
+| owner | `DATABASE_OWNER_URL` | every command that changes the schema, the migration bookkeeping or the privileges: `spfn db push` (its `--dry-run` and the function package migrations it applies too), `db migrate`, `spfn add`, `db grant`; and `db backup`, `restore`, `drop`, `tenant import` | yes — row-level security does not apply to it |
 | app | `DATABASE_URL` / `DATABASE_WRITE_URL` / `DATABASE_READ_URL` | the running app; `spfn db status`, the `spfn dev`/`start` pre-start check, `db studio`, `db tenant export`, `spfn provision` | no; not superuser, not `BYPASSRLS` |
 
 PostgreSQL skips row-level security for a table's owner (and roles inheriting its
@@ -816,44 +816,152 @@ to its role, and PostgreSQL refuses `COPY FROM` into one — so backup and resto
 owner too. `FORCE ROW LEVEL SECURITY` is not used: it would subject the owner, and break
 both, and any data migration across tenants.
 
-Grant the app role its row privileges once, as the owner, on every schema the app uses —
-its own (`acme_notes` below) and each function package's (`spfn_auth`, and any other
-package that ships migrations):
+**The app role gets exactly what is declared.** `spfn db push`, `db migrate` and `spfn add` end with a
+step that, as the owner and in a transaction of its own, grants the app role what each table
+declares (`appPrivileges` below; the default set otherwise) and revokes anything else it holds;
+`spfn db grant` runs the step alone — for a database an older CLI set up, or after a step that
+failed. Nothing is granted by hand, and no `ALTER DEFAULT PRIVILEGES` is used: the step reads the
+access list of every table, view and sequence in the managed schemas, so a table created by any role, a
+hand `GRANT` and a hand `REVOKE` are all seen, and it issues only the statements that bring them to
+the declaration — a second run issues none.
 
-```sql
-GRANT USAGE ON SCHEMA acme_notes TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA acme_notes TO app_user;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA acme_notes TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA acme_notes
-    GRANT USAGE ON SEQUENCES TO app_user;
+| Object (in the managed schemas) | App role | Read role (`DATABASE_READ_URL`, when another role) | PUBLIC |
+|---|---|---|---|
+| the project's schemas, each function package's (`spfn_auth`, …) | `USAGE` | `USAGE` | — |
+| their tables, foreign tables included | the declared set, else `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT`, when the set has it | revoked |
+| their views (`pgView`) | `SELECT`; a `security_invoker` view (PostgreSQL 15+) with no rule but its SELECT rule and no INSTEAD OF trigger: `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT` | revoked |
+| their materialized views (`pgMaterializedView`) | `SELECT` | `SELECT` | revoked |
+| a partition, at any level | nothing — access goes through its root table | — | revoked |
+| their sequences (`id()` is a `bigserial`; `nextval` needs it) | `USAGE` | — | revoked |
+| `drizzle`, where migrations are recorded | `USAGE`, `SELECT` on its tables — never a write | — | revoked |
 
-GRANT USAGE ON SCHEMA spfn_auth TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA spfn_auth TO app_user;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA spfn_auth TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA spfn_auth
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA spfn_auth
-    GRANT USAGE ON SEQUENCES TO app_user;
-```
+- **Managed schemas:** the project's (from the entities on `db push`; from
+  `src/server/drizzle/privileges.json` on `db migrate` and `spfn add`, which load no app source; on
+  `db grant` and `db status`, from that manifest when there is one, else from the entities as push
+  loads them — with neither, `db grant` exits 1 and `db status` reports the privileges unknown,
+  since the project's tables cannot be seen), each installed function package's, and
+  `drizzle`. Nothing else: not `spfn_queue` (below), not another app's schema in the same database.
+- **Views** run as their owner, so a write granted on one is a write on the tables under it,
+  whatever they declare: the app role gets `SELECT` only on a view, and anything more it holds there
+  is revoked (`db status` reports it as drift). A view gets the default set (`appPrivileges` takes
+  tables only) only when every write through it is checked against the app's own rights on those
+  tables: it is created `WITH (security_invoker = true)` (PostgreSQL 15+), **and** has no rule but
+  its SELECT rule, **and** has no INSTEAD OF trigger. PostgreSQL applies `security_invoker` to the
+  view's SELECT rule only: an `ON INSERT … DO INSTEAD` rule (or an UPDATE or DELETE one) still runs
+  with the owner's rights, and an INSTEAD OF trigger runs a function that may be SECURITY DEFINER,
+  so either keeps the view at `SELECT`. An app that must write through a view makes it
+  `security_invoker` with neither (drizzle: `pgView(…).with({ securityInvoker: true })`), or writes
+  the table. A rule or trigger on a table is the table's own, and the step does not look at it. And
+  since a view that is not `security_invoker` reads as its owner, the row-level security of the
+  tables under it applies to the app only through a `security_invoker` view.
+- **Partitions:** a partition gets no privilege of its own — what the app role, the read role or
+  PUBLIC holds on one directly is revoked, and `db status` reports it as drift — since access goes
+  through the root table, whose declaration and row-level security apply.
+- **Revoked:** on a managed table, every privilege the owner granted the app role beyond its set —
+  column grants included — the grant option of any it keeps (`REVOKE GRANT OPTION FOR`), and every
+  grant to PUBLIC, whoever granted it. A privilege that reaches the app through a group role, or that
+  another grantor gave it, is reported, never revoked: the step changes no role but the app role, the
+  read role and PUBLIC. So a hand `GRANT TRUNCATE` is taken back, and a hand `REVOKE UPDATE` that the
+  table does not declare is granted again — declare it first (`appPrivileges`). The read role is
+  brought to exactly what the table above gives it, `USAGE` and `SELECT`: anything else the owner
+  granted it on the managed schemas — a write, a sequence's privilege, a `drizzle` table's — is
+  revoked the same way.
+- **A grant that depends on one the step revokes** — one the app role made with a grant option the
+  step takes — makes PostgreSQL refuse that `REVOKE` (2BP01). Every `REVOKE` is plain, never
+  `CASCADE`, which would take a privilege from a role the step does not manage, and whether one is
+  refused is PostgreSQL's decision, made when it runs: the step does not predict it. The
+  transaction rolls back, nothing is changed, and the command exits 1, printing the refused
+  statement; the grants on that table of what it revokes that roles other than the owner made
+  (each grantor → grantee, privilege, column, and whether with the grant option), among which are
+  the ones that depend on it; and the two ways out: their grantors revoke them, or the owner runs
+  the refused statement with `CASCADE`, which removes the grants that depend on it — a decision the
+  step never takes. The next run tries again. A run reports one refusal: when PostgreSQL refuses
+  another statement after that, the next run reports it the same way.
+- **A grant to PUBLIC from a grantor other than the owner**, which the owner's `REVOKE` leaves in
+  place without an error (PostgreSQL lets a role revoke only its own grants), is listed with the
+  `REVOKE` its grantor can run; nothing is changed and the command exits 1.
+- **Who the app role is:** the role each app URL connects as — `DATABASE_WRITE_URL`, else
+  `DATABASE_URL`, and `DATABASE_READ_URL` — asked with `SELECT current_user`, so a pooler's
+  `role.tenant` user name does not mislead it. A migrate job that holds only `DATABASE_OWNER_URL`
+  names it with `DATABASE_APP_ROLE`; set beside an app URL naming another role, it is refused, with
+  both names, and one naming no role in the database ends the command with exit 1, naming the
+  setting and the role, before any statement — a misconfiguration, not a skipped step. With neither, the step prints one warning and grants nothing; the command succeeds.
+- **Nothing to grant** without `DATABASE_OWNER_URL`, or when the app role is the owner or inherits
+  its privileges: one note, since row-level security does not apply to that app either.
+- **A table the owner cannot grant on** — one in a managed schema that another role owns — is
+  listed, nothing is granted, and the command exits 1. Move it to the owner (`REASSIGN OWNED`,
+  below), then run `spfn db grant`.
+- **A table the app role owns**, or whose owner it inherits, is outside the step: no statement on it,
+  for the app role, the read role or PUBLIC, whoever `DATABASE_OWNER_URL` connects as — a
+  superuser included, who could run one — and `db status` compares nothing on it. PostgreSQL
+  applies a `REVOKE` from a table's owner, but the owner holds every grant option and can grant the
+  privilege back, to itself or anyone, and `ALTER`, `DROP` and row-level security bypass need none.
+  Its declaration is not enforced; the step names the table, and `db status` counts it. To bring
+  it under the step, `ALTER TABLE … OWNER TO` the owner role. Unless the owner role is a superuser
+  or inherits the app role, such a table is also one the owner cannot grant on (above).
+- **Locks:** `GRANT` and `REVOKE` take no lock on a table, so the step does not wait behind the app's
+  reads and writes; each does wait on the table's catalog row while another session holds an
+  uncommitted DDL on that table. The step sets no `lock_timeout`, and neither do push and migrate
+  for their own statements, so it inherits the server's or role's setting — none by default.
+- **When the step fails** after the schema changes committed, the command exits 1 with
+  `Schema applied; no privilege was changed, so new tables have only what the database gives by
+  default`: the step runs in one transaction, so the new tables' grants are not in either — they
+  have the default privileges of their creator, if any were set, and no other grant. Then the
+  reason — a statement PostgreSQL refused with the grants on its relation and the two ways out, a
+  role or table the owner cannot grant on, or the database error — and last, `spfn db grant`, which
+  applies the step once the cause is gone.
+- **`--dry-run`**: `spfn db grant --dry-run` prints the roles and how each was found, then the
+  statements, and runs them in one transaction it always rolls back — `GRANT` and `REVOKE` are
+  transactional — so a statement PostgreSQL refuses is reported as on a run, and nothing is
+  changed. It executes, so its connection is writable, and it takes what a run takes until it
+  rolls back: no lock on a table, and the catalog row of each table it grants or revokes on, so
+  DDL on such a table waits for the rollback; an event trigger on `GRANT` or `REVOKE` fires as on
+  a run. `spfn db push --dry-run` runs nothing: it plans the statements on the database as it is
+  before the push, in read-only transactions, and counts the tables it has not created yet
+  (`privileges for N new tables`); a refusal shows on the run, or on `spfn db grant --dry-run`
+  after it.
+- **PUBLIC `CREATE` on schema `public`** (PostgreSQL before 15) lets any role, the app's too, create —
+  and so own — tables there. The step and `db status` report it; neither revokes it, as the change is
+  database-wide. As the database owner: `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`.
+- **`spfn_queue`** (jobs, pg-boss) is created and owned by the app role at its first start, so the app
+  role needs `CREATE` on the database once (`GRANT CREATE ON DATABASE acme TO app_user;`); the step
+  leaves the schema alone.
+
+`spfn db status` (as the app) is a view of the step's plan: it reads the catalog the step reads —
+every access list entry with its grant option, every column grant — for the roles the step plans
+(the app role, and the read role when `DATABASE_READ_URL` connects as another), runs the step's own
+plan on it, and keeps what concerns what the app role can do. It says "holds what is declared" only
+when the step has no statement that changes what the app role or PUBLIC can do — none on a relation
+for the app role, PUBLIC or a role the app is a member of (the read role), none granting the app
+role USAGE on a schema — and no grant to PUBLIC blocks it; USAGE on a schema for the read role
+changes nothing the app can do, so status does not report it. Per relation (tables, views, materialized views,
+sequences) and grantee — the app role; PUBLIC, whose grants the app holds too; a role the app is a
+member of, likewise, named with its path — it lists what is missing, what is held beyond the
+declaration (a lost restriction), a declared privilege held `WITH GRANT OPTION` (the app can pass it
+on), and column grants; each managed schema the app role cannot use; and each grant to PUBLIC from
+another grantor than the owner, which the app holds and which blocks the step, with the `REVOKE`
+its grantor can run. What the step leaves the app role holding — as a member of a role the step does
+not plan for, or from a grantor other than the owner — it reports apart, as the step does. A table
+the app role owns is outside the step (above): status counts it, and compares nothing on it. The
+catalog tables are readable by every role unless an administrator revoked that (then status reports
+the privileges unchecked, with the error). What the app role cannot see is the owner's side: status
+does not know which role `DATABASE_OWNER_URL` connects as, so not whether that role may grant on
+each relation and schema, nor whether PostgreSQL would refuse a `REVOKE` (2BP01) — it predicts no
+refusal; `spfn db grant --dry-run` runs the statements and reports one. `--json` carries it as
+`privileges` (`drift`, `schemasWithoutUsage`, `publicGrantsByOthers`, `heldElsewhere`,
+`ownedTables`, `publicMayCreateInPublic`, `readRole`); a read role it cannot look up through
+`DATABASE_READ_URL` is reported as not checked, with the reason, beside the app role's and PUBLIC's
+part. `drift` has one entry per relation and grantee, so one
+table can appear more than once (for the app role and for PUBLIC, say): key it by schema, table and
+grantee, never by table alone.
 
 The server's boot migration check reads the bookkeeping tables in schema `drizzle`
-(`__drizzle_migrations` and one table per function package) through the app role, so grant
-it read access there too:
-
-```sql
-GRANT USAGE ON SCHEMA drizzle TO app_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA drizzle TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA drizzle
-    GRANT SELECT ON TABLES TO app_user;
-```
-
-Without it the check cannot read them: it logs one warning (`permission denied for schema
-drizzle`) and the server starts unchecked. `spfn dev` and `spfn start` print one line saying so
-before they spawn it; `spfn db status --json` reports `reason: "permission-denied"`, and
-`spfn kit install`/`update` refuse their migration step on it
-(`CLI_MIGRATION_STATUS_UNREADABLE`).
+(`__drizzle_migrations` and one table per function package) through the app role, which the step
+grants. Without that grant — the step skipped, or a database an older CLI set up — the check cannot
+read them: it logs one warning (`permission denied for schema drizzle`) and the server starts
+unchecked. `spfn dev` and `spfn start` print one line saying so before they spawn it; `spfn db status
+--json` reports `reason: "permission-denied"`, and `spfn kit install`/`update` refuse their migration
+step on it (`CLI_MIGRATION_STATUS_UNREADABLE`). `spfn db grant` is the remedy.
 
 A database migrated by an earlier CLI may also hold `drizzle.__spfn_fn_migrations`: one
 shared table where those versions recorded every function package's applied migrations by
@@ -966,12 +1074,11 @@ export const entries = appPrivileges(schema.table('entries', {
 }), ['select', 'insert']);
 ```
 
-**This release only records the declaration.** Nothing grants or revokes from it yet; the app
-role keeps whatever the owner granted it by hand (above). A later release adds the step that
-applies it — after `db push`, `db migrate` and `spfn add`, as the owner — and from then on the app
-role holds exactly the declared set on each table: missing privileges are granted, any other
-(a hand `GRANT TRUNCATE`, an `UPDATE` revoked by hand on a table that does not declare it) is
-taken back, and a restriction comes back whenever the table is created again.
+**The step applies it** — after `db push`, `db migrate` and `spfn add`, and as `spfn db grant`, as
+the owner ([Database roles](#database-roles)): the app role holds exactly the declared set on each
+table. Missing privileges are granted, any other (a hand `GRANT TRUNCATE`, an `UPDATE` revoked by
+hand on a table that does not declare it) is taken back, and a restriction comes back whenever the
+table is created again, since the step runs after every command that can create it.
 
 - **Values:** `select`, `insert`, `update`, `delete`, plus `truncate`, `references` and `trigger`
   as explicit opt-ins (`APP_PRIVILEGES`). Table-level only; no column lists.
@@ -1024,12 +1131,14 @@ regenerating from unchanged entities writes the same bytes. `db generate` rewrit
 changed declaration changes no DDL and drizzle-kit writes no migration.
 
 **A stale manifest is drift**, like a stale migration: an entity added or a declaration changed
-without `spfn db generate` afterwards. Today nothing reads the file. Once the grant step ships,
-`db migrate` applies the file, not the entities: a stale file grants the old set — a new table
-gets nothing until the next generate, and a restriction declared but not generated is not applied.
+without `spfn db generate` afterwards. `db migrate`, `db grant` and `spfn add` apply the file, not the
+entities (only `db push` reads the entities): a stale file grants the old set — a table it does not
+list gets the default set, and a restriction declared but not generated is not applied. A project
+migrations folder with no `privileges.json` names no project schema, so the step grants nothing on
+the project's tables and says so: run `spfn db generate`.
 Run `spfn db generate` after every entity change and commit the file with the migrations.
 
-For tools (the CLI, the later grant step): `declaredAppPrivileges(values)` returns the
+For tools (the CLI's grant step, `db status`): `declaredAppPrivileges(values)` returns the
 declarations of the tables among `values` (a schema module's exports) as `{ schema, table,
 privileges }` entries (`AppTablePrivileges`), sorted. `readMigrationsAppPrivileges(migrationsDir)`
 returns what a migrations folder declares: `{ kind: 'manifest', file, manifest }`, or
@@ -1040,6 +1149,25 @@ returns what a migrations folder declares: `{ kind: 'manifest', file, manifest }
 list or `"default"`, or one table listed twice; `readMigrationsAppPrivileges` throws the same for
 a file that is there, and for a folder it cannot list. `renderAppPrivilegesManifest` / `writeAppPrivilegesManifest` produce the
 file (`APP_PRIVILEGES_MANIFEST_FILE`).
+
+The step itself: `readPrivilegeCatalog(db, schemas, roles)` reads, on the owner's connection, the
+access lists of every table and sequence of `schemas` (`PrivilegeCatalog`);
+`planAppPrivileges(catalog, target, roles)` is the pure difference — the statements, what it reports
+(`heldElsewhere`, `ownedRelations`, `publicGrantsByOthers`, `absentTables`, `publicMayCreateInPublic`, and per `REVOKE`
+the grants of what it revokes that roles other than the owner made, `grantsByOthers`) and whether it
+is `blocked` (a role name that is no role, a relation another role owns, a schema the role cannot
+use and the owner cannot grant, a grant to PUBLIC from another grantor) — on `target.schemas` only:
+whatever else the catalog holds is ignored; `applyAppPrivileges(db, target, roles, { rollback? })`
+reads, plans and runs the statements in one transaction, none when blocked, and returns the run
+(`AppPrivilegesRun`: the plan, whether it was `applied`, and the statement PostgreSQL `refused`
+with 2BP01, after which the transaction rolled back); with `rollback` it always rolls back.
+`target` is `{ schemas, tables, defaults }` (`AppPrivilegesTarget`), `roles` is `{ app, read? }`.
+`checkAppPrivileges(db, target, read?)`, on the app role's connection, reads the catalog for the app
+role and the read role and returns the plan as far as it concerns what the app role can do
+(`AppPrivilegesCheck`); `compareAppPrivileges(catalog, target, roles)` is its pure half, on a
+`PrivilegeCatalog` read as the app (no role taken for the owner, no relation foreign-owned). The plan carries the comparison its
+statements are written from: `changes` (`GranteeChange` per relation and grantee) and `withoutUsage`. `foreignOwnedObjects(db, schemas)` is the catalog read
+of what another role owns, shared with `spfn db push`'s ownership remedy.
 
 ---
 

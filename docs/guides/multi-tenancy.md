@@ -57,7 +57,7 @@ different:
 
 | Role | Connects through | Does |
 | --- | --- | --- |
-| owner (`app_owner`) | `DATABASE_OWNER_URL` | runs every command that changes the schema — `spfn db push` (its `--dry-run` too), `db migrate`, `spfn add` — and `db backup`, `restore`, `drop`, `tenant import`; owns every table |
+| owner (`app_owner`) | `DATABASE_OWNER_URL` | runs every command that changes the schema or the app role's privileges — `spfn db push` (its `--dry-run` too), `db migrate`, `spfn add`, `db grant` — and `db backup`, `restore`, `drop`, `tenant import`; owns every table |
 | app (`app_user`) | `DATABASE_URL` (and `DATABASE_WRITE_URL` / `DATABASE_READ_URL` if you use them) | runs the server; owns nothing, is not a superuser, has no `BYPASSRLS` |
 
 As a superuser (on a local install, usually `postgres`), create both roles and the database:
@@ -68,21 +68,23 @@ CREATE ROLE app_user LOGIN PASSWORD 'app-password' NOSUPERUSER NOBYPASSRLS;
 CREATE DATABASE acme OWNER app_owner;
 ```
 
-Then, connected to `acme` as `app_owner`, give the app role read and write access to everything
-the owner creates from now on, in every schema — your own, `@spfn/auth`'s and the `drizzle`
-schema where migrations are recorded (the server reads it at boot to check for pending
-migrations):
+Grant nothing by hand. `spfn db push`, `db migrate` and `spfn add` end by granting the app role,
+as the owner, exactly what each table declares — `SELECT`, `INSERT`, `UPDATE`, `DELETE` unless the
+table declares less with `appPrivileges` — `USAGE` on the schemas and sequences, and read-only access
+to the `drizzle` schema where migrations are recorded; `spfn db grant` does it alone (see
+[Database roles](../../packages/core/src/db/README.md#database-roles) in the `@spfn/core` db README).
+Do not set `ALTER DEFAULT PRIVILEGES` for the app role: a database-wide default also gives it write
+access to `drizzle`, where it could record a migration as applied.
+
+If the app uses jobs (`@spfn/core/job`), pg-boss creates its `spfn_queue` schema as the app role at
+its first start, so allow that once:
 
 ```sql
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner GRANT USAGE ON SCHEMAS TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner GRANT USAGE ON SEQUENCES TO app_user;
+GRANT CREATE ON DATABASE acme TO app_user;
 ```
 
-Default privileges only cover objects created afterwards. In a database whose tables already
-exist, grant them per schema as well, and move ownership off the app role if it created them —
-see [Database roles](../../packages/core/src/db/README.md#database-roles) in the `@spfn/core` db
-README.
+In a database whose tables already exist, move ownership off the app role if it created them (the
+same README section), then run `spfn db grant`.
 
 Set both URLs in `.env.server` for local development:
 
@@ -626,8 +628,8 @@ The same shape, with the user in `app.user_id`
 | --- | --- | --- |
 | The policy error from a script or job | a hand-written query, or a call outside a transaction bound to a tenant | use `TenantRepository` methods, or wrap the work in `runInTransaction(fn, { tenant })` |
 | Every query sees every tenant | the app role owns the tables, or is a superuser / `BYPASSRLS` | connect as `app_user`; move ownership with `ALTER TABLE … OWNER TO app_owner` or `REASSIGN OWNED BY app_user TO app_owner` |
-| `permission denied for table …` after a migration | the app role has no privilege on a new table | set the default privileges of step 1, or grant on the table |
-| The server logs `permission denied for schema drizzle` at boot and starts without checking migrations | the app role cannot read the `drizzle` schema, where migrations are recorded | grant `USAGE` on schema `drizzle` and `SELECT` on its tables to the app role |
+| `permission denied for table …` after a migration | the grant step did not run: `DATABASE_OWNER_URL` was not set, or no app URL and no `DATABASE_APP_ROLE` named the app role (one warning), or it failed after the schema changes | with `DATABASE_OWNER_URL` set, run `spfn db grant`; `spfn db status` lists what the app role is missing |
+| The server logs `permission denied for schema drizzle` at boot and starts without checking migrations | the app role cannot read the `drizzle` schema, where migrations are recorded | as above: `spfn db grant` |
 | `spfn db backup` or `restore` fails on a tenancy table | it ran as the app role, to which the policy applies | set `DATABASE_OWNER_URL` |
 | `spfn db push` fails with `Invalid query (42501)` on a table that exists | the app role owns it — it was pushed through `DATABASE_URL` before push connected as the owner | `REASSIGN OWNED BY app_user TO app_owner`, as a superuser or a member of both roles ([Database roles](../../packages/core/src/db/README.md#database-roles)) |
 | The server logs `DATABASE_OWNER_URL was in the environment the server was started with` | the owner's URL was exported to the server's process (a shell, a container's env) | give it only to the migrate job |

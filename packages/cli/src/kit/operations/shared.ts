@@ -633,9 +633,8 @@ export function assertStatusReadable(status: DatabaseStatus, operationId: string
         throw new KitError(
             'CLI_MIGRATION_STATUS_UNREADABLE',
             'The database refused the app role the read of the migration status (schema `drizzle`), so nothing '
-            + 'can tell what is applied. As the database owner, grant the app role USAGE on schema drizzle and '
-            + 'SELECT on its tables — the SQL is in the @spfn/core db README, "Database roles"; spfn does not '
-            + 'grant it yet. Then resume.',
+            + 'can tell what is applied. With DATABASE_OWNER_URL set, run spfn db grant: it gives the app role USAGE '
+            + 'on schema drizzle and SELECT on its tables (the @spfn/core db README, "Database roles"). Then resume.',
             { evidence: { reason: 'permission-denied', detail: status.permissionDenied }, next },
         );
     }

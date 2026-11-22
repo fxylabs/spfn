@@ -27,6 +27,8 @@ const recorded = vi.hoisted(() => ({
     pushConnections: [] as [string, boolean][],
     /** Whether `process.env` held the owner URL when each postgres connection opened */
     ownerHeldAtConnect: [] as boolean[],
+    /** The URL each privileges step on a connection of its own (migrate, add, grant) was handed */
+    grantSteps: [] as string[],
 }));
 
 vi.mock('@spfn/core/server', () => ({ loadEnv: vi.fn() }));
@@ -74,6 +76,18 @@ vi.mock('../../../utils/function-migrations.js', () => ({
     executeFunctionMigrations: vi.fn(async (_plans: unknown, url?: string) => (recorded.functionMigrations.push(url), 0)),
 }));
 
+/** The privileges step has rows of its own (app-grants.integration.test.ts): here only the URL it is handed. */
+vi.mock('../utils/app-grants.js', () => ({
+    entityGrantTarget: (schemas: string[]) => ({ schemas, tables: [], defaults: [] }),
+    manifestGrantTargetOrExit: () => ({ schemas: [], tables: [], defaults: [] }),
+    projectGrantTargetOrExit: async () => ({ target: { schemas: [], tables: [], defaults: [] }, source: 'entities' }),
+    runAppGrantStep: vi.fn(async () => undefined),
+    runAppGrantStepOn: vi.fn(async (url: string) => void recorded.grantSteps.push(url)),
+    exitOnGrantFailure: vi.fn(),
+    grantRetryNote: () => undefined,
+    SCHEMA_APPLIED_PRIVILEGES_UNCHANGED: 'Schema applied; no privilege was changed',
+}));
+
 vi.mock('../utils/backup-files.js', () => ({ ensureBackupDir: vi.fn(async () => 'backups'), listBackupFiles: vi.fn(async () => []) }));
 
 vi.mock('../utils/metadata.js', () => ({
@@ -88,7 +102,7 @@ vi.mock('../utils/drizzle.js', async (importOriginal) => ({
     runWithSpinner: vi.fn(async (_text: string, _command: string, _ok: string, _fail: string, url?: string) =>
         void recorded.drizzleCommands.push(url)),
     resolvePushSchemaSource: vi.fn(async () => ({ schema: './notes.entity.ts', label: 'notes.entity.ts' })),
-    resolveSchemaFiles: vi.fn(async () => ({ files: ['notes.entity.ts'], source: 'notes.entity.ts', imports: {} })),
+    resolveProjectSchemaFiles: vi.fn(async () => ({ files: ['notes.entity.ts'], source: 'notes.entity.ts', imports: {} })),
     createPushConnection: vi.fn(async (url: string, options?: { readOnly?: boolean }) =>
     {
         recorded.pushConnections.push([url, options?.readOnly === true]);
@@ -115,6 +129,7 @@ const { dbBackup } = await import('../backup');
 const { dbRestore } = await import('../restore');
 const { dbDrop } = await import('../drop');
 const { dbPush } = await import('../push');
+const { dbGrant } = await import('../grant');
 const { dbStatus, DB_STATUS_JSON_MARKER } = await import('../status');
 const { readReport } = await import('../../../kit/local/database.js');
 const { resetEnvLoadState } = await import('@spfn/core/env/loader');
@@ -158,6 +173,7 @@ async function runSchemaCommands(before: () => void = () => undefined): Promise<
         () => dbPush({ force: true }),
         () => dbPush({ dryRun: true }),
         () => addCommand.parseAsync(['@spfn/fixture'], { from: 'user' }),
+        () => dbGrant(),
     ])
     {
         before();
@@ -227,6 +243,7 @@ describe('owner connection for the schema commands, db backup, restore and drop'
         ]);
         expect(recorded.migrationInfo).toEqual([OWNER_URL]);
         expect(recorded.drizzleCommands).toEqual([OWNER_URL]);
+        expect(recorded.grantSteps).toEqual([OWNER_URL]);
     });
 
     it('O2 without DATABASE_OWNER_URL, all four commands connect with DATABASE_URL as before', async () =>
@@ -250,6 +267,7 @@ describe('owner connection for the schema commands, db backup, restore and drop'
 
         expect(recorded.pushConnections).toEqual([[OWNER_URL, false], [OWNER_URL, true]]);
         expect(recorded.functionMigrations).toEqual([OWNER_URL, OWNER_URL]);
+        expect(recorded.grantSteps).toEqual([OWNER_URL, OWNER_URL]);
         expect(printed.filter((line) => line.includes('owner-secret-pw'))).toEqual([]);
     });
 
@@ -369,7 +387,7 @@ describe('owner connection for the schema commands, db backup, restore and drop'
 
         expect(holds).toEqual(ownerCommands);
         expect(keepsInherited).toEqual(ownerCommands);
-        expect(Object.values(holds).filter(Boolean)).toHaveLength(7);
+        expect(Object.values(holds).filter(Boolean)).toHaveLength(8);
     });
 
     it('O5 no command prints the owner URL or its password', async () =>

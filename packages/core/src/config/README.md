@@ -132,6 +132,7 @@ validator **throw on access** if the value is present but malformed.
 | `DATABASE_WRITE_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_READ_URL` | `string` | No | `parsePostgresUrl` |
 | `DATABASE_OWNER_URL` | `string` | No | `parsePostgresUrl` — the table owner, used only by the spfn commands that change the schema (`db push`, its dry run too, `db migrate`, `add`) and by `db backup` / `restore` / `drop` / `tenant import`; falls back to `DATABASE_URL`. The server never uses it and must not hold it: `loadEnv()` loads it from an `.env` file only with `ownerCredentials: true`, which only those commands pass (keep it in `.env.server` locally; in production only in the migrate job's environment), and every other load logs one info line naming the file instead. A server entry (`startServer`, `createServer`, the serverless app, `provisionInfrastructure`) started with it in its environment removes it and logs one warning |
+| `DATABASE_APP_ROLE` | `string` | No | — the app role's name, read only by the spfn commands that grant it its privileges (`spfn db grant`, and the step after `db push`, `db migrate`, `spfn add`) when no app URL is set (a migrate job holding only `DATABASE_OWNER_URL`). With an app URL the role is the one it connects as (`current_user`); a setting naming another role is refused, and so is one naming no role in the database (exit 1) |
 
 ### Database — connection pool
 

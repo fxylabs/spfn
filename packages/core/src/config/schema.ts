@@ -93,6 +93,12 @@ export const coreEnvSchema = defineEnvSchema({
         examples: ['postgresql://app_owner:password@localhost:5432/dbname'],
     }),
 
+    DATABASE_APP_ROLE: envString({
+        description: 'The app role\'s name, for the spfn commands that grant it its privileges (`spfn db grant`, and the step after `db push`, `db migrate` and `spfn add`) when they hold no app URL — a migrate job given only DATABASE_OWNER_URL. With an app URL (DATABASE_WRITE_URL or DATABASE_URL, and DATABASE_READ_URL) the role is the one the URL connects as (`current_user`), and a setting naming another role is refused; one naming no role in the database is refused too (exit 1, naming the setting and the role)',
+        required: false,
+        examples: ['app_user'],
+    }),
+
     // ========================================================================
     // Database - Connection Pool
     // ========================================================================

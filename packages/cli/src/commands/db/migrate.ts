@@ -5,6 +5,8 @@ import { dbBackup } from './backup.js';
 import { OWNER_URL_MISSING } from './utils/database.js';
 
 import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
+import { discoverFunctionMigrations } from '../../utils/function-migrations.js';
+import { exitOnGrantFailure, manifestGrantTargetOrExit, runAppGrantStepOn } from './utils/app-grants.js';
 
 /**
  * Project migrations use the default drizzle migrations table.
@@ -18,7 +20,10 @@ const PROJECT_MIGRATIONS_TABLE = '__drizzle_migrations';
  * Also applies function package migrations if available.
  * Use this in both development and production environments.
  *
- * Connects as the table owner: DATABASE_OWNER_URL, else DATABASE_URL.
+ * Connects as the table owner: DATABASE_OWNER_URL, else DATABASE_URL. Last,
+ * the app role is granted what the manifests declare (app-grants.ts), in a
+ * transaction of its own; an unreadable manifest ends the command before any
+ * migration, a failed grant after them, saying to run `spfn db grant`.
  */
 export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise<void>
 {
@@ -32,6 +37,10 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
         console.log(chalk.yellow('\n💡 Tip: Add DATABASE_URL (and DATABASE_OWNER_URL for the table owner) to your .env file'));
         process.exit(1);
     }
+
+    // What the app role is granted at the end, read before anything is applied
+    const functions = discoverFunctionMigrations(process.cwd());
+    const grantTarget = manifestGrantTargetOrExit(functions);
 
     // Create backup before migration if requested
     if (options.withBackup)
@@ -50,9 +59,7 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
     const postgres = await import('postgres');
 
     // First, execute function package migrations (per-package tables)
-    const { discoverFunctionMigrations, loadFunctionMigrationPlans, executeFunctionMigrations } =
-        await import('../../utils/function-migrations.js');
-    const functions = discoverFunctionMigrations(process.cwd());
+    const { loadFunctionMigrationPlans, executeFunctionMigrations } = await import('../../utils/function-migrations.js');
 
     if (functions.length > 0)
     {
@@ -91,4 +98,6 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
     {
         console.log(chalk.dim('No project migrations found (src/server/drizzle)'));
     }
+
+    await runAppGrantStepOn(databaseUrl, grantTarget).catch(error => exitOnGrantFailure(error, databaseUrl));
 }

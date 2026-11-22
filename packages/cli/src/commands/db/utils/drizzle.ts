@@ -679,6 +679,34 @@ export async function resolvePushSchemaSource(explicit?: string, cwd: string = p
     return fromConfig && { ...fromConfig, label: 'drizzle.config.ts' };
 }
 
+/**
+ * The files the project's entities are in, as `db push` resolves them:
+ * `source`'s (--schema, drizzle.config.ts), else core's default — the
+ * entities folder scan, or its registry (`resolveSchemaFiles`).
+ *
+ * @throws as `resolveSchemaFiles`
+ */
+export async function resolveProjectSchemaFiles(databaseUrl: string, source: SchemaSource | undefined, cwd: string = process.cwd()): Promise<ResolvedSchema>
+{
+    return resolveSchemaFiles(getDrizzleConfig({
+        cwd,
+        databaseUrl,
+        schema: source?.schema,
+        expandGlobs: true,
+        disablePackageDiscovery: true,
+    }), cwd);
+}
+
+/**
+ * The exports of the files `resolved` names, less the objects a function
+ * package owns: a registry re-exports one of its tables for a relation, but
+ * the package's own migrations create and alter it.
+ */
+export async function loadProjectEntities(resolved: ResolvedSchema, cwd: string = process.cwd()): Promise<Record<string, unknown>>
+{
+    return withoutFunctionPackageObjects(resolved.imports ?? await loadSchemaImports(resolved.files), cwd);
+}
+
 /** A module's exports less `default` */
 const namedExports = (exports: Record<string, unknown>) => Object.fromEntries(Object.entries(exports).filter(([key]) => key !== 'default'));
 

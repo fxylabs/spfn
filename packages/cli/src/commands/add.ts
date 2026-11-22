@@ -102,6 +102,9 @@ async function addPackage(packageName: string): Promise<void>
 
             if (targetFunction)
             {
+                // What the app role is granted after the migrations, read before them
+                const { exitOnGrantFailure, manifestGrantTargetOrExit, runAppGrantStepOn } = await import('./db/utils/app-grants.js');
+                const grantTarget = manifestGrantTargetOrExit(functions);
                 const spinner = ora('Applying migrations...').start();
 
                 try
@@ -115,6 +118,8 @@ async function addPackage(packageName: string): Promise<void>
                     console.error(chalk.red(error instanceof Error ? error.message : 'Unknown error'));
                     process.exit(1);
                 }
+
+                await runAppGrantStepOn(databaseUrl, grantTarget).catch(error => exitOnGrantFailure(error, databaseUrl));
             }
             else
             {

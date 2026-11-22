@@ -10,6 +10,7 @@
 import chalk from 'chalk';
 
 import {
+    checkAppPrivileges,
     collectMigrationStatus,
     formatPendingMigrations,
     MigrationBookkeepingMismatchError,
@@ -17,12 +18,16 @@ import {
     pendingMigrationTargets,
     pendingMigrationsSummary,
     RUN_MIGRATIONS_HINT,
+    discoverFunctionMigrations,
+    type AppPrivilegesCheck,
     type MigrationStatus,
     type MigrationTargetStatus,
 } from '@spfn/core/db';
 import { env } from '@spfn/core/config';
 import { loadEnv } from '@spfn/core/server';
 import { databaseUrlFor } from './database-connection.js';
+import { describeFailure } from './database-failure.js';
+import { projectGrantTarget } from '../commands/db/utils/app-grants.js';
 
 export {
     functionMigrationsTable,
@@ -50,12 +55,110 @@ export async function getMigrationStatus(
     }
 
     const { drizzle } = await import('drizzle-orm/postgres-js');
-    const postgres = await import('postgres');
-    const connection = postgres.default(url, { max: 1, connect_timeout: 5 });
+    const connection = await statusConnection(url);
 
     try
     {
         return await collectMigrationStatus(drizzle({ client: connection }), cwd);
+    }
+    finally
+    {
+        await connection.end();
+    }
+}
+
+/** One connection to `url`, given 5 s to connect: every connection `db status` opens. */
+async function statusConnection(url: string)
+{
+    const postgres = await import('postgres');
+
+    return postgres.default(url, { max: 1, connect_timeout: 5 });
+}
+
+/** Whether the read role was looked up — or `DATABASE_READ_URL` is unset — or why it could not be. */
+export type ReadRoleCheck = { checked: true } | { checked: false; detail: string };
+
+/** What the app role holds against the declarations, or why that could not be read. */
+export type AppPrivilegesStatus = ({ checked: true; source: string; readRole: ReadRoleCheck } & AppPrivilegesCheck) | { checked: false; detail: string };
+
+/**
+ * Compare what the app role — the role `db status` connects as — holds on the
+ * managed tables with what is declared (`checkAppPrivileges`): the project's
+ * manifest, else its entities as `db push` loads them, and each function
+ * package's manifest (`projectGrantTarget`). The read role is planned as
+ * `db grant` plans it: the `current_user` of `DATABASE_READ_URL`, when set, so
+ * a statement for it that reaches the app (a member of it) is drift. Never throws: an unreadable
+ * manifest, a project whose tables cannot be seen (no manifest, no entity that
+ * loads) or a failed read is `checked: false`, with the reason as
+ * `describeFailure` prints it.
+ *
+ * A read role that cannot be looked up does not hide the app role's part:
+ * what `db grant` would change for the app role and PUBLIC does not depend on
+ * it. What does is what the app holds as a member of another role — drift
+ * when that role is the read role, held elsewhere otherwise — so that is left
+ * out, and `readRole` says why.
+ */
+export async function getAppPrivilegesStatus(cwd: string = process.cwd(), databaseUrl?: string): Promise<AppPrivilegesStatus>
+{
+    const url = databaseUrl ?? databaseUrlFor('db status');
+
+    return readAppPrivileges(cwd, url).then(
+        check => ({ checked: true as const, ...check }),
+        (error: unknown) => ({ checked: false as const, detail: describeFailure(error, url) }),
+    );
+}
+
+/** The check, which of the project's declarations it compared with (`projectGrantTarget`), and whether the read role was looked up. */
+async function readAppPrivileges(cwd: string, url: string | undefined): Promise<AppPrivilegesCheck & { source: string; readRole: ReadRoleCheck }>
+{
+    const { target, source } = await projectGrantTarget(discoverFunctionMigrations(cwd), url ?? '', cwd);
+    const { drizzle } = await import('drizzle-orm/postgres-js');
+    const connection = await statusConnection(url ?? '');
+
+    try
+    {
+        const read = await lookUpReadRole();
+        const check = await checkAppPrivileges(drizzle({ client: connection }), target, read.name);
+
+        return {
+            ...check,
+            heldElsewhere: read.readRole.checked ? check.heldElsewhere : check.heldElsewhere.filter(held => !held.through.startsWith('member of ')),
+            source,
+            readRole: read.readRole,
+        };
+    }
+    finally
+    {
+        await connection.end();
+    }
+}
+
+/** The `current_user` of `DATABASE_READ_URL`, none when it is unset, or why it could not be asked. */
+async function lookUpReadRole(): Promise<{ name?: string; readRole: ReadRoleCheck }>
+{
+    const url = env.DATABASE_READ_URL;
+
+    if (!url)
+    {
+        return { readRole: { checked: true } };
+    }
+
+    return currentUserOn(url).then(
+        name => ({ name, readRole: { checked: true as const } }),
+        (error: unknown) => ({ readRole: { checked: false as const, detail: `the read role could not be looked up through DATABASE_READ_URL: ${describeFailure(error, url)}` } }),
+    );
+}
+
+/** `SELECT current_user` on a status connection to `url`. */
+async function currentUserOn(url: string): Promise<string>
+{
+    const connection = await statusConnection(url);
+
+    try
+    {
+        const [row] = await connection`SELECT current_user::text AS role`;
+
+        return String(row.role);
     }
     finally
     {
@@ -77,13 +180,12 @@ export function bookkeepingMismatchOf(error: unknown): string | undefined
 const INSUFFICIENT_PRIVILEGE = '42501';
 
 /**
- * What to do about a permission error reading the bookkeeping, in one line.
- *
- * spfn grants the app role nothing yet (#405), so the remedy is the hand SQL
- * the core db README gives under "Database roles".
+ * What to do about a permission error reading the bookkeeping, in one line:
+ * the grant step gives the app role USAGE on schema drizzle and SELECT on its
+ * tables, and `spfn db grant` runs it alone.
  */
-export const STATUS_GRANT_REMEDY = 'As the database owner, grant the app role USAGE on schema drizzle and SELECT '
-    + 'on its tables — the SQL is in the @spfn/core db README, "Database roles"; spfn does not grant it yet.';
+export const STATUS_GRANT_REMEDY = 'With DATABASE_OWNER_URL set, run spfn db grant: it grants the app role USAGE on schema drizzle and SELECT '
+    + 'on its tables (the @spfn/core db README, "Database roles").';
 
 /**
  * PostgreSQL's message when `error` is a permission error, else undefined.

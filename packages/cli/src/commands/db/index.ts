@@ -9,6 +9,7 @@ import { markAppSourceProcess } from '@spfn/core/server';
 import { dbGenerate } from './generate.js';
 import { dbPush } from './push.js';
 import { dbMigrate } from './migrate.js';
+import { dbGrant } from './grant.js';
 import { dbStatus } from './status.js';
 import { dbStudio } from './studio.js';
 import { dbDrop } from './drop.js';
@@ -52,6 +53,12 @@ dbCommand
     .description('Run pending migrations')
     .option('--with-backup', 'Create backup before running migrations')
     .action((options) => dbMigrate(options));
+
+dbCommand
+    .command('grant')
+    .description('Grant the app role exactly the privileges the manifests declare (owner connection)')
+    .option('--dry-run', 'Print the roles and the GRANT/REVOKE statements without applying them')
+    .action((options: { dryRun?: boolean }) => dbGrant({ dryRun: options.dryRun === true }));
 
 dbCommand
     .command('status')
