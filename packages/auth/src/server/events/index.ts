@@ -517,6 +517,33 @@ export const authPasswordResetEvent = defineEvent(
 );
 
 /**
+ * auth.password.changed — an account's password was changed from a session
+ *
+ * 발행 시점:
+ * - changePasswordService() (`PUT /_auth/password`)가 커밋된 직후
+ *
+ * `required` is true when the change answered `passwordChangeRequired` — a
+ * first set-up rather than an ordinary change. A completed reset is
+ * `auth.password.reset`, not this. The app's own rows that must move with the
+ * change belong in `passwordChange.changed`, which runs inside its
+ * transaction; this is for notices.
+ *
+ * @example
+ * ```typescript
+ * authPasswordChangedEvent.subscribe(async ({ userId, required }) => {
+ *     if (!required) await notifyOwner(userId, 'Your password was changed');
+ * });
+ * ```
+ */
+export const authPasswordChangedEvent = defineEvent(
+    'auth.password.changed',
+    Type.Object({
+        userId: Type.String(),
+        required: Type.Boolean(),
+    }),
+);
+
+/**
  * Auth event payload types
  */
 export type AuthLoginPayload = typeof authLoginEvent._payload;
@@ -525,6 +552,7 @@ export type PasskeyRevokedPayload = typeof passkeyRevokedEvent._payload;
 export type MfaLockedPayload = typeof mfaLockedEvent._payload;
 export type AuthRegisterPayload = typeof authRegisterEvent._payload;
 export type AuthPasswordResetPayload = typeof authPasswordResetEvent._payload;
+export type AuthPasswordChangedPayload = typeof authPasswordChangedEvent._payload;
 export type AuthDeviceRegisteredPayload = typeof authDeviceRegisteredEvent._payload;
 export type InvitationCreatedPayload = typeof invitationCreatedEvent._payload;
 export type InvitationAcceptedPayload = typeof invitationAcceptedEvent._payload;

@@ -100,6 +100,12 @@ export type {
     SignInOutcome,
     SignInStage,
 } from './server/lib/sign-in-guard';
+export type {
+    PasswordChangeAdmission,
+    PasswordChangeAttempt,
+    PasswordChangeChannel,
+    PasswordChangeGuardOptions,
+} from './server/lib/password-change-guard';
 
 // ============================================================================
 // Jobs
@@ -130,6 +136,7 @@ export {
     authLoginEvent,
     authRegisterEvent,
     authPasswordResetEvent,
+    authPasswordChangedEvent,
     authDeviceRegisteredEvent,
     passkeyEnrolledEvent,
     passkeyRevokedEvent,
@@ -149,6 +156,7 @@ export type {
     AuthLoginPayload,
     AuthRegisterPayload,
     AuthPasswordResetPayload,
+    AuthPasswordChangedPayload,
     AuthDeviceRegisteredPayload,
     DeviceRegistrationChannel,
     PasskeyEnrolledPayload,

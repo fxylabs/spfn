@@ -214,6 +214,20 @@ second run on an OAuth sign-in that lost a race. Renewal and key rotation are ne
 nothing changes; two lifecycles stating different functions refuse boot. See
 [The sign-in guard](../../packages/auth/README.md#the-sign-in-guard-signin).
 
+`createAuthLifecycle({ passwordChange: { admit, changed } })` is the app's seat inside a password
+change — the one place its own step can run for an account that must change its password, whose
+session reaches no app route. Both run in the transaction that writes the new password, under the
+account lock, on `PUT /_auth/password` (`channel: 'change'`) and on a completed reset link
+(`'reset'`), the two paths that clear `passwordChangeRequired`; `required` says whether this change
+answers it. `admit` runs before anything is written and refuses with `{ refuse: { code } }` — 403
+`PasswordChangeRefusedError` with `details.code`, the old password and the flag kept; `changed` runs
+once the change is written, and a throw from either rolls it back as 500
+`PasswordChangeHookFailedError`. App repositories extending `BaseRepository` join the transaction;
+database work only, no `requiresNew` transaction. `auth.password.changed` (`userId`, `required`)
+fires after a change commits. Registration, invitation acceptance and seeding create an account and
+are not asked. See
+[The password-change guard](../../packages/auth/README.md#the-password-change-guard-passwordchange).
+
 ### 5. Register Router and Middleware in `router.ts`
 
 This is the **critical step** that most setups miss. You need three things:
@@ -1761,7 +1775,7 @@ catch (error)
 | `DeletionAlreadyRequestedError` | 409 | Deletion already requested (or account already purged) |
 | `DeletionNotRequestedError` | 404 | No pending deletion request to cancel/purge |
 | `ImmediateDeletionNotAllowedError` | 403 | Self-service `immediate: true` without `deletion.allowSelfImmediate` |
-| `PurgeHookFailedError` | 500 | `deletion.onPurge` threw; the purge rolled back. The message names the hook and `requestId` only; the hook's error is its `cause` |
+| `PurgeHookFailedError` | 500 | `deletion.onPurge` threw; the purge rolled back. It names the hook, `requestId`, and what the hook threw by class name and SQLSTATE only — no `cause` |
 | `AccountAlreadyExistsError` | 409 | Email/phone already registered |
 | `InsufficientRoleError` | 403 | Missing required role |
 | `InsufficientPermissionsError` | 403 | Missing required permission |
@@ -1769,6 +1783,8 @@ catch (error)
 | `InvalidVerificationTokenError` | 400 | Invalid verification token |
 | `RegistrationRejectedError` | 403 | A `beforeRegister` hook rejected the signup |
 | `SignInRefusedError` | 403 | The app's `signIn.admit` refused the sign-in; `details.code` is the app's reason (mobile contract 0.14.7) |
+| `PasswordChangeRefusedError` | 403 | The app's `passwordChange.admit` refused a password change or a reset's completion; nothing written; `details.code` is the app's reason |
+| `PasswordChangeHookFailedError` | 500 | `passwordChange.admit` or `changed` threw; the change rolled back. It names the hook, `userId`, and what the hook threw by class name and SQLSTATE only |
 | `OAuthProviderLinkOnlyError` | 403 | A sign-in used a provider the app made link-only |
 | `OAuthEmailInUseError` | 409 | A first social sign-in's email belongs to an existing account and `oauthEmailMatch` is `'reject'` |
 | `OAuthProviderAlreadyLinkedError` | 409 | `OAUTH_PROVIDER_ALREADY_LINKED`: the account already holds an identity of this provider — a link start, or a first social sign-in matching it by email |

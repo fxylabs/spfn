@@ -33,9 +33,10 @@ import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { accountRefusalReason, signingKeyOf, type PrincipalCredential } from './admission.service';
 import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
+import { assertPasswordChangeAdmits, reportPasswordChanged } from './password-change-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import type { User } from '../entities/users';
-import { authLoginEvent, authRegisterEvent } from '../events';
+import { authLoginEvent, authPasswordChangedEvent, authRegisterEvent } from '../events';
 
 export interface RegisterParams
 {
@@ -571,8 +572,15 @@ export async function logoutService(
  * password does not clear `passwordChangeRequired` (#362). The change clears
  * it in the same transaction, under the account lock, as it writes the hash.
  *
+ * The app's `passwordChange` guard runs in that transaction too (#434):
+ * `admit` before the hash is written, `changed` once the sessions are ended,
+ * with `channel: 'change'` and `required` read from the locked row.
+ * `auth.password.changed` is published after the commit.
+ *
  * @throws PasskeyProofRequiredError when a bound account sets its first password without the proof
  * @throws ValidationError when the new password is the current one
+ * @throws PasswordChangeRefusedError when the app's `passwordChange.admit` refuses the change
+ * @throws PasswordChangeHookFailedError when `passwordChange.admit` or `changed` throws
  */
 export async function changePasswordService(
     params: ChangePasswordParams,
@@ -658,11 +666,27 @@ async function replaceVerifiedPassword(
             await assertPasskeyProven(account, passkeyProof, 'passwordSet');
         }
 
-        await usersRepository.updatePassword(userId, change.newPasswordHash, true);
-        await endEverySessionExcept(userId, change.spareKeyId, 'Revoked by password change');
+        await writePasswordChange(account, change);
 
         return true;
     }, { context: 'auth:change-password' });
+}
+
+/**
+ * What a change admitted under the lock writes: the hash, the flag cleared,
+ * every other session ended — between the app's `passwordChange.admit` and
+ * `changed` — and `auth.password.changed` once it commits.
+ */
+async function writePasswordChange(account: User, change: PasswordChange): Promise<void>
+{
+    const attempt = { user: account, required: account.passwordChangeRequired, channel: 'change' } as const;
+    await assertPasswordChangeAdmits(attempt);
+
+    await usersRepository.updatePassword(account.id, change.newPasswordHash, true);
+    await endEverySessionExcept(account.id, change.spareKeyId, 'Revoked by password change');
+    await reportPasswordChanged(attempt);
+
+    onAfterCommit(() => authPasswordChangedEvent.emit({ userId: String(account.id), required: attempt.required }));
 }
 
 /**

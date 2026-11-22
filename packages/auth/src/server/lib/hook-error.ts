@@ -1,10 +1,11 @@
 /**
- * What the package keeps of an error an app's deletion hook threw: its class
- * name and, when a database statement failed, the SQLSTATE — identifiers
- * only. The hook was handed the account's email and phone, and its error's
- * text may quote them anywhere: its message, a driver error's `detail`, a
- * cause down the chain. The package never holds on to the error itself, so no
- * logger, serializer or response body can walk to that text.
+ * What the package keeps of an error an app's hook threw (`deletion.onPurge`,
+ * `passwordChange.admit` and `changed`): its class name and, when a database
+ * statement failed, the SQLSTATE — identifiers only. The hook was handed the
+ * account's email and phone, and its error's text may quote them anywhere:
+ * its message, a driver error's `detail`, a cause down the chain. The package
+ * never holds on to the error itself, so no logger, serializer or response
+ * body can walk to that text.
  *
  * @module lib/hook-error
  */

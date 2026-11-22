@@ -25,6 +25,11 @@ import {
     type SecondFactorOptions,
 } from './lib/second-factor-policy';
 import { assertSignInGuardConsistent, configureSignIn, type SignInGuardOptions } from './lib/sign-in-guard';
+import {
+    assertPasswordChangeGuardConsistent,
+    configurePasswordChange,
+    type PasswordChangeGuardOptions,
+} from './lib/password-change-guard';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -486,6 +491,45 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     signIn?: SignInGuardOptions;
+
+    /**
+     * The application's seat inside a password change
+     *
+     * Omitted, nothing changes. Stated, both run inside the transaction that
+     * writes the new password, under the account lock, on the two paths that
+     * set a password the person chose and clear `passwordChangeRequired`:
+     * `PUT /_auth/password` (`channel: 'change'`) and a completed reset link
+     * (`'reset'`). `required` is true when the account carried the flag.
+     *
+     * - `admit(attempt)` — before anything is written. Answer
+     *   `{ refuse: { code } }` to refuse: nothing is written, the client gets
+     *   403 `PasswordChangeRefusedError` with `details.code`.
+     * - `changed(attempt)` — once the change is written and the sessions it
+     *   ends are ended. A throw rolls the change back.
+     *
+     * A throw from either is 500 `PasswordChangeHookFailedError`, which keeps
+     * only the thrown value's class and SQLSTATE. An app repository extending
+     * `BaseRepository` joins the change's transaction: its write commits with
+     * the change or not at all. Database work only, and fast; never open a
+     * `requiresNew` transaction that touches the account, which waits on the
+     * lock the change holds. See the README, "The password-change guard".
+     *
+     * A later `createAuthLifecycle()` that omits it leaves it as it is; one
+     * that states other functions refuses boot in `afterInfrastructure`.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     passwordChange: {
+     *         admit: async ({ user, required }) => required && await setups.isExpired(user.id)
+     *             ? { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } }
+     *             : undefined,
+     *         changed: async ({ user, required }) => { if (required) await setups.complete(user.id); },
+     *     },
+     * })
+     * ```
+     */
+    passwordChange?: PasswordChangeGuardOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -526,6 +570,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // Same again: every sign-in reads it at request time. Omitted leaves it as
     // it is; a contradicting statement is refused below, in afterInfrastructure.
     configureSignIn(options.signIn);
+    configurePasswordChange(options.passwordChange);
 
     return {
         /**
@@ -584,6 +629,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning: two createAuthLifecycle() calls that stated
             // different sign-in guards. Silent when at most one stated one.
             assertSignInGuardConsistent();
+            // Same reasoning, for the password-change guard.
+            assertPasswordChangeGuardConsistent();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

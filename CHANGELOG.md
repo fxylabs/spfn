@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/auth: a seat for the app inside a password change — `createAuthLifecycle({ passwordChange:
+  { admit, changed } })` and `auth.password.changed` (#434).** Since the required password change is
+  enforced, a flagged session reaches no app route, so an app could no longer wrap the change in its
+  own transaction (refuse an expired temporary password, mark the account set up, write an audit
+  line). Both callbacks now run in the transaction that writes the new password, under the account
+  lock, on `PUT /_auth/password` (`channel: 'change'`) and on a completed reset link (`'reset'`) —
+  the two paths that clear `passwordChangeRequired` — handed `{ user, required, channel }`, where
+  `required` says the account carried the flag. `admit` runs before anything is written;
+  `{ refuse: { code } }` answers **403 `PasswordChangeRefusedError`** (`details.code`, the sign-in
+  refusal's shape) and writes nothing. `changed` runs once the change is written and the sessions it
+  ends are ended; a throw from either rolls the change back and answers **500
+  `PasswordChangeHookFailedError`** (`hook`, `userId`, `hookErrorClass`, `hookErrorCode?` — the
+  `onPurge` rule: nothing of what the hook threw). An app repository extending `BaseRepository`
+  joins the transaction. `authPasswordChangedEvent` (`auth.password.changed`: `userId`, `required`;
+  payload type `AuthPasswordChangedPayload`) fires after a change commits; a reset still fires only
+  `auth.password.reset`. Registration, invitation acceptance, seeding, a sign-in's legacy-hash
+  re-encoding and a purge are not asked. New exports from `@spfn/auth/server`: the event, its payload
+  type, and the types `PasswordChangeAttempt`, `PasswordChangeAdmission`, `PasswordChangeChannel`,
+  `PasswordChangeGuardOptions`; from `@spfn/auth/errors`: the two errors. Omitted, nothing changes;
+  sessions are ended as before. No schema change, no migration; the mobile contract does not move.
 - **spfn: the app role is granted exactly what is declared — `spfn db grant [--dry-run]`, and a
   privileges step at the end of `db push`, `db migrate` and `spfn add` (#405).** As the owner
   (`DATABASE_OWNER_URL`), in a transaction of its own after the schema changes, the step brings the

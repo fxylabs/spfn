@@ -857,6 +857,10 @@ flag stays. A reset of a flagged account is held to the same rule (an unflagged 
 reset to the password it had): 400 `ValidationError`, nothing written, and the setup session stays
 usable for another try until it expires.
 
+An app route cannot run for such a session, so what the app does with the change — refuse it on its
+own state, mark the account set up, write an audit line — runs inside it, in the
+[password-change guard](#the-password-change-guard-passwordchange), with `required: true`.
+
 **With a second factor to enrol as well**, both requirements are outstanding. A request is admitted
 when the route admits **either** one — requiring both would leave no route at all, since the change
 is not an enrolment route and no enrolment route changes the password — so the person can enrol and
@@ -1243,6 +1247,123 @@ it.
 A second `createAuthLifecycle()` that omits `signIn` leaves it as it is; one that states other
 functions refuses boot in `afterInfrastructure`, the first statement staying in force meanwhile.
 `configureAuth` has no `signIn`: a late call there would replace the guard silently.
+
+### The password-change guard (`passwordChange`)
+
+Since the [required password change](#a-required-password-change-passwordchangerequired) is
+enforced, a flagged session cannot reach an app route, so the app cannot wrap the change in a route
+of its own. `createAuthLifecycle({ passwordChange: { admit, changed } })` is its seat inside the
+change instead: both run **in the transaction that writes the new password, under the account
+lock** — refuse on the app's own state (a temporary password the app gave a lifetime), move the
+app's account row to "set up", write the audit line, all atomic with the change. Leave it out and
+nothing changes. Both callbacks are optional.
+
+```typescript
+import type { PasswordChangeAttempt } from '@spfn/auth/server';
+
+createAuthLifecycle({
+    passwordChange: {
+        admit: async ({ user, required }: PasswordChangeAttempt) =>
+            required && await setupsRepository.isExpired(user.id)
+                ? { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } }
+                : undefined,
+        changed: async ({ user, required, channel }: PasswordChangeAttempt) =>
+        {
+            if (required)
+            {
+                await setupsRepository.markSetUp(user.id);
+                await auditRepository.add({ userId: user.id, action: 'set-up', via: channel });
+            }
+        },
+    },
+})
+```
+
+```typescript
+type PasswordChangeChannel = 'change' | 'reset';
+
+interface PasswordChangeAttempt
+{
+    user: User;                       // the account as read under its lock, before the write
+    required: boolean;                // the account carried passwordChangeRequired: this change answers it
+    channel: PasswordChangeChannel;   // 'change': PUT /_auth/password; 'reset': a completed reset link
+}
+
+type PasswordChangeAdmission = void | undefined | { refuse: { code: string } };   // code: /^[A-Za-z0-9_.-]{1,64}$/
+```
+
+**`admit(attempt)`** is asked once the account is locked and the package's own checks passed (the
+current password, the step-up, a first password's passkey proof, the new password differing from the
+current one — on a reset, a flagged account's), before anything is written. `{ refuse: { code } }` refuses: nothing
+is written — the old password still signs in, the flag stays — and the client gets **403
+`PasswordChangeRefusedError`** with the app's string in `details.code`, the code shaped as a
+[sign-in refusal's](#the-sign-in-guard-signin). Any other answer, a malformed code included, is 500
+and writes nothing.
+
+**`changed(attempt)`** is told once everything the change writes is written: the hash, the flag
+cleared, the sessions it ends ended (and, on a reset, the new device key). The attempt is the one
+`admit` saw: `user` as read before the write, so `required` still says what the change answered.
+
+**A throw** from either rolls the change back — the old password still signs in, the flag is as it
+was, no `auth.password.changed` — and is answered **500 `PasswordChangeHookFailedError`** (from
+`@spfn/auth/errors`). It names the hook (`hook: 'admit' | 'changed'`), the account (`userId`) and
+what the hook threw by identifiers only, `hookErrorClass` and, when a database statement failed,
+`hookErrorCode` (the SQLSTATE) — the rule of [`onPurge`](#telling-the-person): the hook holds the
+account's address, so the error keeps no reference to what it threw. An app that needs its own error
+handles it inside the hook.
+
+**Where they run.** An app repository extending `BaseRepository` joins the change's transaction
+through the transaction context — no transaction argument to thread — so a write of yours in either
+commits with the change or rolls back with it. The rules of the sign-in guard's locked calls hold:
+
+- **Database work only, and fast.** Every other writer of the account waits on the lock, at most
+  five seconds before it answers `AccountBusyError`. No mail, no HTTP: send notices from
+  `auth.password.changed`, or from an outbox the hook fills.
+- **Never its own transaction.** A hook that opens one (`runInTransaction(fn, { requiresNew: true })`)
+  and touches the account's rows never returns: it waits on the lock the change holds, and the
+  change waits on the hook. A plain nested `runInTransaction(fn)` joins the change and is fine.
+- **Never lock a second account** (`SecondAccountLockError`), and lock your rows after the account,
+  never before calling a package writer that locks it.
+
+**Every path that writes a password**, and whether the guard is asked:
+
+| Path | Asked | Why |
+|---|---|---|
+| `PUT /_auth/password` (`changePasswordService`), a first password on an account that had none included | yes, `channel: 'change'` | the person sets a password from a session; it clears the flag |
+| `POST /_auth/password/reset/complete` (`completePasswordResetService`) | yes, `channel: 'reset'` | the person sets a password, through a mailbox instead of a session; it clears the flag too, so a guard that skipped it could be bypassed by a reset link |
+| registration (`register`, `signup-link`: `createVerifiedAccount`) | no | the account is created with the password and no flag; the app's seats there are `beforeRegister` and `signIn.admit` |
+| invitation acceptance (`acceptInvitation`) | no | the same: an account created, no flag; `signIn.admit` with `channel: 'invitation'` |
+| admin seeding (`SPFN_AUTH_ADMIN_ACCOUNTS`) | no | at boot, no person: it is what sets the flag |
+| a password sign-in re-encoding a legacy hash | no | the same password, re-encoded under the lock; nothing is changed |
+| a purge (`anonymize`) | no | the hash is erased with the account; `deletion.onPurge` is the seat there |
+| `updateUserService`, `usersRepository.updateById` / `updatePassword` | no | the app's own code calling a package writer: the app is already where its own step runs, and puts it beside the call, in one transaction |
+
+The package has no administrator route that sets a password; an operator who does so through the
+writers in the last row clears the flag only if the code says so.
+
+A refusal or a throw on a **reset** rolls the whole completion back — the new key, the revocations,
+the completion mark — and leaves the setup session usable until it expires, as a refused new
+password does. On a reset `changed` is told after the resetting browser's key is written and the
+sign-in guard asked; on an enrolled account it is told even though the answer is a 202, because
+the password has changed.
+
+**Sessions** are as before: a change ends every other session of the account, sparing the one that
+made it unless `includeCurrent: true` ([migration](#migration--a-password-change-keeps-the-session-that-made-it));
+a reset ends every session and signs the resetting browser in on a fresh key. Both happen before
+`changed` is told, in the same transaction, so a throw keeps them too.
+
+| Error | HTTP | When |
+|---|---|---|
+| `PasswordChangeRefusedError` | 403 | `passwordChange.admit` refused; nothing written; `details.code` is the app's |
+| `PasswordChangeHookFailedError` | 500 | `passwordChange.admit` or `changed` threw; the change rolled back; `hook`, `userId`, `hookErrorClass`, `hookErrorCode?` |
+
+Neither route is a mobile-contract operation, so the contract does not list either error.
+
+**Not built:** a marker an app route could carry to be admitted with the requirement outstanding.
+The change stays in one place, the package's, and the app joins it there.
+
+A second `createAuthLifecycle()` that omits `passwordChange` leaves it as it is; one that states
+other functions refuses boot in `afterInfrastructure`, the first statement staying in force.
 
 ### Migration — a sign-in replaces a key only with proof of the old key
 
@@ -6180,6 +6301,13 @@ On an OAuth sign-in, web or native, `authLoginEvent` and `authRegisterEvent` als
 *change*, which is made from a session that already proved itself: this one is made by
 whoever opened a link in a mailbox, so it is the notice to send the owner.
 
+`authPasswordChangedEvent` (`auth.password.changed`: `userId`, `required`) fires after commit when
+a password is changed from a session (`PUT /_auth/password`); `required` is true when the change
+answered `passwordChangeRequired` — a first set-up. A reset fires `auth.password.reset` instead, not
+both. Nothing fires for a change that rolled back. It is for notices; the app's rows that must move
+with the change belong in [`passwordChange.changed`](#the-password-change-guard-passwordchange),
+which runs inside its transaction.
+
 `authDeviceRegisteredEvent` (`auth.device.registered`) fires after commit whenever a device key is
 registered on an account, on every channel that registers one — `channel` says which: `register`,
 `signup-link`, `invitation`, `password`, `oauth`, `oauth-native`, `device-code`, `device-link`,
@@ -6217,6 +6345,7 @@ made for another key, registers a new device and fires the event. `ip` and `user
 copy, since only its hash is stored. Mail it from the subscriber; do not log or persist it.
 
 Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`,
+`AuthPasswordChangedPayload`,
 `AuthDeviceRegisteredPayload`, `InvitationCreatedPayload`,
 `InvitationAcceptedPayload`, `AuthDeletionRequestedPayload`, `AuthDeletionCancelledPayload`,
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side

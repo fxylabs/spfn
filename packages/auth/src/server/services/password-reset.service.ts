@@ -49,6 +49,7 @@ import { revokeAllOAuth2GrantsForUser } from './oauth2-grant.service';
 import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.service';
 import { accountRefusal, admitsAccount } from './admission.service';
 import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
+import { assertPasswordChangeAdmits, reportPasswordChanged } from './password-change-guard.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { assertNewPasswordDiffers, loginBindingFields, type LoginResult } from './auth.service';
@@ -364,6 +365,13 @@ async function replaceCredentials(
  * usable, so the fix is retyping the password rather than asking for a fresh
  * email.
  *
+ * The app's `passwordChange` guard (#434) is asked under the account lock
+ * before anything is written (`channel: 'reset'`, `required` from the locked
+ * row) and told once the reset has written everything; a refusal (403
+ * `PasswordChangeRefusedError`) or a throw (500
+ * `PasswordChangeHookFailedError`) rolls the reset back, the setup session
+ * left as it was.
+ *
  * The answer carries the binding fields, like every other path that starts a
  * session. A reset on an account that opted in registers a bound key — 24 hours,
  * renewable only by a passkey — and this route is on the sealing interceptor's
@@ -416,7 +424,14 @@ export async function completePasswordResetService(
         await assertNewPasswordDiffers(params.password, user.passwordHash);
     }
 
+    // A reset clears `passwordChangeRequired` as a change does, so the app's
+    // guard sees it too (#434) — or a flagged account would set up through
+    // the link without the app's say.
+    const attempt = { user, required: user.passwordChangeRequired, channel: 'reset' } as const;
+    await assertPasswordChangeAdmits(attempt);
+
     const registered = await replaceCredentials(row, user, passwordHash, params);
+    await reportPasswordChanged(attempt);
 
     // The reset happened whether or not a second factor is still to come: the
     // password is new and every key is gone, which is what this event announces.

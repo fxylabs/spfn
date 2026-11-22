@@ -293,6 +293,55 @@ export class SignInRefusedError extends ForbiddenError
 }
 
 /**
+ * Password Change Refused Error (403)
+ *
+ * The application refused this password change — `PUT /_auth/password` or a
+ * reset's completion — in its own `passwordChange.admit`
+ * (`createAuthLifecycle({ passwordChange })`): an expired temporary password,
+ * anything the app keeps. Nothing was written. `details.code` is the app's
+ * string, for the client to branch on; the status is always 403.
+ */
+export class PasswordChangeRefusedError extends ForbiddenError
+{
+    constructor(data: { code: string; message?: string; details?: Record<string, any> })
+    {
+        super({ message: data.message || 'Password change refused', details: { ...data.details, code: data.code } });
+        this.name = 'PasswordChangeRefusedError';
+    }
+}
+
+/**
+ * Password Change Hook Failed Error (500)
+ *
+ * The app's `passwordChange.admit` or `passwordChange.changed` threw, so the
+ * change rolled back: the old password still signs in and the flag is as it
+ * was. The hook was handed the account row, address included, and what it
+ * throws may quote it, so this error keeps none of it — the rule
+ * `PurgeHookFailedError` follows: which hook, which account (`userId`), and
+ * what it threw by class name and, when a database statement failed, SQLSTATE.
+ */
+export class PasswordChangeHookFailedError extends InternalServerError
+{
+    readonly hook: 'admit' | 'changed';
+    readonly userId: number;
+    readonly hookErrorClass: string;
+    readonly hookErrorCode?: string;
+
+    constructor(data: { hook: 'admit' | 'changed'; userId: number; hookErrorClass: string; hookErrorCode?: string })
+    {
+        super({
+            message: `passwordChange.${data.hook} failed for user ${data.userId}: ${data.hookErrorClass}`
+                + (data.hookErrorCode === undefined ? '' : ` (SQLSTATE ${data.hookErrorCode})`),
+        });
+        this.name = 'PasswordChangeHookFailedError';
+        this.hook = data.hook;
+        this.userId = data.userId;
+        this.hookErrorClass = data.hookErrorClass;
+        this.hookErrorCode = data.hookErrorCode;
+    }
+}
+
+/**
  * Invalid Verification Code Error (400)
  *
  * Thrown when verification code is invalid, expired, or already used
