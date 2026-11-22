@@ -32,7 +32,7 @@ env:
 
 jobs:
     pending:
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64
         container:
             image: node:22
         # Writing a commit status needs write on the code unit; Gitea maps no
@@ -58,7 +58,7 @@ jobs:
     report:
         needs: [pending, check]
         if: always()
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64
         container:
             image: node:22
         permissions:

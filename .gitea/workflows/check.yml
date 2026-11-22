@@ -34,7 +34,7 @@ jobs:
         # RUNNER — the label and image to confirm on the first run. node:22
         # (Debian bookworm, root, apt) is the image the Woodpecker steps used,
         # and the service steps below rely on all three.
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64
         container:
             image: node:22
         defaults:

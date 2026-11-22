@@ -36,7 +36,7 @@ jobs:
     publish:
         needs: check
         # RUNNER — the same label and image as check.yml's `check`; change both.
-        runs-on: ubuntu-latest
+        runs-on: linux-amd64
         container:
             image: node:22
         defaults:
