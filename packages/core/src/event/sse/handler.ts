@@ -139,10 +139,19 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
         // ── 6. SSE Stream ──
         c.header('X-Accel-Buffering', 'no');
 
-        return streamSSE(c, stream => runStream(c, stream, admission, streamConfig), async (err: Error) =>
+        const response = streamSSE(c, stream => runStream(c, stream, admission, streamConfig), async (err: Error) =>
         {
             sseLogger.error('SSE stream error', { error: err });
         });
+
+        // A proxy that compresses holds frames this small until its buffer
+        // fills, which for a stream is never: the Next.js server does it to a
+        // rewritten response whenever the browser accepts gzip. `no-transform`
+        // is what such a proxy skips on. Set on the response, since
+        // `streamSSE` writes `Cache-Control` itself.
+        response.headers.set('Cache-Control', 'no-cache, no-transform');
+
+        return response;
     };
 
     return Object.assign(handler, {

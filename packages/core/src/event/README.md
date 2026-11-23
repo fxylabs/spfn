@@ -197,6 +197,12 @@ export default defineServerConfig()
 })
 ```
 
+The stream answers with `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+A proxy that compresses or buffers would hold frames of a few dozen bytes until its buffer
+fills — the Next.js server compresses a rewritten response whenever the browser accepts
+gzip — and both headers are what such a proxy skips on. A proxy of your own in front of the
+stream must honour one of them, or leave `text/event-stream` alone.
+
 `.events(router, config)` accepts `Omit<SSEHandlerConfig, 'auth'> & { path?, auth?:
 SSEAuthConfig<TRouter> }`. The `auth` field is the **generic** `SSEAuthConfig<TRouter>` so
 `authorize`/`filter` get full event-name and payload inference from your router.

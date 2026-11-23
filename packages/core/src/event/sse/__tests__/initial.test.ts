@@ -19,6 +19,7 @@
  * | E10b| E10's emits with no producer                               | a fast client stays open                                                 |
  * | E11 | `maxQueue: 10`, 5 spaced emits held, then the producer answers one frame | the client stays open and receives 6 frames of `a` after `connected` |
  * | E12 | `pingInterval: 5`, a producer that waits 30 ms             | the ping is held: the first frame is `connected`                         |
+ * | E13 | the response of an opened stream                           | `Cache-Control` carries `no-transform` (a compressing proxy would hold the frames), `X-Accel-Buffering` is `no` |
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -102,6 +103,17 @@ describe('SSE connect — initial frames', () =>
 
         expect(connected.data.initial).toEqual([]);
         expect(stream.frames.map(frame => [frame.event, frame.id])).toEqual([['connected', undefined], ['a', '1']]);
+    });
+
+    it('E13 the stream tells a proxy not to transform or buffer it', async () =>
+    {
+        const { router } = events();
+
+        const stream = await createStreamApp(router).connect('s');
+        await stream.frame('connected');
+
+        expect(stream.headers.get('cache-control')).toBe('no-cache, no-transform');
+        expect(stream.headers.get('x-accel-buffering')).toBe('no');
     });
 
     it('E3 two initial payloads: written after connected with consecutive messageIds, before a live frame', async () =>
