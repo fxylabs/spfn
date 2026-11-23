@@ -60,6 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlaps it left whole, every candidate found before any is chosen so a dropped filename hides no shorter
   one, the longest filename taken first (`scrubProviderError` and `scrubSendResult` take the send's attachments as an optional second
   argument; `null` means none). `SendResult` and `ScheduleResult` gain `errorCode` (`SendErrorCode`).
+- **spfn: the owner installs, migrates and grants the jobs queue schema (#171, PR 2 of 3).** pg-boss
+  started with its defaults creates and migrates its schema as the app role — the one place the app
+  role owned and changed structure — and nothing on the owner's side knew the queue existed. An app
+  that declares its jobs in `package.json` (`"spfn": { "jobs": true }`, or `{ "schema": "<name>" }`)
+  now has `spfn db push`, `db migrate` and `db grant` run a queue step as the owner (`spfn add`
+  does nothing to the queue; `db push` runs it in a project without schema files too, where it
+  pushes nothing else), before the privileges step: pg-boss's own install plan when the schema is missing, its migration
+  plan when it is older, nothing when it is current, one warning when it is newer; then the
+  privileges step grants the app role on the queue (`target.queue`) in the same run. pg-boss's lost
+  race against an app starting at the same moment is rolled back and the version read again. A
+  version pg-boss cannot migrate from fails with `QueueSchemaVersionError`'s text, nothing run; a
+  schema holding objects that are not pg-boss's, or one the step manages, fails naming the
+  declaration — each of these before the command applies anything. A queue owned, in whole or in part, by a role the owner cannot act for — one the
+  app role installed, or a schema it owns holding the owner's objects — is left alone with the
+  `REASSIGN OWNED` (or bootstrap-superuser `ALTER … OWNER TO`) remedy, which leaves the owner
+  holding the schema and every object in it, and
+  exit 0, the rest of the privileges step applied. `--dry-run` (`db push`, `db grant`) prints
+  `Would install …`/`Would migrate …`, runs neither, and says the queue's privilege statements
+  follow the plan and are not listed. Without the declaration nothing changes:
+  nothing of the queue is read, run or printed, and the app installs the queue at its start as
+  before; a single-role project installs as its one role. `@spfn/core/job` adds
+  `isQueueSchemaRace(error, 'install' | 'migration')`; `readJobsDeclaration` reads a directory
+  without a `package.json` as declaring nothing (it threw). Breaking: no, for single-role projects
+  and for projects that declare no jobs.
 - **@spfn/core: the queue schema's facts — nothing calls them yet (#171, PR 1 of 3).** pg-boss is
   pinned exactly (`11.1.2`, the version already resolved). `@spfn/core/job` exports
   `QUEUE_SCHEMA_VERSION` (from pg-boss's `version.json`), `queueInstallSql(schema)` and

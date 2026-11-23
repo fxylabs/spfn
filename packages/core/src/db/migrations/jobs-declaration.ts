@@ -31,7 +31,7 @@
  * This module only reads the file.
  */
 
-import { readFileSync } from 'fs';
+import { lstatSync, readFileSync } from 'fs';
 import { join } from 'path';
 
 import { BOOKKEEPING_SCHEMA } from '../privileges/plan';
@@ -97,17 +97,26 @@ export function isQueueSchemaName(name: string): boolean
 }
 
 /**
- * The jobs declaration of the project at `cwd`, or undefined when its
- * package.json has no `spfn.jobs`.
+ * The jobs declaration of the project at `cwd`, or undefined when it has no
+ * package.json (a dangling link is one, which cannot be read), or one without
+ * `spfn.jobs`: where there is no file, nothing
+ * is declared — a directory holding only migrations, or an image without the
+ * file, runs as a project that declares no jobs did before.
  *
  * @throws JobsDeclarationError naming the file — and the key, for a value
  *     that is neither `true` nor `{ "schema": "<name>" }`, or a schema that
- *     is the project's — when the file cannot be read or parsed, or the value
- *     is malformed or names `public` or `drizzle`
+ *     is the project's — when the file there cannot be read or parsed, or the
+ *     value is malformed or names `public` or `drizzle`
  */
 export function readJobsDeclaration(cwd: string = process.cwd()): JobsDeclaration | undefined
 {
     const file = join(cwd, 'package.json');
+
+    if (lstatSync(file, { throwIfNoEntry: false }) === undefined)
+    {
+        return undefined;
+    }
+
     const spfn = readPackageJson(file).spfn;
 
     if (spfn === undefined)

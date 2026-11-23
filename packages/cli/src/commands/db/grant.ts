@@ -3,7 +3,8 @@ import chalk from 'chalk';
 import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 import { discoverFunctionMigrations } from '../../utils/function-migrations.js';
 import { OWNER_URL_MISSING } from './utils/database.js';
-import { exitOnGrantFailure, projectGrantTargetOrExit, runAppGrantStepOn } from './utils/app-grants.js';
+import { exitOnGrantFailure, projectGrantTargetOrExit } from './utils/app-grants.js';
+import { readJobsDeclarationOrExit, runOwnerStepsOn } from './utils/queue-step.js';
 
 /**
  * Grant the app role exactly what is declared, and nothing else —
@@ -15,13 +16,19 @@ import { exitOnGrantFailure, projectGrantTargetOrExit, runAppGrantStepOn } from 
  * manifest, and the project's `src/server/drizzle/privileges.json` — or, when
  * the project has none (one that only pushes), its entities as `db push`
  * loads them. When neither can be read it exits 1: the project's tables
- * cannot be seen (app-grants.ts, `projectGrantTarget`). It prints which one
- * it read: a manifest left behind decides over the entities.
+ * cannot be seen (app-grants.ts, `projectGrantTarget`) — except in a project
+ * that declares jobs and names no schema source (no `schema` in
+ * drizzle.config.ts), which has no table of its own, as `db push` finds it:
+ * its queue is granted. A named source matching no file exits 1, as push. It prints which one it read:
+ * a manifest left behind decides over the entities. When package.json
+ * declares jobs, the queue schema is installed or migrated first, and
+ * granted with the rest (queue-step.ts).
  *
  * - --dry-run: prints the roles and how each was found, the statements, the
  *   declared tables that do not exist and what it would not revoke, and runs
  *   the statements in one transaction it always rolls back, so a statement
- *   PostgreSQL refuses is reported; changes nothing.
+ *   PostgreSQL refuses is reported; says what it would install or migrate
+ *   of the queue schema, and runs none of it; changes nothing.
  */
 export async function dbGrant(options: { dryRun?: boolean } = {}): Promise<void>
 {
@@ -34,10 +41,11 @@ export async function dbGrant(options: { dryRun?: boolean } = {}): Promise<void>
         process.exit(1);
     }
 
-    const { target, source } = await projectGrantTargetOrExit(discoverFunctionMigrations(process.cwd()), databaseUrl);
+    const jobs = readJobsDeclarationOrExit();
+    const { target, source } = await projectGrantTargetOrExit(discoverFunctionMigrations(process.cwd()), databaseUrl, { jobs: jobs !== undefined });
 
     console.log(chalk.dim(`📄 The project's declarations: ${source}`));
-    await runAppGrantStepOn(databaseUrl, target, { dryRun: options.dryRun })
+    await runOwnerStepsOn(databaseUrl, target, jobs, { dryRun: options.dryRun })
         .catch(error => exitOnGrantFailure(error, databaseUrl, 'Privileges not applied'));
 
     if (options.dryRun)

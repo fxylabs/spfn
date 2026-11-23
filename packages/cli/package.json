@@ -110,6 +110,7 @@
     "@types/prompts": "^2.4.9",
     "concurrently": "^9.2.5",
     "hono": "^4.13.16",
+    "pg-boss": "11.1.2",
     "tsx": "^4.22.4",
     "typescript": "^5.3.3",
     "vitest": "^4.0.6"

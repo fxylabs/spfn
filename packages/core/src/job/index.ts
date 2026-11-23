@@ -117,3 +117,4 @@ export {
     readQueueSchemaState,
     type QueueSchemaState,
 } from './queue-schema';
+export { isQueueSchemaRace } from './queue-schema-race';

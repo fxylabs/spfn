@@ -64,7 +64,7 @@ From `@spfn/core/job`:
   constructs itself keeps pg-boss's own workers, which a shutdown neither stops nor fails
 - Registration: `registerJobs(router)` — **takes a `JobRouter`, not an array**
 - Queue schema (see [Queue schema facts](#queue-schema-facts)): `QUEUE_SCHEMA_VERSION`,
-  `queueInstallSql(schema)`, `queueMigrationSql(schema, from)`, `QueueSchemaVersionError`,
+  `queueInstallSql(schema)`, `queueMigrationSql(schema, from)`, `isQueueSchemaRace(error, plan)`, `QueueSchemaVersionError`,
   `QueueSchemaNameError`, `readQueueSchemaState(db, schema)`, `QueueSchemaChangedError`, type
   `QueueSchemaState`
 - Types: `JobDef`, `JobRouter`, `JobRouterEntry`, `JobOptions`, `JobQueuePolicy`,
@@ -497,10 +497,43 @@ knows the routers registered in this process and would unschedule everything els
 `sslmode=require`/`prefer` in the URL is rewritten to `ssl: { rejectUnauthorized: false }`
 so self-signed certs work.
 
+### Who installs the queue schema
+
+pg-boss keeps its queue in a schema of its own (`spfn_queue` unless `.jobs()` names another),
+with tables, an enum and two functions, at a schema version its release fixes (26 for 11.1.2).
+Who creates and migrates it depends on whether the app **declares** its jobs in its
+`package.json`:
+
+```json
+{ "spfn": { "jobs": true } }
+```
+
+`"jobs": true` is the schema `spfn_queue`; `"jobs": { "schema": "app_queue" }` names another —
+the one `.jobs(…, { schema })` uses. The `spfn` commands that change the schema as the database
+owner cannot load server.config, so this is how they know the app runs jobs.
+
+- **Declared:** `spfn db push`, `db migrate` and `db grant` install the schema as the
+  owner (`DATABASE_OWNER_URL`, else `DATABASE_URL`) when it is missing, migrate it when it is
+  older, and then grant the app role what pg-boss needs on it, in the same run (the CLI README,
+  [The queue schema](../../../cli/README.md#the-queue-schema-jobs)). The schema and every object
+  in it belong to the owner; the app role holds only `USAGE` and row access. In a single-role
+  project (no `DATABASE_OWNER_URL`) the one role is the owner: it installs, and there is no app
+  role to grant to.
+- **Not declared:** nothing changes — pg-boss creates and migrates the schema itself, as the role
+  the app connects as, at its first start (`initBoss` starts it with pg-boss's defaults, so a
+  two-role app's role needs `CREATE` on the database for that). The commands read, run and print
+  nothing of the queue.
+
+Either way the app still starts pg-boss with its defaults in this release: on a schema the owner
+installed at the version pg-boss runs on, that start changes nothing. Partitioned queues
+(`createQueue(name, { partition: true })`) attach a table to `job`, which only its owner may do,
+so under split roles the app role cannot create one: they are unsupported there.
+
 ### Queue schema facts
 
-What a tool needs to know about pg-boss's schema without starting pg-boss. Nothing in core
-calls these yet; `initBoss` still starts pg-boss with its defaults.
+What a tool needs to know about pg-boss's schema without starting pg-boss. The `spfn` owner
+step ([above](#who-installs-the-queue-schema)) runs these; `initBoss` still starts pg-boss with
+its defaults.
 
 - `QUEUE_SCHEMA_VERSION` — the schema version the pinned pg-boss creates and runs on, read from
   its `version.json` (26 for 11.1.2).
@@ -512,6 +545,11 @@ calls these yet; `initBoss` still starts pg-boss with its defaults.
   (`getMigrationPlans`). A `from` that is not older than `QUEUE_SCHEMA_VERSION`, or older than the
   first version pg-boss migrates from (25 for 11.1.2), throws `QueueSchemaVersionError` naming both
   versions — pg-boss itself would return a plan written for another version.
+- `isQueueSchemaRace(error, 'install' | 'migration')` — whether running one of those plans
+  failed the way pg-boss's own start treats as a lost race and ignores: `already exists` on the
+  install, `division by zero` on the migration — the messages read from the pinned pg-boss. Each
+  plan takes pg-boss's advisory lock, so a second runner waits and then finds the work done; roll
+  its transaction back, read the version again and judge from that.
 - Both, and `readQueueSchemaState`, throw `QueueSchemaNameError` on a schema name pg-boss's
   unquoted SQL breaks on, or that it and the catalog would read differently (`isQueueSchemaName`
   in `@spfn/core/db`): upper case, a PostgreSQL keyword other than an unreserved one, `pg_…` —

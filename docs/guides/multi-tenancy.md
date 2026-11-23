@@ -76,12 +76,21 @@ to the `drizzle` schema where migrations are recorded; `spfn db grant` does it a
 Do not set `ALTER DEFAULT PRIVILEGES` for the app role: a database-wide default also gives it write
 access to `drizzle`, where it could record a migration as applied.
 
-If the app uses jobs (`@spfn/core/job`), pg-boss creates its `spfn_queue` schema as the app role at
-its first start, so allow that once:
+If the app uses jobs (`@spfn/core/job`), declare them in its `package.json`:
 
-```sql
-GRANT CREATE ON DATABASE acme TO app_user;
+```json
+{ "spfn": { "jobs": true } }
 ```
+
+(`{ "jobs": { "schema": "<name>" } }` when `.jobs()` names another schema than `spfn_queue`.) The
+same owner commands then install and migrate pg-boss's queue schema as the owner and grant the app
+role what pg-boss needs there — row access, never ownership — so the app role needs no `CREATE`
+on the database (see [The queue schema](../../packages/cli/README.md#the-queue-schema-jobs) in the
+CLI README). Without the declaration, pg-boss creates the schema as the app role at its first
+start, and the app role needs `GRANT CREATE ON DATABASE acme TO app_user;` once. A queue the app
+role installed that way stays its own: the commands warn with the `REASSIGN OWNED` remedy and leave
+it alone; move it to the owner and run `spfn db grant`, then
+`REVOKE CREATE ON DATABASE acme FROM app_user;`.
 
 In a database whose tables already exist, move ownership off the app role if it created them (the
 same README section), then run `spfn db grant`.

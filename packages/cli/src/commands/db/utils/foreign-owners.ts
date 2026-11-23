@@ -116,6 +116,34 @@ export async function ownershipRemedy(
     ].filter(Boolean).join('\n');
 }
 
+/**
+ * The remedy for a queue schema whose schema or objects (`objects`, not
+ * empty) belong to a role the owner cannot act for — as when the app role
+ * installed it at its start, or owns the schema while the owner owns the
+ * objects in it: what the owner step leaves alone, then REASSIGN OWNED or one
+ * ALTER … OWNER TO per bootstrap superuser's object, as for push, which leave
+ * the owner holding the schema and every object in it, and `spfn db grant`
+ * straight after, since the app holds nothing on what moves until it runs.
+ * It says nothing of who migrates the queue meanwhile: the app role can only
+ * where it owns the schema and every object, which `objects` does not show.
+ */
+export function queueOwnershipRemedy(schema: string, objects: ForeignOwnedObject[]): string
+{
+    const { connectedRole } = objects[0];
+    const owners = [...new Set(objects.filter(entry => !entry.bootstrap).map(entry => entry.owner))];
+
+    return [
+        `⚠️  In queue schema ${schema} (jobs), another role than ${connectedRole}, the owner this step connects as, owns: ${listing(objects)}. `
+            + 'pg-boss installs and migrates the queue only as the one role that owns the schema and every object in it, so nothing is '
+            + 'installed, migrated or granted on the queue; the rest of the step goes on.',
+        reassignOwned(objects.filter(entry => !entry.bootstrap), connectedRole),
+        owners.length === 0 ? undefined : `   (REASSIGN OWNED moves everything ${owners.join(', ')} own${owners.length === 1 ? 's' : ''} in this database.)`,
+        alterOwners(objects.filter(entry => entry.bootstrap), connectedRole),
+        'Then run spfn db grant at once, best while jobs are paused: until it runs, the app role is refused on the queue\'s tables '
+            + '(@spfn/core db README, "Database roles").',
+    ].filter(Boolean).join('\n');
+}
+
 /** The first few objects with their owners, and how many more there are. */
 function listing(objects: ForeignOwnedObject[]): string
 {

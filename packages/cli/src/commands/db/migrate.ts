@@ -6,7 +6,8 @@ import { OWNER_URL_MISSING } from './utils/database.js';
 
 import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 import { discoverFunctionMigrations } from '../../utils/function-migrations.js';
-import { exitOnGrantFailure, manifestGrantTargetOrExit, runAppGrantStepOn } from './utils/app-grants.js';
+import { exitOnGrantFailure, manifestGrantTargetOrExit } from './utils/app-grants.js';
+import { checkQueueSchemaOrExit, readJobsDeclarationOrExit, runOwnerStepsOn } from './utils/queue-step.js';
 
 /**
  * Project migrations use the default drizzle migrations table.
@@ -20,10 +21,14 @@ const PROJECT_MIGRATIONS_TABLE = '__drizzle_migrations';
  * Also applies function package migrations if available.
  * Use this in both development and production environments.
  *
- * Connects as the table owner: DATABASE_OWNER_URL, else DATABASE_URL. Last,
- * the app role is granted what the manifests declare (app-grants.ts), in a
- * transaction of its own; an unreadable manifest ends the command before any
- * migration, a failed grant after them, saying to run `spfn db grant`.
+ * Connects as the table owner: DATABASE_OWNER_URL, else DATABASE_URL. Then,
+ * when package.json declares jobs, the queue schema is installed or migrated
+ * as that role (queue-step.ts). Last, the app role is granted what the
+ * manifests declare, and the queue (app-grants.ts), in a transaction of its
+ * own; an unreadable manifest or jobs declaration, or a queue schema the step
+ * would refuse as it is (`checkQueueSchema`), ends the command before any
+ * migration, a failed queue step or grant after them, saying to run
+ * `spfn db grant`.
  */
 export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise<void>
 {
@@ -38,9 +43,12 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
         process.exit(1);
     }
 
-    // What the app role is granted at the end, read before anything is applied
+    // What the app role is granted at the end, and what the queue step would
+    // refuse, read before anything is applied
     const functions = discoverFunctionMigrations(process.cwd());
     const grantTarget = manifestGrantTargetOrExit(functions);
+    const jobs = readJobsDeclarationOrExit();
+    await checkQueueSchemaOrExit(databaseUrl, grantTarget, jobs);
 
     // Create backup before migration if requested
     if (options.withBackup)
@@ -99,5 +107,5 @@ export async function dbMigrate(options: { withBackup?: boolean } = {}): Promise
         console.log(chalk.dim('No project migrations found (src/server/drizzle)'));
     }
 
-    await runAppGrantStepOn(databaseUrl, grantTarget).catch(error => exitOnGrantFailure(error, databaseUrl));
+    await runOwnerStepsOn(databaseUrl, grantTarget, jobs).catch(error => exitOnGrantFailure(error, databaseUrl));
 }

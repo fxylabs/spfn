@@ -21,8 +21,8 @@
  *
  *   | command | manifest | no manifest, entities load | neither |
  *   |---|---|---|---|
- *   | `db push` | entities | entities | no entity file: nothing is pushed or granted |
- *   | `db grant` | manifest | entities | exit 1, "the project's tables cannot be seen" |
+ *   | `db push` | entities | entities | no entity file: nothing is pushed or granted but the declared queue |
+ *   | `db grant` | manifest | entities | exit 1, "the project's tables cannot be seen"; with jobs declared and no schema source named (push's "No schema files found"), no project table: the queue is granted |
  *   | `db status` | manifest | entities | `privileges` unknown (`checked: false`), `--json` too |
  *   | `db migrate`, `spfn add` | manifest | one warning; no project schema | the same |
  * - **Nothing to grant** without `DATABASE_OWNER_URL`, or when the app role is
@@ -62,6 +62,7 @@ import { describeFailure } from '../../../utils/database-failure.js';
 import {
     createPushConnection,
     loadProjectEntities,
+    missingSchemaFiles,
     resolveProjectSchemaFiles,
     resolvePushSchemaFilter,
     resolvePushSchemaSource,
@@ -201,7 +202,7 @@ export async function grantAppPrivileges(db: PushConnection['db'], target: AppPr
     printRoles(roles);
 
     const run: AppPrivilegesRun = options.schemaPending
-        ? { plan: planAppPrivileges(await readPrivilegeCatalog(db, target.schemas, names), target, names), applied: false }
+        ? { plan: planAppPrivileges(await readPrivilegeCatalog(db, target.schemas, names, target.queue?.schema), target, names), applied: false }
         : await applyAppPrivileges(db, target, names, { rollback: options.dryRun });
 
     printRun(run, roles, options);
@@ -209,17 +210,6 @@ export async function grantAppPrivileges(db: PushConnection['db'], target: AppPr
     if (!options.dryRun && !run.applied)
     {
         throw new AppGrantRefusal(notAppliedReason(run, roles));
-    }
-}
-
-/** `appGrantRoles`, then `grantAppPrivileges` on `db` when there is a role to grant to. */
-export async function runAppGrantStep(db: PushConnection['db'], target: AppPrivilegesTarget, options: GrantStepOptions = {}): Promise<void>
-{
-    const roles = await appGrantRoles();
-
-    if (roles)
-    {
-        await grantAppPrivileges(db, target, roles, options);
     }
 }
 
@@ -413,12 +403,21 @@ function notAppliedReason(run: AppPrivilegesRun, roles: GrantRoles): string
         .filter(Boolean).join('\n   ');
 }
 
-/** A queue schema that is also a managed one, with the declaration that names it: a misconfiguration only the project can correct. */
+/** A queue schema that is also a managed one (`managedQueueSchemaReason`). */
 function queueSchemaReason(plan: AppPrivilegesRun['plan']): string
 {
-    return plan.queue?.managedSchema !== true ? '' : `The jobs declaration names ${plan.queue.schema} as the queue schema, which is also a schema `
+    return plan.queue?.managedSchema !== true ? '' : managedQueueSchemaReason(plan.queue.schema);
+}
+
+/**
+ * A queue schema that is also a managed one, with the declaration that names
+ * it: a misconfiguration only the project can correct — then `next`.
+ */
+export function managedQueueSchemaReason(schema: string, next = 'run spfn db grant'): string
+{
+    return `The jobs declaration names ${schema} as the queue schema, which is also a schema `
         + 'the step manages: pg-boss\'s queue rule would hold its tables. Give the queue a schema of its own in the project\'s package.json '
-        + '("spfn": { "jobs": { "schema": "<name>" } }), then run spfn db grant.';
+        + `("spfn": { "jobs": { "schema": "<name>" } }), then ${next}.`;
 }
 
 /** Each role name that is no role, with the setting that names it: a misconfiguration, never a skipped step. */
@@ -528,25 +527,45 @@ export interface ProjectGrantTarget
     source: string;
 }
 
+/** A project that declares jobs, has no manifest and names no schema source: no table of its own, as `db push` finds it. */
+const NO_PROJECT_TABLES: ProjectDeclaration = { schemas: [], tables: [] };
+
 /**
  * The target of `db grant` and `db status`: the project's declaration from
  * its manifest when it has one, else from its entities, loaded as `db push`
  * loads them — so a project that only pushes is granted what push grants —
  * then each function package's manifest, and `drizzle`. Which one it read is
  * `source`, for the command to say: a manifest left behind decides over the
- * entities, and the two are never compared.
+ * entities, and the two are never compared. A project that declares jobs
+ * (`options.jobs`) and names no schema source has no table, as `db push`
+ * pushes none there: no project schema, so its queue is granted.
  *
- * @throws AppGrantRefusal when the project has no manifest and its entities cannot be loaded: its tables cannot be seen;
- * AppPrivilegesManifestError when a manifest cannot be read
+ * @throws AppGrantRefusal when the project has no manifest and its entities cannot be loaded, or no entity file is found
+ * while it declares no jobs or names a schema source: its tables cannot be seen; AppPrivilegesManifestError when a manifest
+ * cannot be read
  */
-export async function projectGrantTarget(functions: FunctionMigrationInfo[], databaseUrl: string, cwd: string = process.cwd()): Promise<ProjectGrantTarget>
+export async function projectGrantTarget(
+    functions: FunctionMigrationInfo[],
+    databaseUrl: string,
+    cwd: string = process.cwd(),
+    options: { jobs?: boolean } = {},
+): Promise<ProjectGrantTarget>
 {
     const manifest = manifestDeclaration(cwd);
+    const project = manifest ?? await entityDeclaration(databaseUrl, cwd, options.jobs);
 
-    return {
-        target: grantTarget(manifest ?? await entityDeclaration(databaseUrl, cwd), functions),
-        source: manifest ? `manifest ${relative(cwd, join(projectMigrationsDir(cwd), APP_PRIVILEGES_MANIFEST_FILE))}` : 'entities',
-    };
+    return { target: grantTarget(project, functions), source: declarationSource(manifest, project, cwd) };
+}
+
+/** Which of the project's declarations `project` was read from. */
+function declarationSource(manifest: ProjectDeclaration | undefined, project: ProjectDeclaration, cwd: string): string
+{
+    if (manifest)
+    {
+        return `manifest ${relative(cwd, join(projectMigrationsDir(cwd), APP_PRIVILEGES_MANIFEST_FILE))}`;
+    }
+
+    return project === NO_PROJECT_TABLES ? 'none — no manifest and no entity file, so no table of the project\'s; its jobs (package.json)' : 'entities';
 }
 
 /** `project`, each function package's schema and manifest, and `drizzle`. */
@@ -577,13 +596,15 @@ function manifestDeclaration(cwd: string): ProjectDeclaration | undefined
 
 /**
  * The project's entities, as `db push` loads them: its schemas push's
- * (`resolvePushSchemaFilter`), its tables' declarations their markers.
+ * (`resolvePushSchemaFilter`), its tables' declarations their markers;
+ * `NO_PROJECT_TABLES` in a project that declares jobs and names no schema
+ * source.
  *
- * @throws AppGrantRefusal when no entity file is found or one cannot be loaded
+ * @throws AppGrantRefusal when one cannot be loaded, or no entity file is found otherwise
  */
-async function entityDeclaration(databaseUrl: string, cwd: string): Promise<ProjectDeclaration>
+async function entityDeclaration(databaseUrl: string, cwd: string, jobs = false): Promise<ProjectDeclaration>
 {
-    const loaded = await loadEntityDeclaration(databaseUrl, cwd)
+    const loaded = await loadEntityDeclaration(databaseUrl, cwd, jobs)
         .catch((error: unknown) => `its entities could not be loaded (${error instanceof Error ? error.message : String(error)})`);
 
     if (typeof loaded === 'string')
@@ -595,15 +616,22 @@ async function entityDeclaration(databaseUrl: string, cwd: string): Promise<Proj
     return loaded;
 }
 
-/** `entityDeclaration`'s load; why not, as text, when the source names no entity file. */
-async function loadEntityDeclaration(databaseUrl: string, cwd: string): Promise<ProjectDeclaration | string>
+/**
+ * `entityDeclaration`'s load; when the source names no entity file, why not,
+ * as text — `NO_PROJECT_TABLES` with `jobs` where `db push` too finds no table
+ * of the project's and carries on: no source names a schema
+ * (`missingSchemaFiles`). A named one that matches no file ends push, and is
+ * refused here.
+ */
+async function loadEntityDeclaration(databaseUrl: string, cwd: string, jobs: boolean): Promise<ProjectDeclaration | string>
 {
     const source = await resolvePushSchemaSource(undefined, cwd);
     const resolved = await resolveProjectSchemaFiles(databaseUrl, source, cwd);
+    const missing = missingSchemaFiles(source, resolved);
 
-    if (resolved.files.length === 0)
+    if (missing !== undefined)
     {
-        return `no entity file was found (${source?.label ?? resolved.source})`;
+        return missing === 'unconfigured' && jobs ? NO_PROJECT_TABLES : `no entity file was found (${source?.label ?? resolved.source})`;
     }
 
     const imports = await loadProjectEntities(resolved, cwd);
@@ -615,9 +643,9 @@ async function loadEntityDeclaration(databaseUrl: string, cwd: string): Promise<
  * `projectGrantTarget`, ending the command when the project's tables cannot
  * be seen or a manifest cannot be read — never "nothing to change".
  */
-export async function projectGrantTargetOrExit(functions: FunctionMigrationInfo[], databaseUrl: string): Promise<ProjectGrantTarget>
+export async function projectGrantTargetOrExit(functions: FunctionMigrationInfo[], databaseUrl: string, options: { jobs?: boolean } = {}): Promise<ProjectGrantTarget>
 {
-    return projectGrantTarget(functions, databaseUrl).catch((error: unknown) =>
+    return projectGrantTarget(functions, databaseUrl, process.cwd(), options).catch((error: unknown) =>
     {
         const headline = error instanceof AppGrantRefusal ? 'Privileges not applied' : 'Invalid app privileges manifest — nothing was applied';
 

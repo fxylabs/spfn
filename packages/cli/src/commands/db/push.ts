@@ -2,11 +2,18 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import { env } from '@spfn/core/config';
 import { sql } from 'drizzle-orm';
-import { packageNameToSchema, pendingFunctionMigrations, type AppPrivilegesTarget, type PendingFunctionMigrations } from '@spfn/core/db';
+import {
+    packageNameToSchema,
+    pendingFunctionMigrations,
+    type AppPrivilegesTarget,
+    type JobsDeclaration,
+    type PendingFunctionMigrations,
+} from '@spfn/core/db';
 
 import {
     createPushConnection,
     loadProjectEntities,
+    missingSchemaFiles,
     resolveProjectSchemaFiles,
     resolvePushSchemaSource,
     resolvePushSchemaFilter,
@@ -44,7 +51,15 @@ import { describeFailure, failedStatementOf, sqlStateOf } from '../../utils/data
 import { databaseUrlFor, loadEnvFor } from '../../utils/database-connection.js';
 import { OWNER_URL_MISSING } from './utils/database.js';
 import { ownershipRemedy } from './utils/foreign-owners.js';
-import { entityGrantTarget, grantRetryNote, runAppGrantStep, SCHEMA_APPLIED_PRIVILEGES_UNCHANGED } from './utils/app-grants.js';
+import {
+    appGrantRoles,
+    entityGrantTarget,
+    grantAppPrivileges,
+    grantRetryNote,
+    SCHEMA_APPLIED_PRIVILEGES_UNCHANGED,
+    type GrantRoles,
+} from './utils/app-grants.js';
+import { checkQueueSchema, readJobsDeclarationOrExit, runQueueStep } from './utils/queue-step.js';
 
 export interface PushHint
 {
@@ -170,18 +185,30 @@ async function resolveSchemaFilesOrExit(databaseUrl: string, source: SchemaSourc
  * catalog shows it. So does a connection that cannot be opened, the dry
  * run's read of `transaction_read_only` included (the `connect` stage, with
  * no remedy: there is no session to ask the catalog).
+ * Then the app roles are resolved (roles that disagree end push at the
+ * `privileges` stage, at `plan` on a dry run or in a project without schema
+ * files) and, when package.json declares jobs, the queue schema is installed or
+ * migrated as the owner (queue-step.ts); its failure is the `queue` stage. The
+ * queue does not depend on the project's tables: in a project without schema
+ * files push runs the queue step and grants the queue alone (pushQueueOnly).
+ * What the step would refuse on the database as it is — a queue schema push
+ * manages, one holding objects that are not pg-boss's, a version pg-boss
+ * cannot migrate from — is read right after connecting and ends push at the
+ * `plan` stage, before anything is planned or applied.
  * Last, as the owner and in a transaction of its own, the app role is granted
- * exactly what the entities declare (`appPrivileges`) and each function
- * package's manifest (app-grants.ts); its failure is the `privileges` stage:
- * the schema stays applied, and `spfn db grant` applies the privileges alone.
+ * exactly what the entities declare (`appPrivileges`), each function
+ * package's manifest and the queue (app-grants.ts); its failure is the
+ * `privileges` stage: the schema stays applied, and `spfn db grant` runs the
+ * queue step and applies the privileges alone.
  *
  * - Default: auto-applies safe + warning, prompts for destructive
  * - --force: applies everything without prompting
  * - --dry-run: shows the classified SQL, each function package's pending
- *   migrations and the privilege statements (with the roles and how each was
- *   found), then stops. Each plan query runs in its own `BEGIN READ ONLY`
- *   transaction on one client, rolled back when the query ends, so PostgreSQL
- *   refuses any write and the dry run holds no lock between statements. Before
+ *   migrations, what it would install or migrate of the queue schema and the
+ *   privilege statements (with the roles and how each was found), then
+ *   stops. Each plan query runs in its own `BEGIN READ ONLY` transaction on
+ *   one client, rolled back when the query ends, so PostgreSQL refuses any
+ *   write and the dry run holds no lock between statements. Before
  *   the plan runs, `transaction_read_only` is read once, in one such
  *   transaction; every plan query then opens its transaction with the same
  *   `BEGIN READ ONLY`. When that read is not `on` it exits 1 instead. The
@@ -223,16 +250,19 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
     const source = await loadSchemaSourceOrExit(options.schema);
     const resolved = await resolveSchemaFilesOrExit(databaseUrl, source);
     const label = source?.label ?? resolved.source;
+    const jobs = readJobsDeclarationOrExit();
+    const missing = missingSchemaFiles(source, resolved);
 
-    if (resolved.files.length === 0)
+    if (missing === 'unmatched')
     {
-        if (source)
-        {
-            console.error(chalk.red(`❌ No schema files found at ${label}: ${String(source.schema)}`));
-            process.exit(1);
-        }
+        console.error(chalk.red(`❌ No schema files found at ${label}: ${String(source?.schema)}`));
+        process.exit(1);
+    }
 
+    if (missing === 'unconfigured')
+    {
         console.log(chalk.yellow(`No schema files found (${label}).`));
+        await pushQueueOnly(databaseUrl, jobs, options.dryRun);
 
         return;
     }
@@ -267,6 +297,10 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
 
     try
     {
+        // 4.5 What the queue step would refuse on the database as it is ends
+        //     push here, nothing planned or applied
+        await checkQueueSchema(connection, grantTarget, jobs).catch((error: unknown) => exitOnFailure('plan', error, target));
+
         // 5. Plan, reading only
         const { plan, pending } = await planOrExit(imports, schemaFilter, functionPlans, target);
         const { statements } = plan;
@@ -287,7 +321,7 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         // 7. The one dry-run gate: every write comes after it
         if (options.dryRun)
         {
-            await grantOrExit(grantTarget, target, true);
+            await ownerStepsOrExit(grantTarget, jobs, connection, target, { dryRun: true, rolesStage: 'plan' });
             console.log(chalk.cyan('\n🔍 Dry run: nothing was applied.\n'));
 
             return;
@@ -301,12 +335,45 @@ export async function dbPush(options: { force?: boolean; dryRun?: boolean; schem
         const packageMigrationsApplied = await applyFunctionMigrations(functionPlans, target);
         await applyProjectStatements(target, selection, packageMigrationsApplied > 0);
 
-        // 10. Grant the app role what is declared, in a transaction of its own
-        await grantOrExit(grantTarget, target, false);
+        // 10. Install or migrate the declared queue schema, then grant the app
+        //     role what is declared, in a transaction of its own
+        await ownerStepsOrExit(grantTarget, jobs, connection, target, { dryRun: false, rolesStage: 'privileges' });
     }
     finally
     {
         await connection.close();
+    }
+}
+
+/**
+ * Push in a project without schema files: the declared queue schema alone,
+ * which does not depend on the project's tables — the queue step, then the
+ * privileges on the queue and nothing else (no project schema, no function
+ * package's, not `drizzle`), as the owner, the roles resolved before the
+ * queue step; a dry run reads only. Nothing without a declaration.
+ */
+async function pushQueueOnly(databaseUrl: string, jobs: JobsDeclaration | undefined, dryRun = false): Promise<void>
+{
+    if (jobs === undefined)
+    {
+        return;
+    }
+
+    const connection = await openPushConnectionOrExit(databaseUrl, dryRun);
+    const target: PushTarget = { db: connection.db, inRolledBackTransaction: connection.inRolledBackTransaction, databaseUrl, schemas: [] };
+
+    try
+    {
+        await ownerStepsOrExit(entityGrantTarget([], {}, []), jobs, connection, target, { dryRun, rolesStage: 'plan' });
+    }
+    finally
+    {
+        await connection.close();
+    }
+
+    if (dryRun)
+    {
+        console.log(chalk.cyan('\n🔍 Dry run: nothing was applied.\n'));
     }
 }
 
@@ -346,15 +413,64 @@ function loadGrantTargetOrExit(schemas: string[], imports: Record<string, unknow
 }
 
 /**
+ * The queue step, then the privileges step, on push's connection. The roles
+ * are resolved first, as `db migrate` and `db grant` resolve them, so roles
+ * that disagree are refused before the queue step installs anything; that
+ * refusal ends push at `rolesStage` — `plan` while nothing is applied.
+ */
+async function ownerStepsOrExit(
+    grantTarget: AppPrivilegesTarget,
+    jobs: JobsDeclaration | undefined,
+    connection: PushConnection,
+    target: PushTarget,
+    options: { dryRun: boolean; rolesStage: 'plan' | 'privileges' },
+): Promise<void>
+{
+    const { dryRun, rolesStage } = options;
+    const roles = await appGrantRoles()
+        .catch((error: unknown) => exitOnFailure(rolesStage, error, target, rolesStage === 'privileges' ? grantRetryNote(error) : undefined));
+    const queued = await queueOrExit(grantTarget, jobs, connection, target, dryRun);
+
+    if (roles)
+    {
+        await grantOrExit(queued, roles, target, dryRun);
+    }
+}
+
+/**
+ * The queue step (queue-step.ts) on push's connection, and the privileges
+ * target with the queue part: on a dry run it reads only, and a failure ends
+ * push at the `plan` stage; otherwise at the `queue` stage, after the schema
+ * changes committed.
+ */
+async function queueOrExit(
+    grantTarget: AppPrivilegesTarget,
+    jobs: JobsDeclaration | undefined,
+    connection: PushConnection,
+    target: PushTarget,
+    dryRun: boolean,
+): Promise<AppPrivilegesTarget>
+{
+    try
+    {
+        return await runQueueStep(connection, grantTarget, jobs, { dryRun });
+    }
+    catch (error)
+    {
+        return exitOnFailure(dryRun ? 'plan' : 'queue', error, target, dryRun ? undefined : grantRetryNote(error));
+    }
+}
+
+/**
  * The privileges step: on a dry run it plans on the read-only connection and
  * a failure ends push at the `plan` stage; otherwise it applies, and a failure
  * is the `privileges` stage, after the schema changes committed.
  */
-async function grantOrExit(grantTarget: AppPrivilegesTarget, target: PushTarget, dryRun: boolean): Promise<void>
+async function grantOrExit(grantTarget: AppPrivilegesTarget, roles: GrantRoles, target: PushTarget, dryRun: boolean): Promise<void>
 {
     try
     {
-        await runAppGrantStep(target.db, grantTarget, { dryRun, schemaPending: dryRun });
+        await grantAppPrivileges(target.db, grantTarget, roles, { dryRun, schemaPending: dryRun });
     }
     catch (error)
     {
@@ -473,6 +589,7 @@ const FAILED_STAGES = {
     plan: 'Planning failed — nothing was applied',
     packages: 'Failed to apply function package migrations — nothing of the project schema was applied',
     project: 'The project statements were rolled back',
+    queue: 'The queue schema was not installed or migrated, and no privilege was changed — any schema change above stays applied',
     privileges: SCHEMA_APPLIED_PRIVILEGES_UNCHANGED,
 } as const;
 

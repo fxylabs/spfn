@@ -834,13 +834,15 @@ the declaration — a second run issues none.
 | a partition, at any level | nothing — access goes through its root table | — | revoked |
 | their sequences (`id()` is a `bigserial`; `nextval` needs it) | `USAGE` | — | revoked |
 | `drizzle`, where migrations are recorded | `USAGE` on it, nothing else; `SELECT` on its tables — never a write | nothing beyond `USAGE` | revoked; `CREATE` on it revoked |
+| the queue schema (`spfn_queue`, when the app declares jobs) | `USAGE` on it, nothing else; `SELECT`, `INSERT`, `UPDATE`, `DELETE` on every table, partitions included; `SELECT`, `UPDATE` on `version`; `EXECUTE` on its functions | nothing | revoked, `EXECUTE` on its functions included |
 
 - **Managed schemas:** the project's (from the entities on `db push`; from
   `src/server/drizzle/privileges.json` on `db migrate` and `spfn add`, which load no app source; on
   `db grant` and `db status`, from that manifest when there is one, else from the entities as push
   loads them — with neither, `db grant` exits 1 and `db status` reports the privileges unknown,
   since the project's tables cannot be seen), each installed function package's, and
-  `drizzle`. Nothing else: not `spfn_queue` (below), not another app's schema in the same database.
+  `drizzle`; and the queue schema when the app declares its jobs (below), by a rule of its own.
+  Nothing else: not another app's schema in the same database.
 - **Views** run as their owner, so a write granted on one is a write on the tables under it,
   whatever they declare: the app role gets `SELECT` only on a view, and anything more it holds there
   is revoked (`db status` reports it as drift). A view gets the default set (`appPrivileges` takes
@@ -942,9 +944,20 @@ the declaration — a second run issues none.
   and so own — tables there. The step and `db status` report it; neither revokes it, as the change is
   database-wide — on `public` only: on every other managed schema PUBLIC's `CREATE` from the owner
   is revoked (above). As the database owner: `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`.
-- **`spfn_queue`** (jobs, pg-boss) is created and owned by the app role at its first start, so the app
-  role needs `CREATE` on the database once (`GRANT CREATE ON DATABASE acme TO app_user;`); the step
-  leaves the schema alone.
+- **`spfn_queue`** (jobs, pg-boss): an app that declares its jobs in `package.json`
+  (`"spfn": { "jobs": true }`, or `{ "schema": "<name>" }`, `readJobsDeclaration` below) has the
+  schema installed and migrated by the owner — `db push`, `db migrate` and `db grant` run
+  pg-boss's own plans as the owner before this step (`spfn add` does nothing to the queue) — and
+  granted by the row above. Revoke the
+  app role's `CREATE` on the database once the owner has installed the queue
+  (`REVOKE CREATE ON DATABASE acme FROM app_user;`). A queue the app role installed — every jobs
+  deployment from before — belongs to it: the commands install, migrate and grant nothing there,
+  print the `REASSIGN OWNED` remedy, and exit 0, the rest of the step applied; move it to the owner
+  and run `spfn db grant` at once, best while jobs are paused (the CLI README, [The queue
+  schema](../../../cli/README.md#the-queue-schema-jobs)). Without the declaration nothing changes:
+  pg-boss creates and owns the schema as the app role at its first start, so the app role needs
+  `CREATE` on the database once (`GRANT CREATE ON DATABASE acme TO app_user;`), and the step leaves
+  the schema alone.
 
 `spfn db status` (as the app) is a view of the step's plan: it reads the catalog the step reads —
 every access list entry with its grant option, every column grant — for the roles the step plans
@@ -1184,7 +1197,7 @@ reads, plans and runs the statements in one transaction, none when blocked, and 
 with 2BP01, after which the transaction rolled back); with `rollback` it always rolls back.
 `target` is `{ schemas, tables, defaults, queue? }` (`AppPrivilegesTarget`), `roles` is `{ app, read? }`.
 `target.queue` — `{ schema }`, the pg-boss queue schema — is planned by a rule of its own, which
-no CLI command passes yet: the app role gets `USAGE` on the schema and nothing else there (its
+the CLI passes when `package.json` declares jobs: the app role gets `USAGE` on the schema and nothing else there (its
 `CREATE`, the read role's and PUBLIC's are revoked, as on any managed schema), `SELECT`, `INSERT`, `UPDATE`,
 `DELETE` on every table there, **partitions included** (pg-boss names its `job_common` partition
 in its statements, and PostgreSQL checks a partition's own privileges when it is named), `SELECT`
@@ -1336,7 +1349,9 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
   `countPendingMigrations`. Beside them, `readJobsDeclaration(cwd?)` reads the app's jobs
   declaration from its `package.json` — `"spfn": { "jobs": true }` for the queue schema
   `spfn_queue` (`DEFAULT_QUEUE_SCHEMA`), `"spfn": { "jobs": { "schema": "<name>" } }` for another
-  — and returns `{ schema }`, or undefined without the key; a file it cannot read or parse, a
+  — and returns `{ schema }`, or undefined without the key or without a `package.json` at all (a
+  directory or image holding only the build and its migrations declares nothing); a file there
+  that it cannot read or parse, a
   value that is neither (an unknown key inside `spfn.jobs` included), or `public` or `drizzle` as
   the schema throws `JobsDeclarationError` naming the file and the key. Whether another schema is
   a package's the file cannot tell (a package's name does not say whether it creates one, and a

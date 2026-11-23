@@ -12,10 +12,14 @@
  *   plan is the only guard left;
  * - J3 (rv432f N1) a keyword (`select`) or a `pg_` name accepted again at the
  *   declaration, failing only later, at install, with PostgreSQL's syntax
- *   error.
+ *   error;
+ * - J4 a directory without package.json read as an error, which ends every
+ *   owner command run where only the build and its migrations are (exit 1,
+ *   nothing applied); or a package.json that is a dangling link read as no
+ *   file, so a deployment whose link broke silently declares no jobs.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -69,5 +73,14 @@ describe('readJobsDeclaration', () =>
             expect(declare({ spfn: { jobs: { schema } } })).toThrow(JobsDeclarationError);
             expect(declare({ spfn: { jobs: { schema } } })).toThrow(`"spfn.jobs.schema" "${schema}" is no queue schema name`);
         }
+    });
+
+    it('J4 reads no package.json as no declaration, and a dangling package.json link as a file it cannot read', () =>
+    {
+        expect(readJobsDeclaration(cwd)).toBeUndefined();
+
+        symlinkSync(join(cwd, 'missing.json'), join(cwd, 'package.json'));
+
+        expect(() => readJobsDeclaration(cwd)).toThrow(JobsDeclarationError);
     });
 });

@@ -88,6 +88,30 @@ export async function twoRoleUnavailability(owner: postgres.Sql, app: postgres.S
 }
 
 /**
+ * Why rows needing an owner that cannot act for the role `role` cannot run
+ * here, or undefined when they can: the owner (`owner`'s `current_user`) must
+ * not hold `role`'s privileges — `pg_has_role(role, 'USAGE')`, the test the
+ * ownership checks make, true for a superuser and for a member that inherits
+ * `role`. Under CI it throws instead: the roles scripts/test-services.sh
+ * creates are plain login roles, neither a superuser nor a member of the
+ * other, so the rows must run there.
+ */
+export async function ownerActsForUnavailability(owner: postgres.Sql, role: string): Promise<string | undefined>
+{
+    const [{ actsFor }] = await owner`SELECT pg_has_role(${role}::name, 'USAGE') AS "actsFor"`;
+    const reason = actsFor
+        ? `the owner role holds ${role}'s privileges (a superuser, or a member inheriting it), so no object of ${role}'s is another role's to it`
+        : undefined;
+
+    if (reason !== undefined && runsInCi())
+    {
+        throw new Error(`${reason}, and CI's roles hold none of each other's — failing instead of skipping`);
+    }
+
+    return reason;
+}
+
+/**
  * `CI` set to anything but nothing, `false` or `0`: the definition core's test
  * helpers use (`src/db/__tests__/helpers/ci.ts`). A truthiness test took
  * `CI=false` for CI and turned a skip into a failure.

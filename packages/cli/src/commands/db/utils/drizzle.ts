@@ -698,6 +698,23 @@ export async function resolveProjectSchemaFiles(databaseUrl: string, source: Sch
 }
 
 /**
+ * Why `resolved` names no file, as `db push` and `db grant` both read it:
+ * `'unconfigured'` when no source names a schema (no --schema, no `schema` in
+ * drizzle.config.ts) — the project has no table of its own; `'unmatched'`
+ * when a named source matches no file — a misconfiguration, which ends both.
+ * Undefined when there are files.
+ */
+export function missingSchemaFiles(source: SchemaSource | undefined, resolved: ResolvedSchema): 'unconfigured' | 'unmatched' | undefined
+{
+    if (resolved.files.length > 0)
+    {
+        return undefined;
+    }
+
+    return source ? 'unmatched' : 'unconfigured';
+}
+
+/**
  * The exports of the files `resolved` names, less the objects a function
  * package owns: a registry re-exports one of its tables for a relation, but
  * the package's own migrations create and alter it.
