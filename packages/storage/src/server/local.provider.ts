@@ -10,14 +10,15 @@
  * `a/b`와 `a/b/c.png`를 동시에 저장할 수 없다(S3·GCS는 가능). README 참고.
  */
 
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, createReadStream } from 'node:fs';
+import { copyFile, link, lstat, mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import {
     MAX_FILE_SIZE,
     StorageKeyError,
+    StorageObjectExistsError,
     StorageObjectNotFoundError,
     StorageVersionNotFoundError,
 } from '../shared/index';
@@ -26,6 +27,7 @@ import { downloadUrlOptions, responseHeaderQuery } from './download-url';
 import { assertKeyPrefix, assertObjectKey, compareKeys, resolveMaxKeys } from './object-key';
 import { awaitStreamStart } from './object-stream';
 import { deleteEveryListedObject } from './prefix-delete';
+import { resolveLocalConfig } from './service-config';
 import type { Readable } from 'node:stream';
 import type {
     DeleteManyResult,
@@ -41,7 +43,16 @@ import type {
     StorageListResult,
     StorageObject,
     StorageObjectStat,
+    StorageUploadOptions,
 } from '../shared/index';
+
+/**
+ * create-only 쓰기의 임시 파일을 두는 디렉터리 — 스토리지 루트 바로 아래. 이름에 백슬래시가 있어 어떤
+ * key·prefix의 경로도 될 수 없다(`assertObjectKey`가 모든 provider에서 백슬래시를 거부한다). 그래서
+ * `list`·`deletePrefix`·`stat`·`download`처럼 key로 닿는 경로는 이 디렉터리에 닿지 않는다 — 이름으로
+ * 걸러 내는 것이 아니라 닿을 길이 없다. 백슬래시가 구분자인 Windows에서는 성립하지 않는다.
+ */
+const PARTIAL_DIR = '\\partial';
 
 export class LocalStorageProvider implements IStorageProvider
 {
@@ -51,8 +62,9 @@ export class LocalStorageProvider implements IStorageProvider
 
     constructor(config: LocalProviderConfig = {})
     {
-        this.baseDir = resolve(process.cwd(), config.dir ?? process.env.LOCAL_STORAGE_DIR ?? '.storage');
-        this.baseUrl = (config.baseUrl ?? process.env.LOCAL_STORAGE_BASE_URL ?? '/api/storage').replace(/\/+$/, '');
+        const { dir, baseUrl } = resolveLocalConfig(config);
+        this.baseDir = dir;
+        this.baseUrl = baseUrl;
     }
 
     /** key를 baseDir 안의 실제 경로로. traversal(`..` 등)은 차단. */
@@ -87,10 +99,16 @@ export class LocalStorageProvider implements IStorageProvider
         return `${this.baseUrl}/${key}`;
     }
 
-    async upload(key: string, body: string | Buffer, _contentType: string): Promise<void>
+    /** `ifAbsent`는 임시 파일에 다 쓴 뒤 `link`로 게시한다(`publishExclusive`). */
+    async upload(key: string, body: string | Buffer, _contentType: string, options: StorageUploadOptions = {}): Promise<void>
     {
         assertObjectKey(key);
-        await writeFile(await this.prepareTarget(key), body);
+        const path = await this.prepareTarget(key);
+        if (options.ifAbsent)
+        {
+            return publishExclusive(await this.partialPath(), path, key, temp => writeFile(temp, body, { flag: 'wx' }));
+        }
+        await writeFile(path, body);
     }
 
     async download(key: string): Promise<Buffer>
@@ -134,7 +152,12 @@ export class LocalStorageProvider implements IStorageProvider
         {
             throw new StorageVersionNotFoundError(from, versionId);
         }
-        await copyFile(source, await this.prepareTarget(to));
+        const target = await this.prepareTarget(to);
+        if (options.ifAbsent)
+        {
+            return publishExclusive(await this.partialPath(), target, to, temp => copyFile(source, temp, constants.COPYFILE_EXCL));
+        }
+        await copyFile(source, target);
     }
 
     /** 버전이 없으므로 `versionId`는 싣지 않는다 — 대신 sha256을 `contentHash`로 준다. */
@@ -235,6 +258,15 @@ export class LocalStorageProvider implements IStorageProvider
         return path;
     }
 
+    /** create-only 쓰기 하나의 임시 파일 경로(`PARTIAL_DIR` 아래, 아직 없는 이름). */
+    private async partialPath(): Promise<string>
+    {
+        const dir = join(this.baseDir, PARTIAL_DIR);
+        await mkdir(dir, { recursive: true });
+
+        return join(dir, randomUUID());
+    }
+
     private async walk(prefix: string): Promise<StorageObject[]>
     {
         const objects: StorageObject[] = [];
@@ -272,6 +304,44 @@ async function collectFiles(dir: string, keyPrefix: string, objects: StorageObje
             objects.push({ key, size: info.size, lastModified: info.mtime });
         }
     }
+}
+
+/**
+ * create-only 쓰기를 원자적으로 게시한다. 바이트는 `PARTIAL_DIR`의 임시 파일에 먼저 다 쓰고, `link`로
+ * 최종 key에 건다 — `link`는 대상이 있으면 EEXIST로 실패하므로 판정과 게시가 한 연산이다
+ * (`rename`은 대상을 바꿔치기하므로 쓸 수 없다). 그래서 도중에 실패한 쓰기(ENOSPC·EFBIG·스트림 오류)는
+ * key에 아무것도 남기지 않고, 다른 독자는 완성된 바이트만 본다. 임시 이름은 성공·실패 모두 지운다.
+ * 하드 링크가 없는 파일시스템(FAT·exFAT 등)에서는 `link`가 EPERM/ENOTSUP으로 실패해 그대로 전파된다 —
+ * 원자성을 잃은 쓰기로 대신하지 않는다.
+ */
+async function publishExclusive(
+    temp: string,
+    target: string,
+    key: string,
+    write: (temp: string) => Promise<void>,
+): Promise<void>
+{
+    await write(temp)
+        .then(() => link(temp, target).catch(async (error: unknown) =>
+        {
+            throw await existsFailure(error, target, key);
+        }))
+        .finally(() => unlink(temp).catch(() => undefined));
+}
+
+/**
+ * 배타적 생성의 EEXIST를 계약 오류로 바꾼다. 같은 이름의 디렉터리(`a/b/c`가 있는 `a/b`)도
+ * EEXIST를 내지만 그건 객체가 아니므로 원래 오류를 그대로 둔다 — `stat`은 그 key를 없다고 한다.
+ */
+async function existsFailure(error: unknown, path: string, key: string): Promise<unknown>
+{
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST'))
+    {
+        return error;
+    }
+    const found = await lstat(path).catch(() => null);
+
+    return found?.isDirectory() ? error : new StorageObjectExistsError(key);
 }
 
 /** 파일 전체를 메모리에 올리지 않고 해시한다 — 스냅샷이 큰 객체를 훑기 때문이다. */

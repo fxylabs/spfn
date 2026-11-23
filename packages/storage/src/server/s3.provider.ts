@@ -22,12 +22,14 @@ import {
     StorageObjectNotFoundError,
     StorageVersionNotFoundError,
 } from '../shared/index';
+import { createOnlyFailure, failedBeforeConnecting } from './create-only';
 import { errorMessage } from './delete-many';
 import { downloadUrlOptions } from './download-url';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
 import { deleteEveryListedObject } from './prefix-delete';
+import { resolveS3Config } from './service-config';
 import { assertSizeLimits } from './size-limit';
-import type { GetObjectCommandOutput } from '@aws-sdk/client-s3';
+import type { GetObjectCommandOutput, S3ClientConfig } from '@aws-sdk/client-s3';
 import type { Readable } from 'node:stream';
 import type {
     DeleteManyResult,
@@ -42,6 +44,7 @@ import type {
     StorageListOptions,
     StorageListResult,
     StorageObjectStat,
+    StorageUploadOptions,
 } from '../shared/index';
 
 const MAX_DELETE_OBJECTS = 1000;
@@ -50,24 +53,23 @@ export class S3StorageProvider implements IStorageProvider
 {
     readonly providerKind = 's3' as const;
     private client: S3Client;
+    /** `ifAbsent` 쓰기 전용 — `maxAttempts: 1`이라 SDK가 재시도하지 않는다(create-only.ts). */
+    private createOnlyClient: S3Client;
     private bucket: string;
     private publicBaseUrl: string;
 
     constructor(config: S3ProviderConfig = {})
     {
-        const region = config.region ?? process.env.S3_REGION ?? 'us-east-1';
-        const endpoint = config.endpoint ?? process.env.S3_ENDPOINT;
-        this.bucket = config.bucket ?? process.env.S3_BUCKET ?? '';
-        this.client = new S3Client({
+        const { region, endpoint, bucket, accessKeyId, secretAccessKey, publicBaseUrl } = resolveS3Config(config);
+        const clientConfig: S3ClientConfig = {
             region,
-            credentials: {
-                accessKeyId: config.accessKeyId ?? process.env.S3_ACCESS_KEY_ID ?? '',
-                secretAccessKey: config.secretAccessKey ?? process.env.S3_SECRET_ACCESS_KEY ?? '',
-            },
+            credentials: { accessKeyId, secretAccessKey },
             ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
-        });
-        this.publicBaseUrl = (config.publicBaseUrl ?? process.env.S3_PUBLIC_BASE_URL
-            ?? `https://${this.bucket}.s3.${region}.amazonaws.com`).replace(/\/+$/, '');
+        };
+        this.client = new S3Client(clientConfig);
+        this.createOnlyClient = new S3Client({ ...clientConfig, maxAttempts: 1 });
+        this.bucket = bucket;
+        this.publicBaseUrl = publicBaseUrl;
     }
 
     /** maxBytes는 presigned PUT 서명 조건에 넣을 수 없어 무시된다 — 크기 강제는 contentLength로. */
@@ -133,10 +135,18 @@ export class S3StorageProvider implements IStorageProvider
         return `${this.publicBaseUrl}/${key}`;
     }
 
-    async upload(key: string, body: string | Buffer, contentType: string): Promise<void>
+    /** `ifAbsent`는 `If-None-Match: *`를 재시도 없이 한 번 보낸다 — 단일 PutObject라 multipart 경로가 없다. */
+    async upload(key: string, body: string | Buffer, contentType: string, options: StorageUploadOptions = {}): Promise<void>
     {
         assertObjectKey(key);
-        await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentType: contentType }));
+        const command = new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: body,
+            ContentType: contentType,
+            ...(options.ifAbsent ? { IfNoneMatch: '*' } : {}),
+        });
+        await (options.ifAbsent ? this.sendCreateOnly(command, key, error => error) : this.client.send(command));
     }
 
     async download(key: string): Promise<Buffer>
@@ -157,16 +167,52 @@ export class S3StorageProvider implements IStorageProvider
         assertObjectKey(from);
         assertObjectKey(to);
         const versionId = options.sourceVersionId;
-        await this.client
-            .send(new CopyObjectCommand({
-                Bucket: this.bucket,
-                CopySource: copySourceFor(this.bucket, from, versionId),
-                Key: to,
-            }))
-            .catch((error: unknown) =>
+        const command = new CopyObjectCommand({
+            Bucket: this.bucket,
+            CopySource: copySourceFor(this.bucket, from, versionId),
+            Key: to,
+            ...(options.ifAbsent ? { IfNoneMatch: '*' } : {}),
+        });
+        const failure = (error: unknown) => copyFailure(error, from, versionId);
+        await (options.ifAbsent
+            ? this.sendCreateOnly(command, to, failure)
+            : this.client.send(command).catch((error: unknown) =>
             {
-                throw copyFailure(error, from, versionId);
-            });
+                throw failure(error);
+            }));
+    }
+
+    /**
+     * create-only 요청을 재시도 없는 클라이언트로 한 번 보내고, 실패를 create-only 규칙으로 판정한다
+     * (create-only.ts). 판정이 없으면 `otherwise`가 고른 오류를 던진다. 요청이 나갔는지는 SDK가 알려 주는
+     * 만큼만 안다: 미들웨어 스택의 가장 안쪽 칸(deserialize·low)에 닿기 전 실패(자격 증명·엔드포인트·서명)와
+     * Node가 연결 전 단계라고 알린 실패는 보내지 않은 것이다.
+     */
+    private async sendCreateOnly(
+        command: PutObjectCommand | CopyObjectCommand,
+        key: string,
+        otherwise: (error: unknown) => unknown,
+    ): Promise<void>
+    {
+        // 아래 미들웨어와 catch는 입력·출력을 보지 않는다 — 두 명령의 스택·send 타입이 서로 달라 합집합으로는
+        // 부를 수 없어 한쪽 타입으로 부른다.
+        const sending = command as PutObjectCommand;
+        let handedToTransport = false;
+        sending.middlewareStack.add(
+            next => (args) =>
+            {
+                handedToTransport = true;
+
+                return next(args);
+            },
+            { step: 'deserialize', priority: 'low', name: 'createOnlyHandOff' },
+        );
+        await this.createOnlyClient.send(sending).catch((error: unknown) =>
+        {
+            const sent = handedToTransport && !failedBeforeConnecting((error as { syscall?: unknown } | null)?.syscall);
+
+            throw createOnlyFailure(error, httpStatus(error), key, sent) ?? otherwise(error);
+        });
     }
 
     /** `HeadObject`는 버전 관리가 켜진 버킷에서만 `VersionId`를 싣는다 — 그 외에는 미정의로 남는다. */
@@ -391,6 +437,12 @@ function contentHashFromEtag(etag?: string): string | undefined
 function liveVersionId(versionId?: string): string | undefined
 {
     return versionId === undefined || versionId === 'null' ? undefined : versionId;
+}
+
+/** 응답을 받았을 때만 SDK 오류에 실리는 HTTP 상태 — 연결이 끊긴 오류에는 없다. */
+function httpStatus(error: unknown): number | undefined
+{
+    return (error as { $metadata?: { httpStatusCode?: number } } | null)?.$metadata?.httpStatusCode;
 }
 
 /** SDK 오류는 name과 HTTP 상태 둘 중 하나로만 404를 알릴 때가 있어 양쪽을 본다. */

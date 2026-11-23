@@ -14,12 +14,14 @@ import {
     StorageObjectNotFoundError,
     StorageVersionNotFoundError,
 } from '../shared/index';
+import { createOnlyFailure } from './create-only';
 import { deleteManyIndividually } from './delete-many';
 import { downloadUrlOptions } from './download-url';
 import { isPublicKey } from './keys';
 import { assertKeyPrefix, assertObjectKey, resolveMaxKeys } from './object-key';
 import { awaitStreamStart } from './object-stream';
 import { deleteEveryListedObject } from './prefix-delete';
+import { resolveGcsConfig } from './service-config';
 import { assertSizeLimits, gcsContentLengthRange } from './size-limit';
 import type { Readable } from 'node:stream';
 import type {
@@ -36,31 +38,47 @@ import type {
     StorageListResult,
     StorageObject,
     StorageObjectStat,
+    StorageUploadOptions,
 } from '../shared/index';
 
 export class GcsStorageProvider implements IStorageProvider
 {
     readonly providerKind = 'gcs' as const;
     private storage: Storage;
+    /**
+     * `ifAbsent` 쓰기 전용 — `autoRetry: false`라 요청 계층(retry-request)과 `save`가 재시도하지 않는다.
+     * 호출 단위 옵션은 쓰지 않는다: SDK가 공유 `storage.retryOptions.autoRetry`를 바꿨다 되돌리는 방식이라
+     * 같은 인스턴스의 동시 호출과 경합한다.
+     */
+    private createOnlyStorage: Storage;
     private publicBucket: Bucket;
     private privateBucket: Bucket;
     private publicBucketName: string;
+    private privateBucketName: string;
 
     constructor(config: GcsProviderConfig = {})
     {
-        const credentials = decodeCredentials(config.credentialsJsonBase64 ?? process.env.GCS_CREDENTIALS_JSON_BASE64 ?? '');
-        this.storage = new Storage({
-            projectId: (config.projectId ?? process.env.GCS_PROJECT_ID) || undefined,
-            ...(credentials ? { credentials } : {}),
-        });
-        this.publicBucketName = config.publicBucket ?? process.env.GCS_PUBLIC_BUCKET ?? '';
+        const { projectId, credentials, publicBucket, privateBucket } = resolveGcsConfig(config);
+        const storageOptions = { projectId, ...(credentials ? { credentials } : {}) };
+        this.storage = new Storage(storageOptions);
+        this.createOnlyStorage = new Storage({ ...storageOptions, retryOptions: { autoRetry: false } });
+        this.publicBucketName = publicBucket;
+        this.privateBucketName = privateBucket;
         this.publicBucket = this.storage.bucket(this.publicBucketName);
-        this.privateBucket = this.storage.bucket(config.privateBucket ?? process.env.GCS_PRIVATE_BUCKET ?? '');
+        this.privateBucket = this.storage.bucket(this.privateBucketName);
     }
 
     private resolveBucket(key: string): Bucket
     {
         return isPublicKey(key) ? this.publicBucket : this.privateBucket;
+    }
+
+    /** `ifAbsent` 쓰기는 재시도 없는 인스턴스의 같은 버킷으로 보낸다. */
+    private writeBucket(key: string, ifAbsent?: boolean): Bucket
+    {
+        return ifAbsent
+            ? this.createOnlyStorage.bucket(isPublicKey(key) ? this.publicBucketName : this.privateBucketName)
+            : this.resolveBucket(key);
     }
 
     /** temp=true면 `tmp/<key>`에 서명 — finalizeObject 전에는 최종 key로 읽을 수 없다. */
@@ -110,13 +128,22 @@ export class GcsStorageProvider implements IStorageProvider
         return `https://storage.googleapis.com/${this.publicBucketName}/${key}`;
     }
 
-    async upload(key: string, body: string | Buffer, contentType: string): Promise<void>
+    /**
+     * `ifAbsent`는 `ifGenerationMatch: 0`을 재시도 없이 한 번 보낸다 — 살아 있는 generation이 없을 때만
+     * GCS가 받아들인다.
+     */
+    async upload(key: string, body: string | Buffer, contentType: string, options: StorageUploadOptions = {}): Promise<void>
     {
         assertObjectKey(key);
-        await this.resolveBucket(key).file(key).save(
-            typeof body === 'string' ? Buffer.from(body) : body,
-            { contentType, resumable: false },
-        );
+        await this.writeBucket(key, options.ifAbsent).file(key)
+            .save(
+                typeof body === 'string' ? Buffer.from(body) : body,
+                { contentType, resumable: false, ...createOnly(options.ifAbsent) },
+            )
+            .catch((error: unknown) =>
+            {
+                throw (options.ifAbsent ? createOnlyFailure(error, gcsStatus(error), key, MAY_HAVE_SENT) : null) ?? error;
+            });
     }
 
     async download(key: string): Promise<Buffer>
@@ -149,10 +176,15 @@ export class GcsStorageProvider implements IStorageProvider
         assertObjectKey(from);
         assertObjectKey(to);
         const versionId = options.sourceVersionId;
-        const bucket = this.resolveBucket(from);
+        const bucket = this.writeBucket(from, options.ifAbsent);
         const source = versionId === undefined ? bucket.file(from) : bucket.file(from, { generation: versionId });
-        await source.copy(this.resolveBucket(to).file(to)).catch((error: unknown) =>
+        await source.copy(this.writeBucket(to, options.ifAbsent).file(to), createOnly(options.ifAbsent)).catch((error: unknown) =>
         {
+            const createOnlyError = options.ifAbsent ? createOnlyFailure(error, gcsStatus(error), to, MAY_HAVE_SENT) : null;
+            if (createOnlyError)
+            {
+                throw createOnlyError;
+            }
             if (!isGcsNotFound(error))
             {
                 throw error;
@@ -287,19 +319,31 @@ function isGcsNotFound(error: unknown): boolean
     return typeof error === 'object' && error !== null && 'code' in error && error.code === 404;
 }
 
+/** generation 0은 "살아 있는 객체가 없다"는 뜻이다 — 쓰기와 rewrite 대상 모두에 같은 조건이다. */
+function createOnly(ifAbsent?: boolean): { preconditionOpts?: { ifGenerationMatch: number } }
+{
+    return ifAbsent ? { preconditionOpts: { ifGenerationMatch: 0 } } : {};
+}
+
+/**
+ * GCS의 create-only 쓰기는 응답이 없으면 언제나 "보냈을 수 있다"다. 한 작업의 요청이 어느 연결에도 쓰이지
+ * 않았다는 것을 SDK가 알려 주지 않는다: node-fetch가 redirect를 안에서 따라가고(teeny-request는
+ * `redirect`·`agent` 옵션을 넘기지 않는다) 최종 오류의 `erroredSysCall`은 마지막 연결의 것이라, 첫 요청이
+ * 서버에 닿은 뒤 다음 연결의 `connect` 실패와 처음부터 나가지 않은 요청을 구분할 수 없다.
+ */
+const MAY_HAVE_SENT = true;
+
+/** 응답을 받은 오류(ApiError)만 `code`에 HTTP 상태를 싣는다 — 연결 오류의 `code`는 `ECONNRESET` 같은 문자열이다. */
+function gcsStatus(error: unknown): number | undefined
+{
+    const code = (error as { code?: unknown } | null)?.code;
+
+    return typeof code === 'number' ? code : undefined;
+}
+
 function sizeExtensionHeaders(maxBytes?: number, contentLength?: number): Record<string, string> | null
 {
     const range = gcsContentLengthRange(maxBytes, contentLength);
 
     return range ? { 'x-goog-content-length-range': range } : null;
-}
-
-function decodeCredentials(base64: string): Record<string, unknown> | null
-{
-    if (!base64)
-    {
-        return null;
-    }
-
-    return JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
 }

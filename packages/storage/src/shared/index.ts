@@ -39,6 +39,44 @@ export class StorageObjectNotFoundError extends Error
 }
 
 /**
+ * `ifAbsent` 쓰기의 대상 key가 요청 전부터 차 있었을 때 — 한 번 보낸 요청에 저장소가 "이미 있다"고
+ * 답했다. provider 3종이 같은 타입으로 통일한다. 저장된 객체는 그대로다. `code`는 Node 관습을 따라 `EEXIST`다.
+ */
+export class StorageObjectExistsError extends Error
+{
+    readonly key: string;
+    readonly code = 'EEXIST';
+
+    constructor(key: string)
+    {
+        super(`Object already exists: ${key}`);
+        this.name = 'StorageObjectExistsError';
+        this.key = key;
+    }
+}
+
+/**
+ * `ifAbsent` 쓰기의 결과를 provider가 알 수 없을 때 — 요청이 나갔을 수 있는데 응답이 끊겼거나(연결 끊김·
+ * 타임아웃), 저장소가 5xx·409처럼 "다시 시도하라"고만 답했다. 객체가 생겼을 수도 있다. 요청이
+ * 나가지 않았다고 SDK가 알려 주는 실패(S3만: HTTP 핸들러에 넘기기 전 실패, DNS 조회·TCP 연결 실패)는
+ * 이 오류가 아니라 SDK 오류 그대로다. SDK가 알려 주지 않는 실패(TLS 실패, GCS는 응답 없는 실패 전부 —
+ * redirect 뒤 연결의 실패와 구분되지 않는 연결 실패도)는 이 오류다.
+ * 조건부 쓰기는 다시 보내면 자기 첫 시도를 "이미 있다"로 읽으므로 provider는 재시도하지 않는다 —
+ * 호출자가 key를 읽어 판정한다. 원래 오류는 `cause`에 있다.
+ */
+export class StorageWriteOutcomeUnknownError extends Error
+{
+    readonly key: string;
+
+    constructor(key: string, cause: unknown)
+    {
+        super(`Create-only write outcome unknown: ${key}`, { cause });
+        this.name = 'StorageWriteOutcomeUnknownError';
+        this.key = key;
+    }
+}
+
+/**
  * 객체는 있지만 요청한 버전이 없을 때 — lifecycle로 사라졌거나 애초에 없던 버전이다.
  * `StorageObjectNotFoundError`를 상속하지 않는다: 404로 접으면 "객체가 없다"와 구분되지 않는다.
  */
@@ -154,11 +192,35 @@ export interface StorageObjectStat
     versionId?: string;
 }
 
+/** 서버 직접 업로드 옵션. */
+export interface StorageUploadOptions
+{
+    /**
+     * key에 객체가 없을 때만 만든다 — 확인 후 쓰기가 아니라 provider의 원자적 조건부 쓰기다
+     * (S3 `If-None-Match: *`, GCS `ifGenerationMatch: 0`, local 임시 파일 → `link`). 요청은 한 번만 보낸다(재시도 없음).
+     * 그 한 번에 저장소가 "이미 있다"고 답하면 `StorageObjectExistsError` — 요청 전부터 다른 객체가
+     * 있었고 아무것도 쓰지 않았다. 결과를 알 수 없으면(응답 유실·타임아웃·5xx·S3 409)
+     * `StorageWriteOutcomeUnknownError` — 쓰였을 수도 있으니 key를 읽어 판정한다. 나가지 않은 것으로
+     * 확인된 요청(S3의 연결 실패 등)의 실패는 SDK 오류 그대로다 — README "Create-only writes" 참고.
+     *
+     * S3 호환 저장소는 `If-None-Match`를 지켜야 한다(AWS S3 문서화, SeaweedFS 4.54 실측). 헤더를 무시하는
+     * 저장소에서는 이 쓰기가 기존 객체를 **덮어쓰고** 만든 것처럼 성공한다 — 응답이 같아 provider도
+     * 호출자도 알 수 없고, 추가 요청 없이는 감지하지 않는다. README "Create-only writes" 참고.
+     */
+    ifAbsent?: boolean;
+}
+
 /** 서버사이드 복사 옵션. */
 export interface StorageCopyOptions
 {
     /** 이 버전을 원본으로 복사한다. 그 버전이 없으면 `StorageVersionNotFoundError`. */
     sourceVersionId?: string;
+    /**
+     * 대상 key에 객체가 없을 때만 복사한다 — `upload`의 `ifAbsent`와 같은 원자적 조건·한 번 전송·
+     * 오류(`StorageObjectExistsError`, 결과를 모르면 `StorageWriteOutcomeUnknownError`)다. S3 호환 저장소가
+     * 헤더를 무시하면 대상을 덮어쓰는 것도 `upload`와 같다.
+     */
+    ifAbsent?: boolean;
 }
 
 /** 매니페스트 한 항목 — 스냅샷 시점의 객체 하나. */
@@ -245,8 +307,9 @@ export interface LocalProviderConfig
 }
 
 /**
- * getStorageService 옵션 — 앱의 검증된 설정(env 스키마 등)을 주입하는 경로.
+ * getStorageService·createStorageService 옵션 — 앱의 검증된 설정(env 스키마 등)을 주입하는 경로.
  * provider 미지정 시 STORAGE_PROVIDER env, 그것도 없으면 dev=local/prod=s3.
+ * provider 설정에서 빠진 필드는 기본 서비스와 같은 env(S3_*·GCS_*·LOCAL_STORAGE_*)로 채워진다.
  */
 export interface StorageServiceOptions
 {
@@ -272,8 +335,12 @@ export interface IStorageProvider
     getDownloadUrl(key: string, options?: number | DownloadUrlOptions): Promise<string>;
     /** 공개 객체의 영구 URL(서명 없이 서빙). */
     getPublicUrl(key: string): string;
-    /** 서버 직접 업로드. */
-    upload(key: string, body: string | Buffer, contentType: string): Promise<void>;
+    /**
+     * 서버 직접 업로드. 기본은 덮어쓰기다. `ifAbsent`면 key가 비어 있을 때만 만들고, 요청 전에 이미
+     * 있었으면 StorageObjectExistsError, 결과를 알 수 없으면 StorageWriteOutcomeUnknownError —
+     * 같은 key를 동시에 쓰는 두 호출이 함께 성공하는 일은 없다(S3 호환 저장소는 `If-None-Match`를 지킬 때만).
+     */
+    upload(key: string, body: string | Buffer, contentType: string, options?: StorageUploadOptions): Promise<void>;
     /** 서버 직접 다운로드(전체를 메모리에 올린다). 객체가 없으면 StorageObjectNotFoundError. */
     download(key: string): Promise<Buffer>;
     /**
@@ -284,7 +351,7 @@ export interface IStorageProvider
     getStream(key: string): Promise<Readable>;
     /**
      * 서버사이드 복사 — 바이트가 애플리케이션을 거치지 않는다. 원본이 없으면
-     * StorageObjectNotFoundError, 대상이 이미 있으면 덮어쓴다. 원본은 남는다.
+     * StorageObjectNotFoundError, 대상이 이미 있으면 덮어쓴다(`ifAbsent`면 `upload`와 같은 두 오류). 원본은 남는다.
      * `sourceVersionId`를 주면 그 버전을 원본으로 삼고, 그 버전이 없으면(객체 자체가
      * 없는 경우 포함) StorageVersionNotFoundError로 거부한다.
      */

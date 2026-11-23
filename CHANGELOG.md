@@ -325,6 +325,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **@spfn/core: `.middleware({ logger: { excludePaths, … } })`** — the auto-applied request logger
   takes `RequestLoggerOptions` as well as a boolean, in place. Excluding a path used to mean
   `logger: false` and a `RequestLogger` of your own in `.use()`, which runs after proxy-guard.
+- **@spfn/storage: create-only writes — `upload(key, body, contentType, { ifAbsent: true })` and
+  `copy(from, to, { ifAbsent: true })` (#172).** The target is created only when the key is empty,
+  with each backend's atomic conditional write: S3 `If-None-Match: *` on `PutObject` /
+  `CopyObject`, GCS `ifGenerationMatch: 0` on the upload and on the rewrite destination, local
+  a temporary file published with `link`, so a local write that fails midway leaves nothing at
+  the key and a reader never sees partial bytes (a filesystem without hard links rejects the
+  create-only write). The local temporary files live in `LOCAL_STORAGE_DIR/\partial`, a name no
+  key can have, so `list` and every read never see a write in progress. The request is sent once,
+  never retried (S3 through a client with `maxAttempts: 1`, GCS through a `Storage` with
+  `retryOptions.autoRetry: false`): a resent conditional write would read its own landed first
+  attempt as "taken". When the store answers that one request with "already exists", the call
+  rejects with the new `StorageObjectExistsError` (`key`, `code = 'EEXIST'`) and nothing was
+  written. When the outcome is not known — response
+  lost, timeout, 5xx, S3 `409 ConditionalRequestConflict` — it rejects with the new
+  `StorageWriteOutcomeUnknownError` (`key`, `cause`); the write may have landed and the caller
+  reads the key to settle it. A request the SDK reports as never sent rejects with the SDK's own
+  error: on S3 a failure before the request reaches the HTTP handler, or a failed DNS lookup or
+  TCP connect. What the SDK does not report — a TLS failure, and on GCS any failure without a
+  response, a failed connect included (its HTTP client follows redirects itself and reports only
+  the last connection's error) — is reported as unknown. Two writers racing for one key never both succeed (on an
+  S3-compatible store, only if it honours the header — below).
+  `StorageUploadOptions` is new; `StorageCopyOptions` gains `ifAbsent`.
+  An S3-compatible store has to honour the header — AWS S3 documents it, SeaweedFS 4.54 was
+  measured; on a store that ignores it the create-only write replaces the object and resolves as
+  a success, and the provider does not detect it (that would take a second request per write).
+  On a GCS endpoint that answers with a redirect the outcome is not guaranteed to be known: the
+  SDK follows the redirect itself, a redirected request that fails without a response rejects with
+  `StorageWriteOutcomeUnknownError` (read the key before retrying), and a status from the redirect
+  target is read as the first request's (a 412 rejects with `StorageObjectExistsError`; a `copy`
+  redirected with a 303 can resolve as a `GET`).
+  Presigned uploads and `finalizeObject` have no create-only form.
+- **@spfn/storage: `createStorageService(options)` returns an independent service (#172)** — a
+  second bucket, root or provider beside the default service, with the same surface and no state
+  shared with it. Provider fields left out fall back to the same environment variables as the
+  default service.
 
 ### Changed
 
@@ -391,6 +426,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner cannot revoke on blocks the plan, as a foreign-owned table does); `RevokeGrantsByOthers.name`
   is absent for a REVOKE on a schema; `AppPrivilegesCheck` gains `schemaDrift`,
   `schemaHeldElsewhere` and `ownedSchemas`.
+- **@spfn/storage: `getStorageService(options)` rejects options that differ from the first
+  call's (#172).** It is the default service and never reconfigures; a later call with other
+  options used to return the first service silently. Calls without options, or with equal ones,
+  return it as before. Concurrent first calls now share one service instead of each creating one.
+- **BREAKING: @spfn/storage: `getStorageService(options)` rejects options that configure a
+  different service from the default one (#172).** Exact condition: the default service exists,
+  the later call passes `options`, and the effective configuration those options resolve to — the
+  selected provider (`options.provider`, else `STORAGE_PROVIDER`, else `s3` in production and
+  `local` otherwise; any value other than `local` and `gcs` selects `s3`) and that provider's fields after their `S3_*` / `GCS_*` / `LOCAL_STORAGE_*`
+  fallback and defaults (`local.dir` as an absolute path, trailing `/` trimmed from base URLs,
+  GCS credentials decoded) — is not deep-equal to the one the default service was created from.
+  Such a call used to return the first service silently; it now rejects, which fails a boot that
+  configures the default service twice with different settings. How the options are spelled does
+  not matter: a missing field and an explicit `undefined`, an environment value left out or written
+  out, and options for an unselected provider configure the same service. Nothing the SDK
+  derives later is derived for the comparison: a GCS `projectId` left out (the SDK reads it from
+  the credentials or the environment) against one written out, or an S3 `endpoint` with and
+  without a trailing `/`, compare unequal and reject. Calls without options
+  return the default service as before. Concurrent first calls now share one service instead of
+  each creating one.
+
 - **@spfn/auth: the "API access" line no longer carries the user's e-mail address (#429).** The
   info line `@spfn/auth:middleware` writes for each request `authenticate` admits, by Bearer or by
   clientProofV1, and each one `optionalAuth` admits by clientProofV1 (its Bearer path writes no

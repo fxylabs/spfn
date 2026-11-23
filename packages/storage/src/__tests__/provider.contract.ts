@@ -8,7 +8,12 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { restoreManifest, snapshotPrefix } from '../server/snapshot-restore';
-import { StorageKeyError, StorageObjectNotFoundError, StorageVersionNotFoundError } from '../shared/index';
+import {
+    StorageKeyError,
+    StorageObjectExistsError,
+    StorageObjectNotFoundError,
+    StorageVersionNotFoundError,
+} from '../shared/index';
 import type { Readable } from 'node:stream';
 import type { IStorageProvider, Manifest } from '../shared/index';
 
@@ -126,6 +131,32 @@ export function registerStorageProviderContract(name: string, harness: StorageCo
         {
             await expect(storage.download(`${root}/missing.txt`)).rejects.toBeInstanceOf(StorageObjectNotFoundError);
             await expect(storage.getStream(`${root}/missing.txt`)).rejects.toBeInstanceOf(StorageObjectNotFoundError);
+        });
+
+        it('lets exactly one of two concurrent ifAbsent uploads claim a key and keeps the winner\'s bytes', async () =>
+        {
+            const key = `${root}/records/000001.json`;
+            const outcomes = await Promise.allSettled(['writer-a', 'writer-b'].map(
+                body => storage.upload(key, body, 'application/json', { ifAbsent: true }).then(() => body),
+            ));
+            const winners = outcomes.flatMap(outcome => (outcome.status === 'fulfilled' ? [outcome.value] : []));
+            const losers = outcomes.flatMap(outcome => (outcome.status === 'rejected' ? [outcome.reason] : []));
+
+            expect(winners).toHaveLength(1);
+            expect(losers).toHaveLength(1);
+            expect(losers[0]).toBeInstanceOf(StorageObjectExistsError);
+            expect(losers[0]).toMatchObject({ key, code: 'EEXIST' });
+            expect((await storage.download(key)).toString()).toBe(winners[0]);
+        });
+
+        it('refuses an ifAbsent copy onto an existing destination and leaves it unchanged', async () =>
+        {
+            await storage.upload(`${root}/source.txt`, 'new', 'text/plain');
+            await storage.upload(`${root}/target.txt`, 'old', 'text/plain');
+
+            await expect(storage.copy(`${root}/source.txt`, `${root}/target.txt`, { ifAbsent: true }))
+                .rejects.toMatchObject({ name: 'StorageObjectExistsError', key: `${root}/target.txt` });
+            expect((await storage.download(`${root}/target.txt`)).toString()).toBe('old');
         });
 
         it('copies to a new key and preserves the source', async () =>

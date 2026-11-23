@@ -1,7 +1,12 @@
+import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GcsStorageProvider } from '../server/gcs.provider';
 import { StorageObjectNotFoundError, StorageVersionNotFoundError } from '../shared/index';
+import { startConditionalWriteEndpoint } from './conditional-write-endpoint';
+import type { ConditionalWriteDialect, ConditionalWriteEndpoint } from './conditional-write-endpoint';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 interface TestProviderInternals
 {
@@ -220,7 +225,7 @@ describe('GcsStorageProvider server-side copy', () =>
 
         expect(privateFile).toHaveBeenCalledWith('gen/req-1/a.png');
         expect(publicFile).toHaveBeenCalledWith('public/confirmed/a.png');
-        expect(copy).toHaveBeenCalledWith(expect.anything());
+        expect(copy).toHaveBeenCalledWith(expect.anything(), {});
     });
 
     it('normalizes a 404 source error to the not-found contract error', async () =>
@@ -238,6 +243,77 @@ describe('GcsStorageProvider server-side copy', () =>
         const { provider } = providerWithFiles({ copy });
 
         await expect(provider.copy('gen/a.png', 'confirmed/a.png')).rejects.toThrow('gcs unavailable');
+    });
+});
+
+// 실제 SDK와 HTTP로(STORAGE_EMULATOR_HOST) — 재시도는 SDK 인스턴스 설정에 달려 있어 파일 스텁으로는 보이지 않는다.
+describe('GcsStorageProvider create-only writes against an endpoint that loses the first response', () =>
+{
+    const key = 'log/000001.json';
+    const writes = {
+        upload: (provider: GcsStorageProvider) => provider.upload(key, '{}', 'application/json', { ifAbsent: true }),
+        copy: (provider: GcsStorageProvider) => provider.copy('staging/a.json', key, { ifAbsent: true }),
+    };
+    let endpoint: ConditionalWriteEndpoint | undefined;
+    let previousEmulatorHost: string | undefined;
+
+    beforeEach(() =>
+    {
+        previousEmulatorHost = process.env.STORAGE_EMULATOR_HOST;
+    });
+
+    afterEach(async () =>
+    {
+        restoreEnv('STORAGE_EMULATOR_HOST', previousEmulatorHost);
+        await endpoint?.close();
+    });
+
+    it.each(Object.entries(writes))('%s: sends the write once and reports the outcome as unknown', async (_name, write) =>
+    {
+        endpoint = await startConditionalWriteEndpoint(GCS_DIALECT);
+
+        await expect(write(providerAt(endpoint.url))).rejects.toMatchObject({ name: 'StorageWriteOutcomeUnknownError', key });
+        expect(endpoint.writes).toEqual([key]);
+    });
+
+    it.each(Object.entries(writes))('%s: rejects a key taken before the request with the exists error', async (_name, write) =>
+    {
+        endpoint = await startConditionalWriteEndpoint(GCS_DIALECT, [key]);
+
+        await expect(write(providerAt(endpoint.url))).rejects.toMatchObject({ name: 'StorageObjectExistsError', key });
+        expect(endpoint.writes).toEqual([key]);
+    });
+});
+
+// 실제 SDK와 HTTP로 — redirect는 SDK 안(node-fetch)에서 따라가 파일 스텁으로는 보이지 않는다. node-fetch는
+// 303은 언제나, 307은 다시 보낼 수 있는 본문일 때만 따라간다: upload의 multipart 본문은 스트림, rewrite는 JSON 문자열이다.
+describe('GcsStorageProvider create-only writes whose redirected connection fails', () =>
+{
+    const writes = {
+        upload: [303, (provider: GcsStorageProvider) => provider.upload('log/000001.json', '{}', 'application/json', { ifAbsent: true })],
+        copy: [307, (provider: GcsStorageProvider) => provider.copy('staging/a.json', 'log/000001.json', { ifAbsent: true })],
+    } as const;
+    let endpoint: Server | undefined;
+    let previousEmulatorHost: string | undefined;
+
+    beforeEach(() =>
+    {
+        previousEmulatorHost = process.env.STORAGE_EMULATOR_HOST;
+    });
+
+    afterEach(async () =>
+    {
+        restoreEnv('STORAGE_EMULATOR_HOST', previousEmulatorHost);
+        await new Promise(resolve => endpoint?.close(resolve) ?? resolve(undefined));
+    });
+
+    it.each(Object.entries(writes))('%s: a refused connection after a redirect is an unknown outcome', async (_name, [status, write]) =>
+    {
+        const received: string[] = [];
+        endpoint = await startRedirectingEndpoint(status, received);
+
+        await expect(write(providerAt(urlOf(endpoint)))).rejects.toMatchObject({ name: 'StorageWriteOutcomeUnknownError' });
+        expect(received).toHaveLength(1);
     });
 });
 
@@ -455,6 +531,44 @@ async function collect(stream: Readable): Promise<Buffer>
     }
 
     return Buffer.concat(chunks);
+}
+
+/** 단순 업로드는 `name` 쿼리, rewrite는 경로의 대상 key — 둘 다 `ifGenerationMatch=0`일 때만 조건부 쓰기다. */
+const GCS_DIALECT: ConditionalWriteDialect = {
+    targetOf: (_request, url) =>
+        (url.searchParams.get('ifGenerationMatch') === '0'
+            ? url.searchParams.get('name') ?? decodeURIComponent(url.pathname.split('/o/').pop() ?? '')
+            : null),
+    answerTaken: response => response
+        .writeHead(412, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: { code: 412, message: 'At least one of the pre-conditions you specified did not hold.' } })),
+};
+
+/** 받은 요청을 기록하고, 서버에 닿은 뒤 `status` redirect로 닫힌 포트를 가리킨다 — 다음 연결은 `connect`에서 실패한다. */
+async function startRedirectingEndpoint(status: number, received: string[]): Promise<Server>
+{
+    const server = createServer((request, response) =>
+    {
+        received.push(request.url ?? '');
+        request.resume();
+        request.on('end', () => response.writeHead(status, { location: 'http://127.0.0.1:1/after-first-request' }).end());
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+
+    return server;
+}
+
+function urlOf(server: Server): string
+{
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/** 에뮬레이터 호스트를 쓰면 SDK가 인증 없이 그 주소로 보낸다. */
+function providerAt(endpoint: string): GcsStorageProvider
+{
+    process.env.STORAGE_EMULATOR_HOST = endpoint;
+
+    return new GcsStorageProvider({ projectId: 'test', publicBucket: 'public-test', privateBucket: 'records' });
 }
 
 function providerWithGetFiles(getFiles: ReturnType<typeof vi.fn>): GcsStorageProvider

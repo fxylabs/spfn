@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import {
     CopyObjectCommand,
@@ -9,7 +10,11 @@ import {
 } from '@aws-sdk/client-s3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { S3StorageProvider } from '../server/s3.provider';
-import { StorageObjectNotFoundError, StorageVersionNotFoundError } from '../shared/index';
+import { StorageObjectNotFoundError, StorageVersionNotFoundError, StorageWriteOutcomeUnknownError } from '../shared/index';
+import { startConditionalWriteEndpoint } from './conditional-write-endpoint';
+import type { ConditionalWriteDialect, ConditionalWriteEndpoint } from './conditional-write-endpoint';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 describe('S3StorageProvider deletion', () =>
 {
@@ -166,6 +171,86 @@ describe('S3StorageProvider server-side copy', () =>
         const provider = new S3StorageProvider({ bucket: 'assets' });
 
         await expect(provider.copy('gen/a.png', 'confirmed/a.png')).rejects.not.toBeInstanceOf(StorageObjectNotFoundError);
+    });
+});
+
+// 실제 SDK와 HTTP로 — 재시도 여부와 412 해석은 SDK 설정과 응답 파싱에 달려 있어 send를 가로채면 보이지 않는다.
+describe('S3StorageProvider create-only writes against an endpoint that loses the first response', () =>
+{
+    const key = 'log/000001.json';
+    const writes = {
+        upload: (provider: S3StorageProvider) => provider.upload(key, '{}', 'application/json', { ifAbsent: true }),
+        copy: (provider: S3StorageProvider) => provider.copy('staging/a.json', key, { ifAbsent: true }),
+    };
+    let endpoint: ConditionalWriteEndpoint | undefined;
+
+    afterEach(async () =>
+    {
+        await endpoint?.close();
+    });
+
+    it.each(Object.entries(writes))('%s: sends the write once and reports the outcome as unknown', async (_name, write) =>
+    {
+        endpoint = await startConditionalWriteEndpoint(S3_DIALECT);
+
+        await expect(write(providerAt(endpoint.url))).rejects.toMatchObject({ name: 'StorageWriteOutcomeUnknownError', key });
+        expect(endpoint.writes).toEqual([key]);
+    });
+
+    it.each(Object.entries(writes))('%s: rejects a key taken before the request with the exists error', async (_name, write) =>
+    {
+        endpoint = await startConditionalWriteEndpoint(S3_DIALECT, [key]);
+
+        await expect(write(providerAt(endpoint.url))).rejects.toMatchObject({ name: 'StorageObjectExistsError', key });
+        expect(endpoint.writes).toEqual([key]);
+    });
+});
+
+// 보내지 않은 쓰기는 결과가 확정이다 — "모름"으로 보고하면 설정 오류가 재확인할 일처럼 보인다.
+describe('S3StorageProvider create-only writes that never left', () =>
+{
+    const writes = {
+        upload: (provider: S3StorageProvider) => provider.upload('log/000001.json', '{}', 'application/json', { ifAbsent: true }),
+        copy: (provider: S3StorageProvider) => provider.copy('staging/a.json', 'log/000001.json', { ifAbsent: true }),
+    };
+
+    it.each(Object.entries(writes))('%s: a refused connection rejects with the connection error', async (_name, write) =>
+    {
+        await expect(write(providerAt('http://127.0.0.1:1'))).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+    });
+
+    it.each(Object.entries(writes))('%s: a failure before the transport rejects with that error', async (_name, write) =>
+    {
+        const provider = new S3StorageProvider({ bucket: 'records', region: 'not a region!', accessKeyId: 'test', secretAccessKey: 'test' });
+
+        await expect(write(provider)).rejects.toThrow(/Region not accepted/);
+    });
+});
+
+// 실제 SDK와 HTTP로 — 요청이 전송 계층까지 갔는지가 판정에 들어가 send를 가로채면 보이지 않는다.
+describe('S3StorageProvider create-only failures that are not a 412', () =>
+{
+    let endpoint: Server | undefined;
+
+    afterEach(async () =>
+    {
+        await new Promise(resolve => endpoint?.close(resolve) ?? resolve(undefined));
+    });
+
+    it.each([409, 500])('reports a %i as an unknown outcome, not as a refusal', async (status) =>
+    {
+        endpoint = await startStatusEndpoint(status);
+
+        await expect(providerAt(urlOf(endpoint)).upload('log/000001.json', '{}', 'application/json', { ifAbsent: true }))
+            .rejects.toBeInstanceOf(StorageWriteOutcomeUnknownError);
+    });
+
+    it('keeps a missing copy source a not-found error — the store refused, nothing was written', async () =>
+    {
+        endpoint = await startStatusEndpoint(404);
+
+        await expect(providerAt(urlOf(endpoint)).copy('staging/a.json', 'log/000001.json', { ifAbsent: true }))
+            .rejects.toBeInstanceOf(StorageObjectNotFoundError);
     });
 });
 
@@ -423,6 +508,43 @@ describe('S3StorageProvider list metadata', () =>
         expect(object).toEqual({ key: 'gen/req-1/a.png', size: 3, etag: 'abc' });
     });
 });
+
+/** path-style(`/<bucket>/<key>`) PUT에 `If-None-Match: *`가 있을 때만 조건부 쓰기다 — PutObject·CopyObject 공통. */
+const S3_DIALECT: ConditionalWriteDialect = {
+    targetOf: (request, url) =>
+        (request.method === 'PUT' && request.headers['if-none-match'] === '*'
+            ? decodeURIComponent(url.pathname.replace(/^\/records\//, ''))
+            : null),
+    answerTaken: response => response
+        .writeHead(412, { 'content-type': 'application/xml' })
+        .end('<?xml version="1.0" encoding="UTF-8"?><Error><Code>PreconditionFailed</Code>'
+            + '<Message>At least one of the pre-conditions you specified did not hold</Message></Error>'),
+};
+
+/** 모든 요청에 `status`와 빈 S3 오류 본문으로 답하는 엔드포인트. */
+async function startStatusEndpoint(status: number): Promise<Server>
+{
+    const server = createServer((request, response) =>
+    {
+        request.resume();
+        request.on('end', () => response
+            .writeHead(status, { 'content-type': 'application/xml' })
+            .end(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>Status${status}</Code><Message>status</Message></Error>`));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+
+    return server;
+}
+
+function urlOf(server: Server): string
+{
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+function providerAt(endpoint: string): S3StorageProvider
+{
+    return new S3StorageProvider({ bucket: 'records', endpoint, accessKeyId: 'test', secretAccessKey: 'test' });
+}
 
 function namedError(name: string): Error
 {

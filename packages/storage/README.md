@@ -59,6 +59,54 @@ section below:
 Local filesystem storage does not support presigned upload at all — `getUploadUrl`
 throws — so a dev setup on `local` needs the direct upload path instead.
 
+## The default service and other buckets
+
+`getStorageService()` returns **the default service**: one per process, created by the first
+call with that call's options. Later calls without options, or with options that configure the
+same service, return it. A later call whose options configure a *different* service rejects
+instead of quietly handing back the first one; the default service never reconfigures.
+
+"The same service" is judged on the effective configuration, not on how the options are spelled:
+each field after its environment fallback and default (`S3_*`, `GCS_*`, `LOCAL_STORAGE_*`), for
+the provider that is selected only. A missing field and one set to `undefined`, a relative and an
+absolute `local.dir`, an environment value left out or spelled out, and options for a provider the
+service does not use all count as the same. Every option is a string, so the comparison is by
+value. The environment is read at each call, so a variable changed between two calls with options
+can make the second one differ.
+
+The exact rule: each field of the selected provider is compared as a string after these steps and
+no others — the provider selected (`provider`, else `STORAGE_PROVIDER`, else `s3` in production and
+`local` otherwise) with every value other than `local` and `gcs` read as `s3` (`'S3'`, `''` and
+`'r2'` all select `s3`), the environment fallback and default, `local.dir` made absolute, trailing `/` trimmed
+from `local.baseUrl` and `s3.publicBaseUrl`, an empty `s3.endpoint` or `gcs.projectId` read as
+absent, and `gcs.credentialsJsonBase64` decoded to JSON (so whitespace and key order do not
+count). Nothing the SDK would derive later is derived here, so two spellings the SDK resolves
+alike can still compare unequal and reject: a `gcs.projectId` left out (the SDK takes it from the
+credentials' `project_id`, the environment or the metadata server, asynchronously) against one
+written out, or an `s3.endpoint` with and without a trailing `/`. Write such a field the same way
+at every call that passes options. The rejection is loud, never a silently different service.
+
+For a second bucket — a record kept apart from users' files, with its own retention,
+permissions or provider — create an independent service:
+
+```ts
+import { createStorageService, getStorageService } from '@spfn/storage/server';
+
+const files = await getStorageService();
+const records = await createStorageService({
+    provider: 'gcs',
+    gcs: { privateBucket: 'acme-records', publicBucket: 'acme-records' },
+});
+```
+
+`createStorageService(options)` takes the same options as `getStorageService`, returns a new
+service with the same surface on every call, and shares no client, bucket or root with any other
+service. **A provider field you leave out falls back to the same environment variable the default
+service reads** (`S3_BUCKET`, `GCS_PRIVATE_BUCKET`, `LOCAL_STORAGE_DIR`, …), so name the bucket
+explicitly or the second service writes to the first one's bucket. Keys starting with `public/`
+still go to `publicBucket` on GCS. Use this factory rather than constructing a provider class
+from `@spfn/storage/server/*.provider` — it is the supported way to get a service.
+
 ## Server-side object operations
 
 Generation and staging pipelines need to move objects around without pulling bytes
@@ -191,9 +239,123 @@ The error carries the offending `key` and sets `code = 'ENOENT'`, so Node-style
 `delete` is the deliberate exception: it stays idempotent and treats a missing key as
 success. A failed `copy` does not create the destination.
 
+A create-only write onto a taken key rejects with `StorageObjectExistsError`, and one whose
+outcome is unknown with `StorageWriteOutcomeUnknownError` — see
+[Create-only writes](#create-only-writes).
+
 `StorageVersionNotFoundError` is a **separate** error and does not extend
 `StorageObjectNotFoundError`: the object is there, only the requested version is not,
 so a 404 handler should not swallow it.
+
+## Create-only writes
+
+`upload` and `copy` replace whatever is at the target key. With `ifAbsent: true` they create
+the object only when the key is empty. The request is sent **once** — never retried — and a
+failed call ends in one of two errors:
+
+- **`StorageObjectExistsError`** — the store answered that single request with "already exists":
+  the key was taken before the request arrived, by someone else, and nothing was written.
+- **`StorageWriteOutcomeUnknownError`** — the provider cannot tell whether the write landed: the
+  request may have gone out and the response was lost (connection dropped, timeout), or the store
+  answered with a 5xx or S3's `409 ConditionalRequestConflict`. The object may be yours. Read the
+  key to settle it; the original error is the `cause`.
+
+Any other error is definite — nothing was written — and surfaces as it does without `ifAbsent`:
+the store refusing the request (a 403, a missing copy source, …), or a request that never left.
+A request is known not to have left only as far as the SDK says so:
+
+| Provider | Known not sent (the SDK's error is raised) | Not known, so reported as unknown |
+|---|---|---|
+| S3-compatible | a failure before the SDK hands the request to its HTTP handler (region, bucket name, credentials, signing); a failed DNS lookup or TCP connect (`syscall` `getaddrinfo` / `connect`, e.g. `ECONNREFUSED`) | a TLS handshake failure; the SDK's own connection timeout |
+| GCS | nothing — every create-only failure without a response from the store is reported as unknown | a failed DNS lookup or TCP connect too: the SDK's HTTP client (node-fetch) follows redirects itself and reports only the last connection's error, so a `connect` failure after the first request reached a server looks the same as one that never left; a local credential or signing failure — the SDK does not say whether the request left, and on `upload` it even replaces the cause with "Cannot call write after a stream was destroyed"; a TLS handshake failure |
+
+An unknown outcome from a configuration error is safe — reading the key settles it — but a
+service that cannot sign reports every create-only write that way; check the `cause`.
+
+```ts
+import { StorageObjectExistsError, StorageWriteOutcomeUnknownError } from '@spfn/storage/server';
+
+try
+{
+    await records.upload(`log/${next}.json`, body, 'application/json', { ifAbsent: true });
+}
+catch (error)
+{
+    if (error instanceof StorageObjectExistsError)
+    {
+        return claimNextKey();   // another writer took this key first
+    }
+    if (error instanceof StorageWriteOutcomeUnknownError)
+    {
+        return settleByReading(`log/${next}.json`);   // the write may have landed
+    }
+    throw error;
+}
+```
+
+How to settle an unknown outcome is the application's call: the bytes alone do not say who wrote
+them (two writers can send equal bytes), so put something in the object that names the writer —
+a claim id — and compare that.
+
+The check and the write are one request — each backend's atomic conditional write, never
+"check, then write" — so two writers racing for one key never both succeed (on an S3-compatible
+store, only if it honours the header — below), and the stored bytes are those of the one write
+that landed. This is what lets an application claim keys in order, in a bucket whose objects
+cannot be replaced (GCS retention policy, S3 Object Lock).
+
+| Provider | `upload(…, { ifAbsent: true })` | `copy(from, to, { ifAbsent: true })` |
+|---|---|---|
+| S3-compatible | `If-None-Match: *` on `PutObject` | `If-None-Match: *` on `CopyObject` |
+| GCS | `ifGenerationMatch: 0` on the upload | `ifGenerationMatch: 0` on the rewrite destination |
+| Local | write a temporary file, then `link` it to the key | copy to a temporary file, then `link` it to the key |
+
+`StorageObjectExistsError` carries the target `key` (the **destination** for `copy`) and sets
+`code = 'EEXIST'`. It is the counterpart of `StorageObjectNotFoundError` and does not extend it.
+`StorageWriteOutcomeUnknownError` carries the same `key` and the SDK's error as `cause`; the local
+provider never raises it (the filesystem answers every exclusive create).
+
+Things to know:
+
+- **The S3-compatible store has to honour the header — the provider cannot check that it did.**
+  AWS S3 documents `If-None-Match: *` on `PutObject` and `CopyObject`, and SeaweedFS 4.54 was
+  measured answering `412 Precondition Failed` on both. On a store that ignores the header, a
+  create-only write **replaces** the object at the key and resolves as if it had created it: the
+  response looks the same, so neither the provider nor the caller learns that the key was taken,
+  and two writers can both "win". Telling the cases apart would take a second request on every
+  write, which the provider does not make. Verify your store before relying on `ifAbsent`. R2,
+  Wasabi and the GCS interoperability endpoint have not been tested here; use the native GCS
+  provider on GCS. Uploads are a single `PutObject`, never multipart.
+- **GCS behind a redirect: the outcome is not guaranteed to be known.** The SDK's HTTP client
+  follows a redirect itself and the provider sees only the last request's result: when the
+  redirected request fails without a response, the write rejects with
+  `StorageWriteOutcomeUnknownError` — read the key before retrying. A status from the redirect
+  target is read as if the first request had answered it: a 412 rejects with
+  `StorageObjectExistsError`, and a `copy` redirected with a 303 can resolve although the redirect
+  turned its `POST` into a `GET`.
+- **Why no retry.** A conditional write is not safe to resend: if the first attempt landed and
+  only its response was lost, the resend is refused because the key is taken — by that first
+  attempt. The SDKs retry on their own, so the providers send create-only writes through a client
+  with retries off (S3 `maxAttempts: 1`, GCS `retryOptions.autoRetry: false`). Plain writes keep
+  the SDKs' retries.
+- **Local:** the bytes go to a temporary file first, and `link` publishes it under the key —
+  `link` fails if the key exists, so the check and the publish are one step, and a reader only
+  ever sees complete bytes. A write that fails midway (disk full, file size limit) leaves nothing
+  at the key, and the next create-only write can take it. Temporary files live in one directory
+  at the storage root, `LOCAL_STORAGE_DIR/\partial`: its name has a backslash, which no key or
+  prefix may contain, so `list`, `deletePrefix`, `snapshotPrefix` and every read never reach it —
+  a write in progress is not visible, and nothing can delete its file under it. A temporary file
+  is removed on success and on failure; one a killed process leaves behind stays in `\partial`,
+  invisible, until you delete it. This holds on POSIX filesystems; on Windows the backslash is a
+  separator. The filesystem needs hard links (ext4, APFS, tmpfs and the like): on one without
+  them (FAT, exFAT) `link` fails, and the create-only write rejects with that error and writes
+  nothing — it does not fall back to a write that can be seen half-done. A directory under the
+  storage root that is a mount point of another filesystem fails the same way (`EXDEV`).
+  A directory at the key (`a/b` while `a/b/c` exists) is not an object and fails with the
+  filesystem error, not `StorageObjectExistsError`.
+- **Presigned uploads and `finalizeObject` have no create-only form.** A presigned PUT replaces
+  the key when the browser sends it (S3), and on GCS `finalizeObject` moves `tmp/<key>` over the
+  final key. Making those create-only means signing the condition into the URL — a different
+  change from this one.
 
 ## Presigned upload size limits
 

@@ -15,8 +15,10 @@ const failures = [];
 const errorNames = [
     'StorageKeyError',
     'StorageManifestInvalidError',
+    'StorageObjectExistsError',
     'StorageObjectNotFoundError',
     'StorageVersionNotFoundError',
+    'StorageWriteOutcomeUnknownError',
 ];
 
 for (const name of errorNames)
