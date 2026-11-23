@@ -21,7 +21,7 @@ import { createRpcProxy } from '../rpc';
 import type { InterceptorRule } from '../interceptors/types';
 import { createProxyGuard } from '../../../middleware/proxy-guard';
 import { getClientIp } from '../../../middleware/client-ip';
-import { parseProxyKey } from '../../../security/proxy-signature';
+import { parseProxyKey, PROXY_CLIENT_IP_HEADER } from '../../../security/proxy-signature';
 import { FORWARDED_CLIENT_HEADER, signForwardedClient } from '../../../security/forwarded-client';
 
 const SECRET = 'k1:proxy-secret-for-the-client-address-rows';
@@ -29,6 +29,8 @@ const APP = 'http://app.test';
 const BACKEND = 'http://backend.test';
 const BROWSER = '203.0.113.7';
 const NEXT_SERVER = '198.51.100.9';
+/** An address a browser that reaches the app directly writes into `X-Forwarded-For` itself. */
+const CHOSEN = '203.0.113.9';
 
 /**
  * The browser request a server-side call is made for, as `next/headers` answers it:
@@ -66,7 +68,8 @@ function backend(): Hono
 
 /**
  * The app's proxy in front of `backend()`, and the network between them: a request
- * to the backend origin reaches the backend, anything else the proxy.
+ * to the backend origin reaches the backend over a connection from the Next.js
+ * server, anything else the proxy.
  */
 function network(interceptors: InterceptorRule[] = [])
 {
@@ -82,6 +85,7 @@ function network(interceptors: InterceptorRule[] = [])
     });
     const app = backend();
     const sent: Headers[] = [];
+    const received: Headers[] = [];
 
     async function routed(input: string | URL | Request, init?: RequestInit): Promise<Response>
     {
@@ -90,7 +94,10 @@ function network(interceptors: InterceptorRule[] = [])
 
         if (url.origin === BACKEND)
         {
-            return await app.request(`${url.pathname}${url.search}`, { method: request.method, headers: request.headers });
+            received.push(request.headers);
+            const connection = { incoming: { socket: { remoteAddress: NEXT_SERVER } } };
+
+            return await app.request(`${url.pathname}${url.search}`, { method: request.method, headers: request.headers }, connection);
         }
 
         sent.push(request.headers);
@@ -104,6 +111,8 @@ function network(interceptors: InterceptorRule[] = [])
     return {
         /** What the app's proxy received, in order. */
         sent,
+        /** What the backend received from the proxy, in order. */
+        received,
         /** A server component's client. */
         api: createApi<any>({ fetch: routed as typeof fetch }) as any,
         /** The browser calling the proxy itself. */
@@ -290,5 +299,55 @@ describe('the browser\'s address across a server-side call', () =>
             .toEqual({ ip: '192.0.2.66' });
         expect(await browser('whoami', { 'x-forwarded-for': NEXT_SERVER, [FORWARDED_CLIENT_HEADER]: made }, 'POST'))
             .toEqual({ ip: NEXT_SERVER });
+    });
+
+    it('C14: with nothing in front (TRUSTED_PROXY_HOPS=0), the proxy forwards no address out of a browser-written X-Forwarded-For', async () =>
+    {
+        configure({ hops: '0' });
+        const { browser, received } = network();
+
+        await browser('whoami', { 'x-forwarded-for': CHOSEN });
+
+        expect(received).toHaveLength(1);
+        expect(received[0].get(PROXY_CLIENT_IP_HEADER)).toBeNull();
+    });
+
+    it('C15: with TRUSTED_PROXY_HOPS=0, a server-side call asserts no address', async () =>
+    {
+        configure({ hops: '0' });
+        browserRequest(CHOSEN);
+        const { api, sent } = network();
+
+        await api.whoami.call({});
+
+        expect(sent).toHaveLength(1);
+        expect(sent[0].get(FORWARDED_CLIENT_HEADER)).toBeNull();
+    });
+
+    it('C16: a signed request with no address is served, and getClientIp answers the backend\'s own rule: the Next.js server, never the browser\'s X-Forwarded-For', async () =>
+    {
+        configure({ hops: '0' });
+        const { browser } = network();
+
+        for (const serverHops of ['0', '1'])
+        {
+            vi.stubEnv('SERVER_TRUSTED_PROXY_HOPS', serverHops);
+
+            expect(await browser('whoami', { 'x-forwarded-for': CHOSEN })).toEqual({ ip: NEXT_SERVER });
+        }
+    });
+
+    it('C17: a TRUSTED_PROXY_HOPS that is not a whole number of 0 or more is refused, not read as 1', async () =>
+    {
+        for (const hops of ['-1', '1.5', 'one'])
+        {
+            configure({ hops });
+            browserRequest(BROWSER);
+            const { api, browser, received } = network();
+
+            expect(await browser('whoami', { 'x-forwarded-for': CHOSEN })).not.toHaveProperty('ip');
+            await expect(api.whoami.call({})).rejects.toThrow('Environment validation failed');
+            expect(received).toHaveLength(0);
+        }
     });
 });

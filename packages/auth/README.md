@@ -1709,6 +1709,10 @@ with `SPFN_PROXY_SECRET` set on both sides), or — when your Next.js server's r
 backend carries an `X-Forwarded-For` naming the client, which the spfn proxy does not send —
 declare the hops (`SERVER_TRUSTED_PROXY_HOPS`). This release does not change the default. See
 *Client address* in the `@spfn/core/middleware` README.
+With proxy-guard on, an app that sets `TRUSTED_PROXY_HOPS=0` (nothing in front of the Next.js
+app) still reaches the backend from the Next.js server's address, so one visitor can use up every
+limit above for everyone — see
+[Header forwarding & client IP](../core/src/nextjs/README.md#header-forwarding--client-ip).
 
 ### Migration — a request token lives at most 15 minutes, and an expired one says so
 

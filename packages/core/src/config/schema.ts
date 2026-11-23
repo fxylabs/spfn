@@ -478,10 +478,11 @@ export const coreEnvSchema = defineEnvSchema({
     }),
 
     TRUSTED_PROXY_HOPS: envNumber({
-        description: 'Number of trusted reverse proxies in front of the Next.js proxy (e.g. cloud LB + nginx = 2). Read by the proxy (and by a server-side createApi call, with the same rule) to extract the real client IP from the inbound X-Forwarded-For (counting from the right, which your own infra appends and a client cannot spoof) and forward it to the backend for rate limiting. Set it to your actual hop count; too low trusts a client-spoofable entry, too high collapses users behind a shared proxy IP.',
+        description: 'Number of trusted reverse proxies in front of the Next.js proxy (e.g. cloud LB + nginx = 2). Read by the proxy (and by a server-side createApi call, with the same rule) to extract the real client IP from the inbound X-Forwarded-For (counting from the right, which your own infra appends and a client cannot spoof) and forward it to the backend for rate limiting. Set it to your actual hop count; too low trusts a client-spoofable entry, too high collapses users behind a shared proxy IP. With nothing in front of the Next.js app, set 0: Next.js keeps an X-Forwarded-For the browser sent, so no entry is trusted — the proxy forwards no client address, a server-side call asserts none, and the backend\'s getClientIp answers by its own rule (the TCP peer, or SERVER_TRUSTED_PROXY_HOPS): the Next.js server\'s address. Anything but a whole number of 0 or more is refused where it is read: the proxy answers 500 and a server-side call throws, and the backend\'s boot check refuses to start.',
         default: 1,
+        validator: createNumberParser({ min: 0, integer: true }),
         nextjs: true,
-        examples: [1, 2, 3],
+        examples: [0, 1, 2],
     }),
 
     SERVER_TRUSTED_PROXY_HOPS: envNumber({

@@ -6,6 +6,7 @@
  * call, which asserts the browser's address to that proxy — and the backend's own
  * `getClientIp`, when the operator declared the proxies in front of it.
  */
+import { env } from '@spfn/core/config';
 
 /**
  * Resolve the real client IP from a forwarded chain.
@@ -18,7 +19,8 @@
  *
  * A chain shorter than the declared hops did not come through the declared
  * proxies — its entries are the caller's own — so it names no client, and the
- * caller falls back to the connection peer.
+ * caller falls back to the connection peer. With 0 hops nothing appended to the
+ * chain is trusted, so every entry is the caller's own and none is a client.
  *
  * @param xff - raw X-Forwarded-For header value
  * @param trustedHops - number of trusted proxies in front (e.g. LB + nginx = 2)
@@ -30,20 +32,21 @@ export function clientIpFromForwardedChain(
 {
     const parts = (xff ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
-    return parts[parts.length - Math.max(1, trustedHops)];
+    return trustedHops > 0 ? parts[parts.length - trustedHops] : undefined;
 }
 
 /**
  * The browser's address as the Next.js app resolves it from an inbound
  * `X-Forwarded-For`: `TRUSTED_PROXY_HOPS` (default 1) entries from the right.
+ * With 0 — nothing in front of the app — none: Next.js writes the header only
+ * when the request carries none, so its entries are the browser's own words.
  *
  * The one rule for both the RPC proxy and a server-side `createApi` call, so the
  * address a call asserts is the one the proxy would have read off the browser's
- * own request.
+ * own request. A value that is not a whole number of 0 or more is refused by the
+ * env schema's validator, at this read.
  */
 export function appClientIp(xff: string | null | undefined): string | undefined
 {
-    const hops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '', 10);
-
-    return clientIpFromForwardedChain(xff, Number.isFinite(hops) && hops > 0 ? hops : 1);
+    return clientIpFromForwardedChain(xff, env.TRUSTED_PROXY_HOPS);
 }

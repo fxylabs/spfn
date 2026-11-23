@@ -238,6 +238,7 @@ SPFN_API_URL="https://api.yourdomain.com"
 # Set the SAME value on the Next.js app and the API backend.
 SPFN_PROXY_SECRET=your-shared-proxy-secret
 # Number of trusted proxies in front (LB + nginx = 2). Default 1.
+# Nothing in front of the Next.js app: 0 (see "Client IP behind a proxy" below).
 TRUSTED_PROXY_HOPS=1
 
 # API backend — trusted proxies directly in front of the SPFN server. Default 0
@@ -642,6 +643,17 @@ To make verified client IPs work in production, set two environment variables:
 - **`TRUSTED_PROXY_HOPS`** — how many trusted proxies sit in front of the app (e.g. load
   balancer + nginx = `2`; default `1`). This tells the proxy how many rightmost
   `X-Forwarded-For` entries are your own infra so it picks the correct client entry.
+  **A deployment with nothing in front of the Next.js app must set `0`:** Next.js keeps an
+  `X-Forwarded-For` the browser sent, so under the default `1` the proxy would sign the
+  address the visitor chose. With `0` the proxy forwards no client address and a server-side
+  call asserts none; the backend's `getClientIp` falls back to its own rule and answers the
+  Next.js server's address for every visitor — every per-address limit (`@spfn/auth`'s sign-in
+  limits included) is then shared by all visitors, so one visitor can use it up for everyone.
+  Next.js gives a route handler no API for the connection's address, so to attest visitor
+  addresses, and get per-visitor limits, put a proxy that appends in front and count it.
+  Anything but a whole number of 0 or more is refused, not read as `1`; the value is not
+  cached, so every request that reads it is refused (the proxy answers 500) and logged until
+  the value is corrected.
 - **`SERVER_TRUSTED_PROXY_HOPS`** — the same count for the API backend's own front (or
   `defineServerConfig().trustedProxyHops(n)`). **Default `0` (BREAKING):** the backend reads
   no forwarding header and counts the TCP peer, so a backend behind a load balancer that

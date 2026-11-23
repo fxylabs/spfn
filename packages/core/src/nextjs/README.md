@@ -369,6 +369,22 @@ the rightmost `TRUSTED_PROXY_HOPS` (default `1`) entries as your own trusted inf
 re-emits that single address under a dedicated header, `x-spfn-proxy-client-ip`. This avoids
 passing a client-controllable header straight through to the backend.
 
+**Nothing in front of the app: set `TRUSTED_PROXY_HOPS=0`.** Next.js writes `X-Forwarded-For`
+(the connection's address) only when the request carries none, so a browser that reaches the
+app directly decides every entry of it. With `0` no entry is trusted: the proxy forwards no
+client address — the request is still signed, over an empty address — and a server-side call
+asserts none. The backend's `getClientIp` then answers by its own rule (the TCP peer, or
+`SERVER_TRUSTED_PROXY_HOPS`): the Next.js server's address, for every visitor. Every per-address
+limit (`@spfn/auth`'s sign-in limits included, keyed on `getClientIp`) is then shared by all
+visitors, so one visitor can use it up for everyone; a deployment that needs per-visitor limits
+puts a proxy in front and declares it. Next.js offers a route handler no API for the connection's
+own address, so with nothing in front the visitor's address cannot be attested; put a proxy that
+appends in front, and count it, to get it. Left at the default `1` there, the proxy signs
+whatever the browser wrote. A value that is not a whole number of 0 or more is refused, not read
+as `1`. It is not cached: every request that reads it is refused — the proxy answers 500, a
+server-side call throws — and logs `TRUSTED_PROXY_HOPS validation failed`, until the value is
+corrected.
+
 The backend only **believes** that address when the proxy signed it. Set the same
 **`SPFN_PROXY_SECRET`** on the proxy (or `proxySecret` in config) and on the backend: the proxy
 then HMAC-signs each forwarded request — the address included (signature version 2,

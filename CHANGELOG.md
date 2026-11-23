@@ -328,6 +328,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (deployment, security-relevant): @spfn/core: `TRUSTED_PROXY_HOPS=0` declares that
+  nothing stands in front of the Next.js app, and an invalid value is refused (#451).** Every value
+  that was not a positive integer was read as `1`, and the forwarded-chain reader clamped to at
+  least one hop, so an app with nothing in front could not say so. Next.js writes `X-Forwarded-For`
+  only when the request carries none, so the proxy signed, and a server-side `createApi` call
+  asserted, the last entry of a header the browser wrote, and the backend's `getClientIp` answered
+  the address the visitor chose. Now:
+  - `0` trusts no entry: the proxy signs its request with no client address and a server-side call
+    asserts none. Proxy-guard verifies such a request as any other, sets no `proxyClientIp`, and
+    `getClientIp` answers by the backend's own rule — the TCP peer, or `SERVER_TRUSTED_PROXY_HOPS`
+    — that is, the Next.js server's address. Next.js 16 gives a route handler no API for the
+    connection's address, so with nothing in front the visitor's address is not attested. Every
+    per-address limit (`@spfn/auth`'s sign-in limits included, keyed on `getClientIp`) is then
+    shared by all visitors, so one visitor can use it up for everyone; a deployment that needs
+    per-visitor limits puts a proxy in front and declares it. **A deployment with nothing in front
+    of the Next.js app must set `TRUSTED_PROXY_HOPS=0`**; the default stays `1`.
+  - **An app that already set `TRUSTED_PROXY_HOPS=0`** was read as `1` until now; on upgrade it
+    stops attesting visitor addresses. If a proxy is in front, set its real count.
+  - Anything but a whole number of 0 or more (`-1`, `1.5`, `one`) is refused by the env schema's
+    validator, as `SERVER_TRUSTED_PROXY_HOPS` is. The value is not cached: in the Next.js app every
+    request that reads it is refused — the proxy answers 500, a server-side call throws — and logs
+    `TRUSTED_PROXY_HOPS validation failed`, until the value is corrected. The backend's boot check,
+    which reads core's whole schema, refuses to start.
+  - `clientIpFromForwardedChain(xff, 0)` names no client (it named the rightmost entry). The
+    backend's `getClientIp` never passes it `0`, so its answers do not change.
 - **BREAKING (two-role databases): spfn, @spfn/core: the app role holds `USAGE` on each managed
   schema and nothing else — `spfn db grant`, and the privileges step of `db push`, `db migrate` and
   `spfn add`, revoke the rest; `db status` reports it (#435).** On 0.4.0-beta.2 the step compared

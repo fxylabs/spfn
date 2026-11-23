@@ -570,7 +570,13 @@ export default defineServerConfig()
 appends `X-Forwarded-For` sets `SERVER_TRUSTED_PROXY_HOPS` to that count. Without it every
 request counts as the balancer's address, so one per-IP limit is shared by all visitors.
 `TRUSTED_PROXY_HOPS` is a different setting: it is read by the Next.js proxy for the hops in
-front of *it*, and requests that proxy signs do not depend on the backend's declaration.
+front of *it*, and requests that proxy signs do not depend on the backend's declaration. With
+nothing in front of the Next.js app it is `0`, and the proxy signs its requests with no client
+address: proxy-guard verifies them as any other, sets no `proxyClientIp`, and `getClientIp`
+answers by the rule above — the Next.js server's address, never the request's own
+`X-Forwarded-For` (the proxy forwards none). Every per-address limit is then shared by all
+visitors, so one visitor can use it up for everyone; a deployment that needs per-visitor limits
+puts a proxy in front of the Next.js app and declares it.
 
 **Browser traffic through the Next.js proxy.** A request the proxy signed carries its client's
 address separately (`x-spfn-proxy-client-ip`), but the backend reads it only when proxy-guard
