@@ -56,7 +56,7 @@ const CAUSE = new Error('driver said no');
 const fixtures: Fixtures = {
     HttpError: { message: 'teapot', statusCode: 418, details: { k: 'v' } },
     BadRequestError: { message: 'bad', details: { k: 'v' } },
-    ValidationError: { message: 'invalid', fields: [{ path: '/a', message: 'required', value: 1 }], details: { k: 'v' } },
+    ValidationError: { message: 'invalid', fields: [{ path: '/a', message: 'required' }], details: { k: 'v' } },
     UnauthorizedError: { message: 'who', details: { k: 'v' } },
     ForbiddenError: { message: 'no', details: { k: 'v' } },
     NotFoundError: { message: 'gone', resource: 'User', details: { k: 'v' } },

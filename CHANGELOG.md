@@ -507,6 +507,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (clients reading `fields[].value`; security-relevant): @spfn/core: the framework's
+  validation errors name the field and the rule, and no longer the value (#467).** Every TypeBox
+  failure in path parameters, query, headers, cookies, body or form data answered with the submitted
+  value in `fields[].value`, and the request logger copies a 4xx response body into its `Request
+  completed` line: a password that failed its length rule (`/_auth/register`, `PUT /_auth/password`,
+  `/_auth/password/reset/complete`, `/_auth/invitations/accept`), a reset token over 256 characters,
+  a malformed token in a header or cookie were written into the response, the logged response body
+  of that line, `onError` hooks and the API client's restored error. A field error is now `{ path,
+  message }` only: every write of `ValidationError.fields` — its constructor, a subclass's
+  `Object.assign(this, data)`, a later assignment — keeps each field's `path` and `message` and
+  nothing else (the array and its entries are frozen — a `push`, a sort in place or an assignment to
+  an entry throws a `TypeError`; copy first — typed `readonly ValidationFieldError[]`, and `toJSON()`
+  sends that). `fields` is an own, enumerable property of each instance, as on `main`, so
+  `{ ...error }`, `Object.keys(error)` and own-property serialisers (pino's `err`, Sentry extras)
+  carry the reduced list; it cannot be redefined, so a plain-JS subclass's class field `fields = […]`
+  or an `Object.defineProperty(error, 'fields', …)` throws a `TypeError` instead of holding the raw
+  objects past the setter (TypeScript already refuses such a field, TS2610). So no `ValidationError`
+  — the route validator's, one an app throws, or one the API client restores from a body an older
+  server sent — carries a value, TypeBox's `schema` or a union's nested `errors`. A restored body whose `fields` is malformed (not an array, an entry
+  that is not a `{ path, message }` of strings) is still restored as a `ValidationError`, the
+  malformed entries left out, instead of falling back to an `ApiError` carrying the whole body. The
+  public type `ValidationFieldError` (`@spfn/core/errors`) is the field's shape; `fields[].value` is
+  gone from the type, not left optional. Messages that quoted input no longer do: a body that is not
+  JSON answers `Failed to parse JSON` (V8's parser message quotes the body) with no parser text, and
+  the file rules answer `File type is not allowed. Allowed: …`, `File size exceeds maximum …`, `Too
+  many files. Maximum: …` without the file's type, size or count. TypeBox's own messages quote the
+  schema (a limit, `pattern`, `format`, literal), not the input, and still travel. A message the app
+  writes travels as written — an error function set with TypeBox's `SetErrorFunction`, which is
+  handed the value, or the message of a `ValidationError` the app throws, such as its own password
+  rule's: the framework cannot know what that text contains, and whether it carries the value is the
+  app's. A client that read `fields[].value` reads the value it sent. What this changes in the
+  `Request completed` line is its logged *response* body; the same line's logged *request* body of a
+  failed `POST`/`PUT`/`PATCH` is unchanged and masked by field name only, so a value under a name
+  the mask does not list (a verification `code`, an email) is still logged — that is #469.
+  @spfn/auth's proxy key check and the dev-only `JWE decryption failed` warning (which logged the
+  session cookie's first 20 and last 10 characters) carry no input either.
 - **BREAKING (two-role databases with jobs): @spfn/core: `initBoss` lets pg-boss install or migrate
   the queue schema only as a role that owns it — or, with nothing installed, may create it — and
   otherwise refuses to start (#171, PR 3 of 3).** pg-boss's default start (`migrate: true`) created

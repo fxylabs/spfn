@@ -192,7 +192,31 @@ are coerced to their schema type:
 ### Validation errors
 
 Validation throws `ValidationError` (from `@spfn/core/errors`), caught by the global error
-handler → `400` with `{ error: { name, message, statusCode, fields: [{ path, message, value }] } }`.
+handler → `400`:
+
+```json
+{
+    "__type": "ValidationError",
+    "message": "Invalid request body",
+    "fields": [{ "path": "/password", "message": "Expected string length greater or equal to 8" }],
+    "error": { "code": "ValidationError", "message": "Invalid request body", "requestId": "req_…" }
+}
+```
+
+A field error names the field (`path`, a JSON pointer) and the rule it broke (`message`). Anything
+on the error reaches every consumer of it (the response, the request logger's copy of a 4xx body,
+`onError` hooks, the API client's restored error), and the client knows what it sent, so the
+framework puts no submitted value on it: TypeBox's `value`, `schema` and nested union `errors` are
+not copied, TypeBox's default messages quote the schema (a limit, `pattern`, `format` or literal)
+and not the input, and a malformed JSON or form body answers `Failed to parse JSON` / `Failed to
+parse form data` without the parser's message, which quotes the input. A password that fails its
+length rule or a malformed token in a header is echoed into none of them by the framework.
+
+A message the app writes travels as written: an error function set with TypeBox's `SetErrorFunction`
+(it is handed the value) or the message of a `ValidationError` the app throws, such as its own
+password rule's. The framework cannot know what that text contains; whether it carries the value is
+the app's.
+
 Validation runs in this order: **params → query → headers → cookies → body/formData**.
 
 ### Built-in string formats

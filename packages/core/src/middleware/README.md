@@ -318,8 +318,7 @@ Per-request logging middleware. Register with **`app.use()`**.
 - **Slow requests** (`duration >= slowRequestThreshold`) get `slow: true`.
 - **For 4xx/5xx**: clones the response to attach the error `response` body, and for
   `POST`/`PUT`/`PATCH` attaches the masked request body (`request`). Under a declared
-  `redactPaths` prefix it attaches neither: the response is built from the path (a path-parameter
-  validation failure answers `fields: [{ path: '/token', value: '<the segment>' }]`, a
+  `redactPaths` prefix it attaches neither: the response may be built from the path (a
   `NotFoundError` may name the token). The line keeps status, duration and the redacted path.
 - If the downstream throws, logs `Request failed` at `error` level **and re-throws**
   (so `app.onError` / `ErrorHandler` still runs). It does not swallow errors. The error is

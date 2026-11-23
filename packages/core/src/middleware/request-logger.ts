@@ -209,8 +209,8 @@ export function RequestLogger(options?: RequestLoggerOptions)
             }
 
             // Add detailed error information for 4xx/5xx responses. Under a
-            // redacted path prefix the response body is left out: it is built
-            // from the path (a validation failure quotes the segment)
+            // redacted path prefix the response body is left out: it may be
+            // built from the path (a NotFoundError may name the segment)
             if (status >= 400 && !isRedactedPath(c))
             {
                 try

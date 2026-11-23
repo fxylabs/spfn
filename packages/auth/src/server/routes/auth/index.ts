@@ -370,7 +370,7 @@ function proxyDeviceKey(body: Record<string, unknown>): Static<typeof DeviceKeyB
     {
         throw new ValidationError({
             message: 'Invalid request body',
-            fields: errors.map(e => ({ path: e.path, message: e.message, value: e.value })),
+            fields: errors.map(e => ({ path: e.path, message: e.message })),
         });
     }
 

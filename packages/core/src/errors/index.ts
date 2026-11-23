@@ -67,6 +67,7 @@ export {
     InternalServerError,
     ServiceUnavailableError,
 } from './http-errors';
+export type { ValidationFieldError } from './http-errors';
 
 // Error Utilities
 export {

@@ -194,11 +194,10 @@ async function warnUndecryptable(jwt: string): Promise<void>
         return;
     }
 
+    // No part of the cookie: it is the credential the request presented
     authLogger.session.warn(`JWE decryption failed`, {
         secretFingerprint: await getSecretFingerprint(),
         jwtLength: jwt.length,
-        jwtPrefix: jwt.slice(0, 20),
-        jwtSuffix: jwt.slice(-10),
     });
 }
 

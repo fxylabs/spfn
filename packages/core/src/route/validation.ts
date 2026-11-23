@@ -9,6 +9,7 @@ import { FormatRegistry } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import type { Context } from 'hono';
 import { ValidationError } from '@spfn/core/errors';
+import type { ValidationFieldError } from '@spfn/core/errors';
 import { formatFileSize } from './file-schema';
 
 // ============================================
@@ -34,16 +35,6 @@ FormatRegistry.Set('date', (value: string) =>
 FormatRegistry.Set('date-time', (value: string) =>
     !isNaN(Date.parse(value)),
 );
-
-/**
- * Validation error field info
- */
-interface ValidationFieldError
-{
-    path: string;
-    message: string;
-    value: unknown;
-}
 
 /**
  * Check if a value is a File object
@@ -105,8 +96,7 @@ function validateSingleFile(
     {
         errors.push({
             path: fieldPath,
-            message: `File size ${formatFileSize(file.size)} exceeds maximum ${formatFileSize(maxSize)}`,
-            value: file.size,
+            message: `File size exceeds maximum ${formatFileSize(maxSize)}`,
         });
     }
 
@@ -114,8 +104,7 @@ function validateSingleFile(
     {
         errors.push({
             path: fieldPath,
-            message: `File size ${formatFileSize(file.size)} is below minimum ${formatFileSize(minSize)}`,
-            value: file.size,
+            message: `File size is below minimum ${formatFileSize(minSize)}`,
         });
     }
 
@@ -123,8 +112,7 @@ function validateSingleFile(
     {
         errors.push({
             path: fieldPath,
-            message: `File type "${file.type}" is not allowed. Allowed: ${allowedTypes.join(', ')}`,
-            value: file.type,
+            message: `File type is not allowed. Allowed: ${allowedTypes.join(', ')}`,
         });
     }
 }
@@ -175,11 +163,8 @@ export function validateField<T extends Record<string, unknown>>(
     {
         throw new ValidationError({
             message: invalidInputMessage(fieldName),
-            fields: errors.map((e): ValidationFieldError => ({
-                path: e.path,
-                message: e.message,
-                value: e.value,
-            })),
+            // TypeBox's errors carry the submitted value; the error keeps path and message only
+            fields: errors,
         });
     }
 
@@ -253,8 +238,7 @@ export function validateFormData<T extends Record<string, unknown>>(
             {
                 fileErrors.push({
                     path: `/${key}`,
-                    message: `Too many files. Maximum: ${fileOptions.maxFiles}, received: ${fileArray.length}`,
-                    value: fileArray.length,
+                    message: `Too many files. Maximum: ${fileOptions.maxFiles}`,
                 });
             }
 
@@ -262,8 +246,7 @@ export function validateFormData<T extends Record<string, unknown>>(
             {
                 fileErrors.push({
                     path: `/${key}`,
-                    message: `Too few files. Minimum: ${fileOptions.minFiles}, received: ${fileArray.length}`,
-                    value: fileArray.length,
+                    message: `Too few files. Minimum: ${fileOptions.minFiles}`,
                 });
             }
 
@@ -314,11 +297,8 @@ export function validateFormData<T extends Record<string, unknown>>(
         {
             throw new ValidationError({
                 message: invalidInputMessage(fieldName),
-                fields: errors.map((e): ValidationFieldError => ({
-                    path: e.path,
-                    message: e.message,
-                    value: e.value,
-                })),
+                // TypeBox's errors carry the submitted value; the error keeps path and message only
+                fields: errors,
             });
         }
 
@@ -416,7 +396,6 @@ export async function parseJsonBody(c: Context): Promise<Record<string, unknown>
             fields: [{
                 path: '/',
                 message: 'Failed to parse JSON',
-                value: error instanceof Error ? error.message : 'Unknown error',
             }],
         });
     }
@@ -468,7 +447,6 @@ export async function parseFormData(c: Context): Promise<Record<string, unknown>
             fields: [{
                 path: '/',
                 message: 'Failed to parse form data',
-                value: error instanceof Error ? error.message : 'Unknown error',
             }],
         });
     }

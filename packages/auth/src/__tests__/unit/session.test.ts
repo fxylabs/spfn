@@ -12,6 +12,7 @@ import {
     shouldRefreshSession,
 } from '@/server/lib/session';
 import type { SessionData } from '@/server/lib/session';
+import { authLogger } from '@/server/logger';
 
 describe('Session - Seal/Unseal', () =>
 {
@@ -146,6 +147,24 @@ describe('Session - Tampering Detection', () =>
     it('should reject completely malformed JWT', async () =>
     {
         await expect(unsealSession('not.a.valid.jwt')).rejects.toThrow();
+    });
+
+    it('warns of an undecryptable cookie without any part of it (#467)', async () =>
+    {
+        const warn = vi.spyOn(authLogger.session, 'warn').mockReturnValue(undefined);
+        const parts = (await sealSession(mockSessionData)).split('.');
+        parts[4] = parts[4].slice(0, -5) + 'AAAAA';
+        const tampered = parts.join('.');
+
+        await expect(unsealSession(tampered)).rejects.toThrow();
+
+        const logged = JSON.stringify(warn.mock.calls);
+        warn.mockRestore();
+        expect(logged).toContain('JWE decryption failed');
+        for (let start = 0; start + 8 <= tampered.length; start++)
+        {
+            expect(logged).not.toContain(tampered.slice(start, start + 8));
+        }
     });
 });
 

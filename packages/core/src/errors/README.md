@@ -118,7 +118,7 @@ with no required fields accept zero args and fall back to a default message.
 |---|---|---|---|
 | `HttpError` | (required) | `{ message, statusCode, details? }` | `details?` |
 | `BadRequestError` | 400 | `{ message?, details? }` | — |
-| `ValidationError` | 400 | `{ message, fields?, details? }` | `fields?` |
+| `ValidationError` | 400 | `{ message, fields?, details? }` | `fields?: readonly ValidationFieldError[]` — `{ path, message }` each, frozen (a `push` or a sort in place throws; copy first); an own enumerable property that cannot be redefined; every write (constructor, `Object.assign`, assignment) keeps those two keys only |
 | `UnauthorizedError` | 401 | `{ message?, details? }` | — |
 | `ForbiddenError` | 403 | `{ message?, details? }` | — |
 | `NotFoundError` | 404 | `{ message?, resource?, details? }` | `resource?` |
@@ -150,8 +150,8 @@ throw new ConflictError({ message: 'Email already in use' });
 throw new ValidationError({
     message: 'Validation failed',
     fields: [
-        { path: '/email', message: 'Invalid format', value: 'nope' },
-        { path: '/age', message: 'Must be >= 18', value: 15 },
+        { path: '/email', message: 'Invalid format' },
+        { path: '/age', message: 'Must be >= 18' },
     ],
 });
 

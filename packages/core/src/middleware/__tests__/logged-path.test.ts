@@ -21,7 +21,7 @@
  * | T8  | a path nothing declared                                                | a silent change to every app's path fields                      |
  * | T9  | entries that are not literal prefixes                                  | a typo that redacts nothing                                     |
  * | T10 | a hand-written `app.ts` with its own RequestLogger and ErrorHandler   | the declaration published only on the auto-configured path      |
- * | T15a | a path-parameter validation failure under the prefix                 | the logged 400 body (`fields[].value`) quoting the segment      |
+ * | T15a | a path-parameter validation failure under the prefix                 | the logged 400 body, built from the path                         |
  * | T15b | an error whose message and cause quote the segment, with and without `includeStack` | the error handler's line carrying either message     |
  * | T15c | the request logger's `Request failed` line, downstream throwing a message quoting the segment | that line carrying the message |
  * | T16a | spellings the router does not serve (`//`, case, `%2F`, double encoding, `..` after decoding) | a 404 logging the token the client meant for the route |
@@ -275,9 +275,9 @@ describe('a declared path prefix is redacted in every core log line (#164)', () 
             .toEqual([REDACTED, 400, 'number', false]);
         expect(declared.output).not.toContain(segment);
 
-        // The same failure outside the prefix still logs the body, value and all
+        // The same failure outside the prefix still logs the body — which names the field, not the segment (#467)
         const undeclared = await completed(`/users/${segment}/check`);
-        expect(JSON.stringify(undeclared.context.response)).toContain(`"value":"${segment}"`);
+        expect(undeclared.context.response).toMatchObject({ __type: 'ValidationError', fields: [{ path: '/id' }] });
     });
 
     it('T15b: an error quoting the segment is logged by name, status and stack under the prefix, with no message', async () =>

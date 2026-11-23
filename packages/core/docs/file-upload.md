@@ -157,8 +157,7 @@ Validation errors are thrown automatically with a 400 status:
     "fields": [
         {
             "path": "/avatar",
-            "message": "File size 15.0MB exceeds maximum 5.0MB",
-            "value": 15728640
+            "message": "File size exceeds maximum 5.0MB"
         }
     ],
     "error": {
@@ -216,7 +215,6 @@ export const uploadImage = route.post('/images')
                 fields: [{
                     path: '/image',
                     message: `Allowed types: ${ALLOWED_IMAGE_TYPES.join(', ')}`,
-                    value: file.type,
                 }],
             });
         }

@@ -63,18 +63,65 @@ export class BadRequestError extends HttpError
 }
 
 /**
+ * One field that failed validation: where it is and the rule it broke.
+ *
+ * No `value`: the client knows what it sent, and anything on the error reaches
+ * every consumer of it — the response, the request log's copy of the
+ * response, `onError` hooks, the API client's restored error. A password that
+ * fails its length rule or a malformed token in a header would be written into
+ * all of them.
+ */
+export interface ValidationFieldError
+{
+    /** JSON pointer to the field, e.g. `/password` or `/items/0/name` */
+    path: string;
+    /** The rule the field broke, e.g. `Expected string length greater or equal to 8` */
+    message: string;
+}
+
+/**
+ * The well-formed entries of `fields`, each reduced to its path and message,
+ * frozen; none when `fields` is not an array. A body the client restores is
+ * untyped: an entry that is not a `{ path, message }` of strings is left out
+ * rather than failing the restore, which would hand the client the whole body.
+ */
+function toFieldErrors(fields: unknown): readonly ValidationFieldError[] | undefined
+{
+    if (!Array.isArray(fields))
+    {
+        return undefined;
+    }
+
+    return Object.freeze(fields
+        .filter(isFieldError)
+        .map(({ path, message }) => Object.freeze({ path, message })));
+}
+
+function isFieldError(field: unknown): field is ValidationFieldError
+{
+    return typeof field === 'object' && field !== null
+        && typeof (field as ValidationFieldError).path === 'string'
+        && typeof (field as ValidationFieldError).message === 'string';
+}
+
+/**
+ * The `fields` of each `ValidationError`, where nothing but its accessor
+ * reaches them. A `WeakMap`, not a `#private`: reading `fields` of an object
+ * the constructor did not build gives `undefined` rather than throwing.
+ */
+const heldFields = new WeakMap<ValidationError, readonly ValidationFieldError[] | undefined>();
+
+/**
  * Validation Error (400)
  *
- * Input validation failure (request params, query, body)
+ * Input validation failure (request params, query, headers, cookies, body)
  * Used by define-route system for automatic validation
  */
 export class ValidationError extends HttpError
 {
-    fields?: Array<{ path: string; message: string; value?: any }>;
-
     constructor(data: {
         message: string;
-        fields?: Array<{ path: string; message: string; value?: any }>;
+        fields?: readonly ValidationFieldError[];
         details?: Record<string, any>;
     })
     {
@@ -85,12 +132,48 @@ export class ValidationError extends HttpError
         });
 
         this.name = 'ValidationError';
-
-        if (data.fields)
-        {
-            this.fields = data.fields;
-        }
+        ownFieldsAccessor(this);
+        this.fields = data.fields;
     }
+
+    /**
+     * The fields that failed, `{ path, message }` each. Frozen, the array and
+     * each entry, so every write goes through the setter: a `push`, a sort in
+     * place or an assignment to an entry throws a `TypeError`; copy first.
+     */
+    get fields(): readonly ValidationFieldError[] | undefined
+    {
+        return heldFields.get(this);
+    }
+
+    /**
+     * Every write — this constructor's, a subclass's `Object.assign(this,
+     * data)`, a later assignment — keeps each field's path and message only,
+     * so whatever else the objects carry (TypeBox's `value`, `schema` and
+     * nested `errors`, a `value` in a body an older server sent the client)
+     * is never part of the error
+     */
+    set fields(fields: readonly ValidationFieldError[] | undefined)
+    {
+        heldFields.set(this, toFieldErrors(fields));
+    }
+}
+
+/**
+ * Give `error` the class's `fields` accessor as its own, enumerable and not
+ * configurable. Own and enumerable, so `{ ...error }`, `Object.keys(error)`,
+ * `toJSON()` and own-property serialisers carry it. Not configurable, so
+ * nothing shadows it: a plain-JS subclass's class field `fields = […]` or an
+ * `Object.defineProperty` throws a `TypeError` instead of holding raw objects
+ * past the setter.
+ */
+function ownFieldsAccessor(error: ValidationError): void
+{
+    Object.defineProperty(error, 'fields', {
+        ...Object.getOwnPropertyDescriptor(ValidationError.prototype, 'fields'),
+        enumerable: true,
+        configurable: false,
+    });
 }
 
 /**

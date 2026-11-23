@@ -93,7 +93,7 @@ describe('ErrorHandler Middleware', () =>
                     message: 'Validation failed',
                     fields: [
                         { path: '/email', message: 'Invalid email format' },
-                        { path: '/age', message: 'Must be positive number', value: -5 },
+                        { path: '/age', message: 'Must be positive number' },
                     ],
                 });
             });
