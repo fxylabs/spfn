@@ -18,8 +18,8 @@
  * dependency's target version has to be on the registry already or to have gone
  * out earlier in this same run.
  *
- * The channel comes from the version string the same way the GitHub npmjs
- * workflows derive it: `-alpha` -> alpha, `-beta` -> beta, otherwise latest.
+ * The channel comes from the version string (`scripts/lib/channel.mjs`), the
+ * same function the npmjs republish uses.
  * The actual publish goes through scripts/publish-package.mjs, which also moves
  * the `latest` dist-tag onto the published version.
  *
@@ -31,23 +31,11 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { channelOf } from "./lib/channel.mjs";
 import { missingDependencies, orderPackages } from "./lib/publish-order.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGES_DIR = join(ROOT, "packages");
-
-function channelOf(version)
-{
-    if (version.includes("-alpha"))
-    {
-        return "alpha";
-    }
-    if (version.includes("-beta"))
-    {
-        return "beta";
-    }
-    return "latest";
-}
 
 /**
  * `publishConfig.registry` only steers `npm publish`, so every read has to be

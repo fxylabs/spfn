@@ -1,7 +1,10 @@
 # primitives CI — publish version-bumped packages to the private Gitea registry.
 #
-# The public npmjs side is separate and unchanged: the GitHub mirror runs
-# .github/workflows/publish-<pkg>.yml on the same push. This pipeline is the
+# The public npmjs side is separate: the GitHub mirror runs
+# .github/workflows/publish-<pkg>.yml on the same push, which waits for the
+# version to reach the Gitea registry and publishes that tarball to npmjs, so
+# whichever of this pipeline and .gitea/workflows/release.yml publishes first
+# decides the bytes on both registries (#463). This pipeline is the
 # Gitea-registry counterpart, replacing the manual local `npm run publish:beta`.
 #
 # The registry is the idempotency guard (scripts/publish-changed.mjs skips

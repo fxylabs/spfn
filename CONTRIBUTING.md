@@ -383,7 +383,11 @@ kept for history only; nothing publishes off a git tag any more. Until the switc
 from Woodpecker, a Gitea Actions release workflow (`.gitea/workflows/release.yml`)
 publishes to the Gitea registry beside Woodpecker's `.woodpecker/publish.yml`, with
 the token in the repository secret **`NPM_PUBLISH_TOKEN`** (a Gitea token allowed
-to write packages under the `superfunction` organisation).
+to write packages under the `superfunction` organisation). That is the only build of
+a release: the GitHub mirror's `publish-<pkg>.yml` workflows publish the tarball the
+Gitea registry already has to npmjs, byte for byte (authenticated with `NPM_TOKEN`),
+reading it with the GitHub secret **`GITEA_PACKAGES_READ_TOKEN`** (a read-only Gitea
+packages token) — see `.github/PUBLISHING.md`.
 
 ## DCO
 

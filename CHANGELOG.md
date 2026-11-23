@@ -1548,6 +1548,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   travelled under its own name: no registry holds that name, so the client restored a generic
   `ApiError`, and `error.code` named a class no SDK knows. It now serializes as the refusal it is
   answered as.
+- **Release: one tarball per version on both registries — npmjs gets the bytes the Gitea registry
+  already has (#463).** A release was built twice, once by `.gitea/workflows/release.yml` for the
+  Gitea registry and once more by the GitHub mirror's `publish-<pkg>.yml` for npmjs, and the type
+  build is not byte-deterministic, so one version named two tarballs and a lockfile written against
+  one registry failed `ERR_PNPM_TARBALL_INTEGRITY` against the other (`@spfn/auth@0.4.0-beta.4`,
+  `@spfn/notification@0.3.0-beta.4`, `@spfn/auth@0.3.0-beta.53`; `spfn@0.4.0-beta.4` too, whose
+  npmjs workflow also deleted `publishConfig.registry` before publishing). The GitHub workflows no
+  longer build: the fourteen `publish-<pkg>.yml` call one reusable `publish-from-gitea.yml`, which
+  runs `scripts/republish-from-gitea.mjs` — wait (at most 90 minutes) for the Gitea release to
+  publish the version, download its tarball, verify it against Gitea's `dist.integrity`, `npm
+  publish` that file to npmjs, read npmjs's integrity back, and move its dist-tags — the channel's
+  and `latest`, as before, but only to a version newer than the one a tag names, so two releases
+  finishing out of order no longer leave `latest` on the older (a version older than every tag it
+  would take goes out under `superseded`). Any re-run moves the tags of a version npmjs already has. A version npmjs
+  already has with different bytes now fails the run instead of being skipped green. npmjs auth is
+  unchanged (`NPM_TOKEN`, provenance kept); the one new secret is `GITEA_PACKAGES_READ_TOKEN` on
+  GitHub, a read-only Gitea packages token. Versions already split stay as they are — a published version
+  cannot be replaced.
+
 - **@spfn/core, @spfn/mcp: a stream says no intermediary may transform it — `Cache-Control: no-cache,
   no-transform` (spfn/spfn#174).** The Next.js server (`next start`, `next dev`) runs the `compression`
   middleware on every response, one rewritten to the SPFN server included, and skips only a response

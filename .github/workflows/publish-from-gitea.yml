@@ -1,0 +1,222 @@
+# Publish one package version to npmjs from the tarball the Gitea registry
+# already has — called by every publish-<pkg>.yml, never run on its own.
+#
+# Nothing is built here. `.gitea/workflows/release.yml` builds and publishes the
+# release to the Gitea registry; this workflow waits for that version to appear
+# there, downloads the tarball, checks it against Gitea's `dist.integrity`, and
+# publishes those exact bytes to npmjs (scripts/republish-from-gitea.mjs). A
+# second build here is what gave one version two tarballs (#463): the type
+# build is not byte-deterministic.
+#
+# npmjs auth is the `NPM_TOKEN` secret, as before #463: setup-node writes an
+# .npmrc that reads it from NODE_AUTH_TOKEN, and the script hands that variable
+# to the `npm` processes only. Moving to OIDC trusted publishing is #466.
+# `--provenance` stays: npm signs a statement over the tarball's sha512 naming
+# this workflow run and commit. The bytes were built by the Gitea release from
+# the same push, so the statement's source (repository and commit) is right but
+# the build it describes is this job, which only republished them.
+#
+# The other secret is GITEA_PACKAGES_READ_TOKEN, a read-only Gitea packages
+# token. Only the republish step sees either secret, and each reaches only its
+# own registry.
+on:
+  workflow_call:
+    inputs:
+      package_dir:
+        description: 'The package directory, e.g. packages/core'
+        type: string
+        required: true
+      create_tag:
+        type: boolean
+        default: false
+      create_release:
+        type: boolean
+        default: false
+      dry_run:
+        type: boolean
+        default: false
+    secrets:
+      GITEA_PACKAGES_READ_TOKEN:
+        required: true
+      NPM_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # The wait for the Gitea release is bounded at 90 minutes inside the script.
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm to latest
+        run: npm install -g npm@latest
+
+      - name: Read the package
+        id: pkg
+        working-directory: ${{ inputs.package_dir }}
+        run: |
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # The trigger is the package's package.json changing, which is not the
+      # same thing as a release. An edit made for any other reason — removing a
+      # peer entry, fixing a script — would otherwise publish whatever version
+      # happens to sit in the file. So ask the question that actually decides
+      # it first: did the version field move?
+      - name: Check whether the version moved
+        id: bump
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            BEFORE="HEAD^"
+          fi
+
+          # Only a package.json that did not exist yet reads as "no previous
+          # version"; a commit the clone cannot read stops the run.
+          if ! git cat-file -e "$BEFORE^{commit}"; then
+            echo "::error::$BEFORE, the commit before this push, is not in the clone: cannot tell whether the version moved"
+            exit 1
+          fi
+          FILE="${{ inputs.package_dir }}/package.json"
+          PREVIOUS=""
+          if git cat-file -e "$BEFORE:$FILE" 2>/dev/null; then
+            PREVIOUS=$(git show "$BEFORE:$FILE" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          fi
+
+          if [[ "$PREVIOUS" == "${{ steps.pkg.outputs.version }}" ]]; then
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ inputs.package_dir }}/package.json changed but ${{ steps.pkg.outputs.name }} stayed at ${{ steps.pkg.outputs.version }} — not publishing"
+          else
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Version moved ${PREVIOUS:-(none)} -> ${{ steps.pkg.outputs.version }}"
+          fi
+
+      # As on main, an existing git tag stops only a version npmjs does not
+      # have yet: a dispatch backfilling a version npmjs already has, with
+      # create_tag on and the tag in place, still goes on to move its dist-tags.
+      # Only npm's E404 means "does not have it"; any other failure stops here
+      # with npm's own error, as the script does for Gitea.
+      - name: Ask npmjs whether it has the version
+        id: npmjs
+        if: ${{ inputs.create_tag && steps.bump.outputs.moved != 'false' }}
+        run: |
+          ERRORS="$RUNNER_TEMP/npm-view.err"
+          if npm view "${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}" version \
+              --registry https://registry.npmjs.org/ >/dev/null 2>"$ERRORS"; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          elif grep -qE 'code E404$' "$ERRORS"; then
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$ERRORS" >&2
+            echo "::error::npm view failed (above), so it is not known whether npmjs has ${{ steps.pkg.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Check if tag exists
+        if: ${{ steps.npmjs.outputs.has == 'false' }}
+        run: |
+          TAG="${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      # workflow_dispatch skips the version check: re-running it is the
+      # documented way to backfill a version that is already committed. Any run
+      # — push, re-run or dispatch — moves the version's dist-tags that may
+      # move, also when npmjs already has it, and never moves one backwards.
+      - name: Publish the Gitea tarball to npmjs
+        id: republish
+        if: ${{ steps.bump.outputs.moved != 'false' }}
+        env:
+          GITEA_PACKAGES_READ_TOKEN: ${{ secrets.GITEA_PACKAGES_READ_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "$NPM_TOKEN" && "${{ inputs.dry_run }}" != "true" ]]; then
+            echo "::error::NPM_TOKEN is not set: npm publish and npm dist-tag authenticate to npmjs with the NPM_TOKEN secret"
+            exit 1
+          fi
+          node scripts/republish-from-gitea.mjs "${{ inputs.package_dir }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      # The tag and the release name the commit the version was set in, read
+      # from the package.json history: a dispatch runs from whatever main head
+      # is current, so github.sha is not that commit.
+      - name: Find the commit that set the version
+        id: origin
+        if: ${{ inputs.create_tag || inputs.create_release }}
+        run: |
+          COMMIT=$(node scripts/version-commit.mjs "${{ inputs.package_dir }}")
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      # Only the run for that commit tags it — the push that moved the version
+      # (its push may carry later commits too), or a dispatch started at that
+      # commit — and that run's re-run, which finishes a run that published and
+      # failed before this step. A dispatch from a later head says it did not.
+      - name: Create git tag
+        id: git-tag
+        if: ${{ inputs.create_tag && steps.republish.outputs.outcome != 'dry-run' && steps.republish.outcome == 'success' }}
+        env:
+          COMMIT: ${{ steps.origin.outputs.commit }}
+          MOVED: ${{ steps.bump.outputs.moved }}
+        run: |
+          TAG="${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}"
+          if [[ "$COMMIT" != "$GITHUB_SHA" && "$MOVED" != "true" ]]; then
+            echo "::notice::Not tagging $TAG: the version was set in $COMMIT and this run is at $GITHUB_SHA. Only the run for $COMMIT (or its re-run) tags it."
+            echo "result=not created — set in ${COMMIT:0:12}, run at ${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists"
+            echo "result=\`$TAG\` already existed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$COMMIT"
+          git push origin "$TAG"
+          echo "result=\`$TAG\` on ${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+
+      # gh creates a missing tag at --target: the commit that set the version.
+      - name: Create GitHub release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          TAG="${{ steps.pkg.outputs.name }}@$VERSION"
+          PRERELEASE=""
+          if [[ "$VERSION" == *-alpha* || "$VERSION" == *-beta* ]]; then
+            PRERELEASE="--prerelease"
+          fi
+          gh release create "$TAG" --target "${{ steps.origin.outputs.commit }}" --title "$TAG" \
+            --generate-notes $PRERELEASE \
+            || echo "::warning::GitHub release creation failed for $TAG"
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## ${{ steps.pkg.outputs.name }} ${{ steps.pkg.outputs.version }}"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| Version moved | ${{ steps.bump.outputs.moved || 'not checked (manual run)' }} |"
+            echo "| npmjs | ${{ steps.republish.outputs.outcome || steps.republish.outcome }} |"
+            echo "| git tag | ${{ steps.git-tag.outputs.result || 'skipped' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

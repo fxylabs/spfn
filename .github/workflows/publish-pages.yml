@@ -1,3 +1,7 @@
+# npmjs side of a @spfn/pages release: publishes the tarball the Gitea registry
+# already has for the version in packages/pages/package.json. The steps are in
+# publish-from-gitea.yml; this file keeps the package's own trigger and its
+# workflow_dispatch backfill.
 name: Publish @spfn/pages
 
 on:
@@ -16,155 +20,21 @@ on:
         type: boolean
         default: false
       dry_run:
-        description: 'Dry run (skip actual publish)'
+        description: 'Dry run (npm publish --dry-run, no dist-tag change)'
         type: boolean
         default: false
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v5
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-          cache: 'pnpm'
-
-      - name: Update npm to latest
-        run: npm install -g npm@latest
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Get version from package.json
-        id: pkg
-        working-directory: packages/pages
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-          if [[ "$VERSION" == *"-alpha"* ]]; then
-            echo "tag=alpha" >> $GITHUB_OUTPUT
-          elif [[ "$VERSION" == *"-beta"* ]]; then
-            echo "tag=beta" >> $GITHUB_OUTPUT
-          else
-            echo "tag=latest" >> $GITHUB_OUTPUT
-          fi
-
-      # The trigger is `packages/pages/package.json` changing, which is not the same
-      # thing as a release. An edit made for any other reason — removing a peer
-      # entry, fixing a script — publishes whatever version happens to sit in the
-      # file, because the npmjs check below only asks whether that version is
-      # already out there, and an unreleased one is not. So ask the question that
-      # actually decides it first: did the version field move?
-      - name: Check whether the version moved
-        id: bump
-        if: ${{ github.event_name == 'push' }}
-        run: |
-          BEFORE="${{ github.event.before }}"
-          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
-            BEFORE="HEAD^"
-          fi
-
-          PREVIOUS=$(git show "$BEFORE:packages/pages/package.json" 2>/dev/null \
-            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)
-
-          if [[ "$PREVIOUS" == "${{ steps.pkg.outputs.version }}" ]]; then
-            echo "moved=false" >> $GITHUB_OUTPUT
-          else
-            echo "moved=true" >> $GITHUB_OUTPUT
-            echo "::notice::Version moved ${PREVIOUS:-(none)} -> ${{ steps.pkg.outputs.version }}"
-          fi
-
-      # workflow_dispatch is exempt from the version check: re-running it is the
-      # documented way to backfill a version that is already committed.
-      - name: Decide whether to publish
-        id: check-npm
-        run: |
-          if [[ "${{ steps.bump.outputs.moved }}" == "false" ]]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "reason=the version did not change" >> $GITHUB_OUTPUT
-            echo "::notice::packages/pages/package.json changed but @spfn/pages stayed at ${{ steps.pkg.outputs.version }} — not publishing"
-          elif npm view @spfn/pages@${{ steps.pkg.outputs.version }} version 2>/dev/null; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "reason=already published" >> $GITHUB_OUTPUT
-            echo "::notice::Version ${{ steps.pkg.outputs.version }} already published, skipping"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Check if tag exists
-        if: ${{ inputs.create_tag && steps.check-npm.outputs.skip == 'false' }}
-        run: |
-          TAG="@spfn/pages@${{ steps.pkg.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "::error::Tag $TAG already exists"
-            exit 1
-          fi
-
-      - name: Build @spfn/pages
-        if: ${{ steps.check-npm.outputs.skip == 'false' }}
-        run: pnpm --filter @spfn/pages build
-
-      - name: Create git tag
-        if: ${{ inputs.create_tag && steps.check-npm.outputs.skip == 'false' }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "@spfn/pages@${{ steps.pkg.outputs.version }}"
-          git push origin "@spfn/pages@${{ steps.pkg.outputs.version }}"
-
-      - name: Publish @spfn/pages to npm
-        if: ${{ !inputs.dry_run && steps.check-npm.outputs.skip == 'false' }}
-        working-directory: packages/pages
-        run: npm publish --access public --tag ${{ steps.pkg.outputs.tag }} --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Sync latest tag
-        if: ${{ !inputs.dry_run && (steps.check-npm.outputs.skip == 'false' || github.event_name == 'workflow_dispatch') }}
-        run: npm dist-tag add @spfn/pages@${{ steps.pkg.outputs.version }} latest
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create GitHub release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && !inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="@spfn/pages@${{ steps.pkg.outputs.version }}"
-          PRERELEASE=""
-          if [[ "${{ steps.pkg.outputs.tag }}" != "latest" ]]; then
-            PRERELEASE="--prerelease"
-          fi
-          gh release create "$TAG" --target "${{ github.sha }}" --title "$TAG" \
-            --generate-notes $PRERELEASE \
-            || echo "::warning::GitHub release creation failed for $TAG"
-
-      - name: Summary
-        run: |
-          if [[ "${{ steps.check-npm.outputs.skip }}" == "true" ]]; then
-            echo "## Skipped @spfn/pages (${{ steps.check-npm.outputs.reason }})" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Published @spfn/pages" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | \`${{ steps.pkg.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| npm tag | \`${{ steps.pkg.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| git tag | ${{ inputs.create_tag && format('`@spfn/pages@{0}`', steps.pkg.outputs.version) || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Skipped | ${{ steps.check-npm.outputs.skip }}${{ steps.check-npm.outputs.reason && format(' ({0})', steps.check-npm.outputs.reason) || '' }} |" >> $GITHUB_STEP_SUMMARY
+    uses: ./.github/workflows/publish-from-gitea.yml
+    with:
+      package_dir: packages/pages
+      create_tag: ${{ inputs.create_tag || false }}
+      create_release: ${{ inputs.create_release || false }}
+      dry_run: ${{ inputs.dry_run || false }}
+    secrets:
+      GITEA_PACKAGES_READ_TOKEN: ${{ secrets.GITEA_PACKAGES_READ_TOKEN }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

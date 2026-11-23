@@ -18,6 +18,18 @@
 # workflow from overlapping: a second one waits for the first (and, as on
 # GitHub, a still newer one replaces it in the queue — harmless, since any run
 # publishes every version the registry lacks).
+#
+# This is the only build of a release. Public npmjs gets the same tarball, not a
+# second build: the GitHub mirror receives the same push, and each
+# .github/workflows/publish-<pkg>.yml (all calling publish-from-gitea.yml →
+# scripts/republish-from-gitea.mjs) waits until this run has put the version on
+# the Gitea registry, downloads that tarball with a read-only Gitea token,
+# verifies it against the registry's dist.integrity and publishes those bytes to
+# npmjs. Two builds per release are what gave a
+# version two different tarballs (#463): the type build is not byte-deterministic.
+# The npmjs side waits at most 90 minutes for this run; a release that takes
+# longer (or fails) leaves the npmjs run red with a message saying so, and a
+# workflow_dispatch of publish-<pkg>.yml on GitHub catches it up afterwards.
 on:
     push:
         branches: [main]
