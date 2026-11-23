@@ -2,7 +2,7 @@
  * Where a Kit project keeps its generated state (unit 06 section 5.1).
  *
  *   .spfn/license.json                   committed — public IDs and URLs only
- *   .spfn/kit-lock.json                  committed — the signed installed state
+ *   .spfn/kit-lock.json                  committed — the installed state, unsigned; names its signed manifest by digest
  *   .spfn/operations/active.json         ignored  — the running operation
  *   .spfn/operations/history/<id>.json   ignored  — bounded local history
  *   .spfn/operations/operation.lock/     ignored  — the process lock directory

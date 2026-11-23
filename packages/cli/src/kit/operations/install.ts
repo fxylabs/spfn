@@ -305,6 +305,7 @@ function installSteps(options: StepFactoryOptions): OperationStep[]
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
+                    packages: manifest.packages,
                 });
                 const tooling = await verifyToolingPlan(options, projectDir, context.journal.operationId);
 

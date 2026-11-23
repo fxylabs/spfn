@@ -1434,11 +1434,28 @@ that records an argv. A key arrives either through a masked prompt or through
 credential the server issued remains, in the OS keychain under its own service
 (`superfunction.spfn.kit`), separate from the env secrets `spfn secret` manages. The
 short-lived registry session is handed to the package-manager child process in its
-environment and nowhere else, as npm configuration addressed to the registry it opens
-(`npm_config_//host/npm/:_authToken`). The committed `.npmrc` maps the release's scopes to
+environment and nowhere else. The committed `.npmrc` maps the release's scopes to
 that registry and carries no credential at all — not a value, and not a variable naming
 one: pnpm 10 and later ignore a credential that reaches them from a project `.npmrc`, because that
 file is committed and a hostile edit could send the secret to another registry.
+
+`kit install`, `kit update` and `kit restore` are the only commands that hand a package manager a
+credential, and they run pnpm (`spfn create`, `init` and `add` install from the public registry and
+pass none, so npm, yarn and bun never receive one). The session is spelled twice, because no single
+variable reaches every pnpm:
+
+| pnpm | Reads the session from |
+|------|------------------------|
+| 9, 10, and 11 before 11.10 | `npm_config_//host/npm/:_authToken` (plus the port-less key for a ported registry) |
+| 11.10 and later, 12 included | `pnpm_config__auth`: `{"<registry URL>": {"@<scope>": {"authToken": "…"}}}`, one entry per release scope |
+
+pnpm 12.23 under corepack starts its native binary through `/bin/sh`. Where that is dash (Debian,
+Ubuntu), the shell drops every variable whose name is not a shell identifier, so the first spelling
+never arrives and the install fails as unauthorized; `pnpm_config__auth` is a plain name and does.
+It is keyed by the release's scopes rather than `@`, because pnpm also takes each key as a route,
+and that route takes precedence over the project's `.npmrc`: a release scope the `.npmrc` sends
+elsewhere still resolves from the kit registry, and `@` would make the private registry the default
+for every unscoped package.
 
 **`--json` is the agent surface.** Every subcommand takes it, prints newline-delimited
 events with a stable `code`, `phase` and safe next command, and never opens a prompt. A

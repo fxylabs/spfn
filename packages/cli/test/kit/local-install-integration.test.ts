@@ -40,6 +40,7 @@ const PACKAGES_URL = 'https://packages.superfunction.xyz';
 const CONTROL_PLANE_URL = 'https://start.superfunction.xyz';
 const CORE = { name: '@spfn/core', version: '0.3.0-beta.5' };
 const KIT = { name: FAKE_KIT_PACKAGE, version: '1.0.0' };
+const SCOPES = ['@spfn', '@superfunction'];
 
 /** A database that answers "configured, reachable, nothing waiting". */
 const settledDatabase: DatabasePort = {
@@ -61,7 +62,17 @@ let target: string;
 let store: string;
 let emptyNpmrc: string;
 
-const pnpmAvailable = hasPnpm();
+/**
+ * The pnpm the end-to-end install runs, seed and install alike.
+ *
+ * Pinned, and through corepack, as the matrix rows below are. A bare `pnpm` in
+ * a directory that names no `packageManager` is whatever npm's `latest` was
+ * that morning under corepack: the day `latest` became 12.23.0, every branch
+ * went red here with no change to this repository. The current major, because
+ * that is what a new application gets; the lockfile the seed writes is only
+ * read back by the same version.
+ */
+const E2E_PNPM = '12.23.0';
 
 beforeEach(async () =>
 {
@@ -91,20 +102,6 @@ afterEach(async () =>
     rmSync(root, { recursive: true, force: true });
 });
 
-function hasPnpm(): boolean
-{
-    try
-    {
-        execFileSync('pnpm', ['--version'], { stdio: 'ignore' });
-
-        return true;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
 /**
  * An npm environment that reads no configuration but its own.
  *
@@ -122,7 +119,43 @@ function isolatedNpmEnv(): Record<string, string>
         npm_config_userconfig: emptyNpmrc,
         npm_config_globalconfig: emptyNpmrc,
         npm_config_fetch_retries: '0',
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
+        // The project is under the OS temp directory and names no package
+        // manager of its own, but a machine whose temp directory sits below
+        // one would otherwise have pnpm refuse to run as anything else.
+        pnpm_config_pm_on_fail: 'ignore',
     };
+}
+
+/**
+ * An executable that is `corepack pnpm@<version>` on this test's own store, for
+ * the port's `binary`.
+ *
+ * The store travels with the binary rather than as the port's `--store-dir`,
+ * because the release's gate runs `pnpm run build` through the same binary and
+ * sees none of the install's options. pnpm 12 installs before it runs a script,
+ * and against a store other than the one the install used it recreates
+ * `node_modules` — with no registry session, so it empties it, warns, and runs
+ * the script anyway.
+ *
+ * Node rather than a shell script: dash drops every variable whose name is not
+ * a shell identifier, and `npm_config_//host/npm/:_authToken` is one of the
+ * spellings under test.
+ */
+function pinnedPnpmBinary(version: string): string
+{
+    const file = join(root, `pnpm-${version}.mjs`);
+    const env = `{ ...process.env, pnpm_config_store_dir: ${JSON.stringify(store)} }`;
+
+    writeFileSync(file, [
+        '#!/usr/bin/env node',
+        "import { spawnSync } from 'node:child_process';",
+        `const result = spawnSync('corepack', ['pnpm@${version}', ...process.argv.slice(2)], { stdio: 'inherit', env: ${env} });`,
+        'process.exit(result.status ?? 1);',
+        '',
+    ].join('\n'), { encoding: 'utf8', mode: 0o755 });
+
+    return file;
 }
 
 /**
@@ -177,13 +210,14 @@ async function seedLockfile(): Promise<string>
 
     mkdirSync(seed, { recursive: true });
     writeFileSync(join(seed, 'package.json'), scaffoldPackageJson(), 'utf8');
-    writeFileSync(join(seed, '.npmrc'), registryNpmrc(['@spfn', '@superfunction'], fixture.registryUrl), 'utf8');
+    writeFileSync(join(seed, '.npmrc'), registryNpmrc(SCOPES, fixture.registryUrl), 'utf8');
 
     // Spawned asynchronously, not with `execFileSync`. The registry pnpm is
     // talking to is this process's own HTTP server, and a synchronous child
     // blocks the event loop that would have answered it — the two would wait
     // for each other until pnpm's socket timed out.
-    const seeded = await execa('pnpm', [
+    const seeded = await execa('corepack', [
+        `pnpm@${E2E_PNPM}`,
         'install',
         '--no-frozen-lockfile',
         '--registry', fixture.registryUrl,
@@ -199,7 +233,7 @@ async function seedLockfile(): Promise<string>
             parent: {},
             extra: isolatedNpmEnv(),
             registryToken: credential,
-            registryUrl: fixture.registryUrl,
+            registry: { url: fixture.registryUrl, scopes: SCOPES },
         }),
         extendEnv: false,
         reject: false,
@@ -245,11 +279,11 @@ function adaptersFor(projectDir: string, database: DatabasePort): KitAdapters
     const local = createKitLocalPorts({
         packageManager: {
             registryUrl: fixture.registryUrl,
-            storeDir: store,
             ignoreScripts: true,
             ignoreWorkspace: true,
             timeoutMs: 180_000,
             extraEnv: isolatedNpmEnv(),
+            binary: pinnedPnpmBinary(E2E_PNPM),
         },
         gateTimeoutMs: 120_000,
     });
@@ -298,7 +332,7 @@ function install(): ReturnType<typeof runInstall>
     }, adaptersFor(target, settledDatabase));
 }
 
-describe.runIf(pnpmAvailable)('an install with the local ports actually running', () =>
+describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actually running', () =>
 {
     it('installs the exact graph from the loopback registry, runs the gate and commits', async () =>
     {
@@ -362,17 +396,20 @@ describe.runIf(pnpmAvailable)('an install with the local ports actually running'
  * credentials that come from a project `.npmrc`, and the install broke for every
  * adopter on it without a line of this code changing.
  *
- * Three versions, because they behave three different ways and each one is
+ * Four versions, because they behave four different ways and each one is
  * somebody's: 9 expands a project credential and cannot read a ported
  * environment key; 10 can read neither, which is the combination Vercel builds
- * on; 11 reads the ported key and refuses the project credential. A future
- * release that moves the rule again fails here rather than in somebody's
- * terminal.
+ * on; 11 reads the ported key and refuses the project credential; 12, the
+ * current major and what every new application gets, is started by corepack
+ * through `/bin/sh`, which as dash drops the URL-scoped key, and reads only
+ * `pnpm_config__auth`. Without the 12 row, 12.23.0 reached CI only by being
+ * `latest` on the day it broke. A future release that moves the rule again
+ * fails here rather than in somebody's terminal.
  *
  * A version corepack cannot produce is skipped rather than failed — an offline
  * machine is not a regression.
  */
-const PNPM_VERSIONS = ['9.1.2', '10.34.5', '11.23.0'];
+const PNPM_VERSIONS = ['9.1.2', '10.34.5', '11.23.0', '12.23.0'];
 
 function corepackCanRun(version: string): boolean
 {
@@ -398,7 +435,7 @@ function corepackCanRun(version: string): boolean
     }
 }
 
-const runnablePnpm = pnpmAvailable ? PNPM_VERSIONS.filter(corepackCanRun) : [];
+const runnablePnpm = PNPM_VERSIONS.filter(corepackCanRun);
 
 describe.runIf(runnablePnpm.length > 0)('the registry credential, on each supported pnpm', () =>
 {
@@ -423,7 +460,7 @@ describe.runIf(runnablePnpm.length > 0)('the registry credential, on each suppor
             // Exactly the two artifacts the product produces: the `.npmrc` it
             // writes into the project, and the environment it builds for the
             // child. Nothing here spells a credential out by hand.
-            writeFileSync(join(project, '.npmrc'), registryNpmrc(['@spfn', '@superfunction'], fixture.registryUrl), 'utf8');
+            writeFileSync(join(project, '.npmrc'), registryNpmrc(SCOPES, fixture.registryUrl), 'utf8');
 
             const installed = await execa('corepack', [
                 `pnpm@${version}`,
@@ -441,17 +478,9 @@ describe.runIf(runnablePnpm.length > 0)('the registry credential, on each suppor
                 cwd: project,
                 env: createChildEnv({
                     parent: {},
-                    extra: {
-                        ...isolatedNpmEnv(),
-                        COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
-                        // The project is under the OS temp directory and names
-                        // no package manager of its own, but a machine whose
-                        // temp directory sits below one would otherwise have
-                        // pnpm refuse to run as anything else.
-                        pnpm_config_pm_on_fail: 'ignore',
-                    },
+                    extra: isolatedNpmEnv(),
                     registryToken: credential,
-                    registryUrl: fixture.registryUrl,
+                    registry: { url: fixture.registryUrl, scopes: SCOPES },
                 }),
                 extendEnv: false,
                 reject: false,

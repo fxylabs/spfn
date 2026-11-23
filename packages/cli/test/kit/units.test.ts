@@ -38,7 +38,7 @@ import {
 } from '../../src/kit/tooling.js';
 import { readManifest, resolveUpdateEdges } from '../../src/kit/manifest.js';
 import { executeProviderOperation, type ProviderOperationEnvelopeV1 } from '../../src/kit/provider.js';
-import { createChildEnv, registryAuthKeys, registryNpmrc, REGISTRY_TOKEN_ENV } from '../../src/kit/child-env.js';
+import { createChildEnv, PNPM_AUTH_ENV, registryAuthKeys, registryNpmrc, REGISTRY_TOKEN_ENV } from '../../src/kit/child-env.js';
 import { registryMetadataPath } from '../../src/kit/http/registry.js';
 import { scanTextForSecrets, scanValueForSecrets, redactSecrets } from '../../src/kit/secret-scan.js';
 import { atLeast, compareVersions, satisfiesRange } from '../../src/kit/version.js';
@@ -802,13 +802,24 @@ describe('the child environment and secret hygiene', () =>
         const env = createChildEnv({
             parent: { PATH: '/usr/bin' },
             registryToken: 'spfnr_session_1',
-            registryUrl: 'https://packages.superfunction.xyz/npm/',
+            registry: { url: 'https://packages.superfunction.xyz/npm/', scopes: ['@spfn', '@superfunction'] },
         });
 
         // The name pnpm and npm both read a per-registry credential from. Every
         // version matches the suffix case-sensitively, so `_authtoken` would be
         // silently not a credential at all on any of them.
         expect(env['npm_config_//packages.superfunction.xyz/npm/:_authToken']).toBe('spfnr_session_1');
+        // pnpm 11.10 and later read it here too, under a name a POSIX shell
+        // keeps. Keyed by the scopes and never by `@`: pnpm takes each key as a
+        // route over the project's own, and `@` would send every unscoped
+        // package to the private registry. The install matrix cannot see that,
+        // because its `--registry` outranks the route.
+        expect(JSON.parse(env[PNPM_AUTH_ENV])).toEqual({
+            'https://packages.superfunction.xyz/npm/': {
+                '@spfn': { authToken: 'spfnr_session_1' },
+                '@superfunction': { authToken: 'spfnr_session_1' },
+            },
+        });
         // Still under its own name too: the proxy verification this CLI runs
         // before the install reads the session from there.
         expect(env[REGISTRY_TOKEN_ENV]).toBe('spfnr_session_1');

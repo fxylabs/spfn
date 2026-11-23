@@ -1598,6 +1598,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **spfn: `kit install`, `kit update` and `kit restore` authenticate under pnpm 12.23 (#482).** The
+  registry session reached pnpm only as `npm_config_//host/npm/:_authToken`. pnpm 12.23's corepack
+  entry starts its native binary through `/bin/sh`, and dash (Debian's and Ubuntu's `/bin/sh`)
+  drops every variable whose name is not a shell identifier, so the install went out with no
+  `Authorization` header and the registry answered 401; 12.22 started the binary directly and was
+  not affected. The session is now also handed over as `pnpm_config__auth`, the structured `_auth`
+  setting pnpm 11.10 and later read, keyed by the release's scopes (from the signed manifest, in
+  `kit restore` too) and never by `@`. pnpm 11.10 and later take each key as a route as well, and
+  that route takes precedence over the project's `.npmrc`: a release scope a project `.npmrc` sends
+  to another registry is resolved from the kit registry anyway. Unscoped packages and every other
+  scope keep the project's routing. pnpm 9 and 10 keep reading the `npm_config_` keys, which route
+  nothing. No file carries the session. The install test pins its pnpm through corepack instead of running
+  npm's `latest`, and its pnpm matrix gains 12.23.0.
+
 - **@spfn/auth, @spfn/core: an error the client restores keeps every field it was thrown with —
   `SignInRefusedError` and `PasswordChangeRefusedError` keep `details.code`, `HttpError`,
   `DatabaseError`, `QueryError` and `TransactionError` keep their `statusCode` (#459).** The two

@@ -34,6 +34,9 @@ export const PASSTHROUGH_ENV = [
 /** The env name the registry session is handed to the child under. */
 export const REGISTRY_TOKEN_ENV = 'SPFN_REGISTRY_TOKEN';
 
+/** The env name pnpm 11.10 and later read the structured `_auth` setting from. */
+export const PNPM_AUTH_ENV = 'pnpm_config__auth';
+
 /**
  * The CLI's own configuration, for a child that *is* this CLI.
  *
@@ -59,6 +62,14 @@ export const KIT_CONFIG_ENV = [
     'NODE_EXTRA_CA_CERTS',
 ] as const;
 
+/** A private registry and the npm scopes the release resolves from it. */
+export interface RegistryTarget
+{
+    url: string;
+    /** E.g. `@spfn`. The scopes the project's `.npmrc` points at `url`. */
+    scopes: readonly string[];
+}
+
 export interface ChildEnvOptions
 {
     /** The parent environment to select from. */
@@ -66,12 +77,14 @@ export interface ChildEnvOptions
     /** The short-lived registry session, if this child needs one. */
     registryToken?: string;
     /**
-     * Where that session is good for. Public address, never a secret.
+     * Where that session is good for, and the scopes it serves. Public, never
+     * a secret.
      *
-     * Given alongside a session, the child is also handed the session as npm
-     * configuration addressed to this registry — see `registryAuthEnv`.
+     * Given alongside a session, the child is also handed the session as
+     * package-manager configuration addressed to this registry — see
+     * `registryAuthEnv`.
      */
-    registryUrl?: string;
+    registry?: RegistryTarget;
     /** Extra secret-free variables, e.g. `npm_config_registry`. */
     extra?: Record<string, string>;
     /** Additional parent names to pass through. */
@@ -107,9 +120,9 @@ export function createChildEnv(options: ChildEnvOptions = {}): Record<string, st
     {
         env[REGISTRY_TOKEN_ENV] = options.registryToken;
 
-        if (options.registryUrl !== undefined)
+        if (options.registry !== undefined)
         {
-            Object.assign(env, registryAuthEnv(options.registryUrl, options.registryToken));
+            Object.assign(env, registryAuthEnv(options.registry, options.registryToken));
         }
     }
 
@@ -146,8 +159,8 @@ function nerfDart(registryUrl: string): string
  *     *first* colon, so `//host:4873/npm/:_authToken` arrives as the setting
  *     `//host:4873/npm/:-authtoken` and opens nothing. A port-less key has one
  *     colon, survives that split, and pnpm retries a ported request against the
- *     port-less URI when nothing matched. Only pnpm 11 reads the exact key, and
- *     prefers it; the extra one costs it nothing.
+ *     port-less URI when nothing matched. pnpm 11 and 12 read the exact key,
+ *     and prefer it; the extra one costs them nothing.
  *
  * Parsed rather than pattern-matched, so an IPv6 literal (`//[::1]:4873/npm/`)
  * loses its port and not its address.
@@ -187,35 +200,59 @@ export function registryAuthKeys(registryUrl: string): string[]
 }
 
 /**
- * The registry session, spelled as npm configuration in the environment.
+ * The registry session, spelled as configuration every pnpm reads from the
+ * environment — two spellings, because no single one reaches every major.
  *
- * This is the only channel that works across every pnpm a user may have. The
- * `.npmrc` this CLI writes used to carry `_authToken=${SPFN_REGISTRY_TOKEN}`,
- * and pnpm 10 and later refuse to expand a variable in a credential that came
- * from a *project* `.npmrc` — the file is committed, so a hostile edit could
- * point the secret at someone else's registry. pnpm warns and drops the line,
- * and the install then fails as unauthorized. Measured on 10.34.5 and 11.23.0;
- * 9.15.9 still expands it.
+ * Never a file. The `.npmrc` this CLI writes used to carry
+ * `_authToken=${SPFN_REGISTRY_TOKEN}`, and pnpm 10 and later refuse to expand a
+ * variable in a credential that came from a *project* `.npmrc` — the file is
+ * committed, so a hostile edit could point the secret at someone else's
+ * registry. Measured on 10.34.5 and 11.23.0; 9.15.9 still expands it.
  *
- * npm and pnpm both accept configuration from `npm_config_*` variables, and a
- * per-registry credential can be spelled that way. The environment is not a
- * committed file, so the versions that refuse the `.npmrc` credential honour it,
- * and pnpm has read configuration this way for its whole life.
+ *   - `npm_config_//host/path/:_authToken`, one per `registryAuthKeys`, for
+ *     pnpm 9 and 10 (and 11 before 11.10), which read a per-registry credential
+ *     from no other variable. The suffix is matched case-sensitively by every
+ *     version, so an all-lowercase `_authtoken` is silently not a credential.
+ *   - `pnpm_config__auth`, for pnpm 11.10 and later, 12 included. A name with
+ *     `/` or `:` in it is not a shell identifier, and dash, Debian's and
+ *     Ubuntu's `/bin/sh`, drops such a variable from the environment of what
+ *     it `exec`s. pnpm 12.23's Corepack entry starts the native binary through
+ *     `/bin/sh`, so there the first spelling never reaches it and the install
+ *     goes out with no `Authorization` header. pnpm added this
+ *     variable for exactly that (pnpm/pnpm#12314); 9 and 10 do not read it.
  *
- * The spelling is exact on purpose: the suffix is matched case-sensitively by
- * every version, so an all-lowercase `_authtoken` is silently not a credential
- * on any of them.
+ * The `_auth` value is keyed by the release's scopes and never by `@`. pnpm
+ * takes each entry as a route as well, and that route takes precedence over
+ * the project's `.npmrc`: a scope listed here resolves from this registry even
+ * where a project `.npmrc` sends it elsewhere. `@` would therefore make the
+ * private registry the default, and pnpm 11.23 then resolves every unscoped
+ * package there. The scopes must come from the signed manifest, since they
+ * decide what this registry serves.
  */
-export function registryAuthEnv(registryUrl: string, token: string): Record<string, string>
+export function registryAuthEnv(registry: RegistryTarget, token: string): Record<string, string>
 {
     const env: Record<string, string> = {};
 
-    for (const key of registryAuthKeys(registryUrl))
+    for (const key of registryAuthKeys(registry.url))
     {
         env[`npm_config_${key}`] = token;
     }
+    env[PNPM_AUTH_ENV] = pnpmAuthSetting(registry, token);
 
     return env;
+}
+
+/**
+ * pnpm's `_auth` setting: registry URL → scope → `{ authToken }`.
+ *
+ * pnpm parses it strictly and fails the command on any other shape, so a
+ * mistake here is a loud failure rather than a silently unauthenticated one.
+ */
+function pnpmAuthSetting(registry: RegistryTarget, token: string): string
+{
+    const byScope = Object.fromEntries(registry.scopes.map(scope => [scope, { authToken: token }]));
+
+    return JSON.stringify({ [registry.url]: byScope });
 }
 
 /**

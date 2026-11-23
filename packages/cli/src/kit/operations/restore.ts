@@ -145,6 +145,10 @@ export async function runRestore(request: RestoreRequest, adapters: KitAdapters)
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
+                    // The signed manifest's, not the lock's: these scopes are
+                    // the routes pnpm sends to the private registry, and
+                    // nothing signs the lock.
+                    packages: manifest.packages,
                 });
 
                 return { kind: 'done', evidence: { attempts: evidence.attempts } };

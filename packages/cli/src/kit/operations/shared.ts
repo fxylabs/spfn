@@ -31,7 +31,7 @@ import { verifySignedDocument } from './../signature.js';
 import { readLicenseFile, type KitLicenseFileV1 } from './../installed-state.js';
 import { AGENT_PACK_RECORD_PATH, readAgentPackRecord } from './../agent-pack.js';
 import type { KitCredentialRecord } from './../credentials.js';
-import type { KitGate } from './../manifest.js';
+import type { KitGate, KitPackageEntry } from './../manifest.js';
 
 /** `op-<yyyymmddhhmmss>-<type>-<suffix>`, inside the contract's ID pattern. */
 export function newOperationId(type: string, now: string, suffix: string): string
@@ -304,6 +304,8 @@ export interface FrozenInstallOptions
     activationId: string;
     localClientId: string;
     credential: string;
+    /** The packages the private registry serves, for the scopes the session is filed under. */
+    packages: readonly KitPackageEntry[];
     /** Whether one retry after an unauthorized fetch is allowed. */
     allowSessionRetry?: boolean;
     /**
@@ -333,10 +335,11 @@ export interface FrozenInstallEvidence
  * and the child process's environment. It is not written to `.npmrc`, not
  * passed as an argument, and not put in the journal.
  *
- * The environment carries it twice over, under two names that answer to two
- * readers: `SPFN_REGISTRY_TOKEN` for the proxy verification this CLI does
- * itself, and the registry's own npm configuration key for the package manager.
- * Both are the same session and both die with the child.
+ * The environment carries it under names that answer to two readers:
+ * `SPFN_REGISTRY_TOKEN` for the proxy verification this CLI does itself, and
+ * the registry's own configuration for the package manager, spelled once for
+ * each pnpm that reads it differently (`registryAuthEnv`). All are the same
+ * session and all die with the child.
  */
 export async function installFrozenGraph(
     adapters: KitAdapters,
@@ -384,7 +387,10 @@ export async function installFrozenGraph(
         const result = await adapters.packageManager.install({
             cwd: options.projectDir,
             frozen: options.resolve !== true,
-            env: createChildEnv({ registryToken: session.token, registryUrl: adapters.registryUrl }),
+            env: createChildEnv({
+                registryToken: session.token,
+                registry: { url: adapters.registryUrl, scopes: scopesOf(options.packages) },
+            }),
         });
 
         if (result.ok)
@@ -425,9 +431,9 @@ export async function installFrozenGraph(
  * resolved by whatever the machine's own configuration says — which is a
  * broken install at best and a request to somebody else's registry at worst.
  */
-function scopesOf(manifest: KitReleaseManifestView): string[]
+function scopesOf(packages: readonly KitPackageEntry[]): string[]
 {
-    const scopes = manifest.packages
+    const scopes = packages
         .filter(entry => entry.name.startsWith('@'))
         .map(entry => entry.name.split('/')[0]);
 
@@ -457,7 +463,7 @@ export function writeRegistryNpmrc(
     registryUrl: string,
 ): void
 {
-    writeFileSync(join(projectDir, '.npmrc'), registryNpmrc(scopesOf(manifest), registryUrl), 'utf8');
+    writeFileSync(join(projectDir, '.npmrc'), registryNpmrc(scopesOf(manifest.packages), registryUrl), 'utf8');
 }
 
 /**

@@ -82,6 +82,14 @@ function cleanClone(): string
     return clone;
 }
 
+/** The scopes a child's `pnpm_config__auth` routes to the private registry. */
+function routedScopes(env: Record<string, string>): string[]
+{
+    const [byScope] = Object.values(JSON.parse(env.pnpm_config__auth)) as object[];
+
+    return Object.keys(byScope);
+}
+
 async function failureOf(run: () => Promise<unknown>): Promise<{ code: string; exitCode: number }>
 {
     try
@@ -122,6 +130,28 @@ describe('table B — clean clone and credentials', () =>
         // Restore reinstalls; it does not rewrite the source it was handed.
         expect(readFileSync(join(clone, 'src/app/api/landing/route.ts'), 'utf8'))
             .toBe(readFileSync(join(target, 'src/app/api/landing/route.ts'), 'utf8'));
+    });
+
+    it('routes only the signed manifest\'s scopes to the private registry, whatever the lock lists', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+
+        const clone = cleanClone();
+        const lockFile = join(clone, '.spfn/kit-lock.json');
+        const lock = JSON.parse(readFileSync(lockFile, 'utf8'));
+
+        // The digest and release still match the manifest, so restore accepts
+        // the lock; only its unsigned package list names one scope more.
+        lock.packages.push({ ...lock.packages[0], name: '@types/node' });
+        writeFileSync(lockFile, JSON.stringify(lock), 'utf8');
+
+        const result = await runRestore({ projectDir: clone, json: true, write: silent }, world.adapters);
+        const scopes = world.childEnvironments.map(routedScopes);
+
+        expect(result.status).toBe('completed');
+        expect(scopes.at(-1)).toEqual(scopes[0]);
     });
 
     it('stops with KIT_CREDENTIAL_MISSING on a machine that holds no credential', async () =>

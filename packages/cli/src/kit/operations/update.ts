@@ -435,6 +435,7 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
+                    packages: manifest.packages,
                     // The lockfile pins the previous release, so holding it
                     // frozen would install the previous release and succeed.
                     resolve: declared.length > 0,
