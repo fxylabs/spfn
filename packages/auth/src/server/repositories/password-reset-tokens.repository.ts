@@ -129,11 +129,13 @@ export class PasswordResetTokensRepository extends AccountStateRepository
 
     /**
      * Find a setup session that can still be used to set a password.
-     * Read replica.
+     *
+     * Write primary: read before the completion's transaction opens, moments
+     * after the session was opened, which a replica may not have yet.
      */
     async findLiveSetupBySecretHash(setupSecretHash: string): Promise<PasswordResetToken | null>
     {
-        const result = await this.readDb
+        const result = await this.db
             .select()
             .from(passwordResetTokens)
             .where(
@@ -183,21 +185,25 @@ export class PasswordResetTokensRepository extends AccountStateRepository
 
     /**
      * Mark a setup session as completed, but only if it has not completed
-     * already.
+     * already, nor been superseded, nor expired: the session was found live
+     * before the app's password rule was asked, and this is the check that
+     * still holds after it.
      *
      * @returns the updated row, or null if another request completed it first
      */
     async complete(token: TokenHandle): Promise<PasswordResetToken | null>
     {
+        const now = new Date();
         const result = await this.db
             .update(passwordResetTokens)
-            .set({ completedAt: new Date() })
+            .set({ completedAt: now })
             .where(
                 and(
                     eq(passwordResetTokens.id, token.id),
                     eq(passwordResetTokens.userId, token.userId),
                     isNull(passwordResetTokens.completedAt),
                     isNull(passwordResetTokens.supersededAt),
+                    gt(passwordResetTokens.setupExpiresAt, now),
                 ),
             )
             .returning();

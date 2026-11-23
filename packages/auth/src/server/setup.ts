@@ -7,7 +7,7 @@
 import { env } from '@spfn/auth/config';
 import { getRoleByName } from '@spfn/auth/server';
 
-import { hashPassword } from './helpers';
+import { hashNewPassword } from './services/password-rule.service';
 import { isEmailAllowedForRole, ROLE_EMAIL_DOMAINS_VAR } from './lib/role-email-domains';
 import { authLogger } from './logger';
 import { usersRepository } from './repositories';
@@ -197,6 +197,10 @@ function assertSeedAccountsWithinPolicy(accounts: AdminAccountConfig[]): void
  *   change the password until it is changed or reset (#362)
  * - status: 'active'
  *
+ * Each password is held to the app's password rule (`password.validate`,
+ * `channel: 'seed'`) before it is hashed; an account whose password it refuses
+ * is not created and counts as failed.
+ *
  * @throws Error when `SPFN_AUTH_ROLE_EMAIL_DOMAINS` does not allow an account's
  *         email for its role — checked for every account before any is created
  *
@@ -256,14 +260,16 @@ export async function ensureAdminExists(): Promise<void>
                 continue;
             }
 
-            // Hash password
-            const passwordHash = await hashPassword(account.password);
+            // Create admin account. The app's password rule is asked of the
+            // seeded password too: until it is changed it signs in, and whoever
+            // guesses it chooses the next one. It is asked about the phone the
+            // row stores — an empty one stored as null is null to it too.
+            const phone = account.phone || null;
 
-            // Create admin account
             await usersRepository.create({
                 email: account.email,
-                phone: account.phone || null,
-                passwordHash,
+                phone,
+                passwordHash: await hashNewPassword(account.password, { channel: 'seed', email: account.email, phone }),
                 roleId: role.id,
                 emailVerifiedAt: new Date(), // Auto-verify admin
                 passwordChangeRequired: account.passwordChangeRequired !== false,

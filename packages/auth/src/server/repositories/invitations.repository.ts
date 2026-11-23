@@ -328,6 +328,27 @@ export class InvitationsRepository extends BaseRepository
     }
 
     /**
+     * The invitation a presented token names, while it can still be accepted
+     * (`claimableAt`), without locking it: what acceptance reads to ask the
+     * app's password rule before its transaction opens. The claim
+     * (`claimPendingByTokenHash`) decides; this only names the invited address.
+     *
+     * Write primary: a replica may not have a resend's new hash yet.
+     *
+     * @param tokenHash - `hashCredential` of the presented token
+     */
+    async findClaimableByTokenHash(tokenHash: string)
+    {
+        const result = await this.db
+            .select(invitationColumns)
+            .from(userInvitations)
+            .where(and(eq(userInvitations.tokenHash, tokenHash), claimableAt(new Date())))
+            .limit(1);
+
+        return result[0] ?? null;
+    }
+
+    /**
      * Mark the pending, unexpired invitation a presented token names accepted
      *
      * One conditional statement: it matches only while the hash is still the

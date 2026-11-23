@@ -767,6 +767,8 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         'PasswordChangeRequiredError',
         // #434: the app refused, or its hook failed, and the change rolled back; the session stays.
         'PasswordChangeRefusedError', 'PasswordChangeHookFailedError',
+        // #458: the app's password rule threw; nothing was written, the session stays.
+        'PasswordRuleFailedError',
         'SecondFactorMethodDisabledError', 'SecondFactorRequiredError', 'MfaConfigError', 'SessionPendingMismatchError',
         'SessionPendingExpiredError', 'UserSettingNotDeclaredError', 'AccountBusyError', 'SecondFactorLockedError',
         'ConfigOwnedMappingError', 'ConfigOwnedRoleError', 'RoleInUseError', 'AuthorityContendedError', 'RbacSyncBusyError',

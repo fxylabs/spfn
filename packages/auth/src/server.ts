@@ -106,6 +106,13 @@ export type {
     PasswordChangeChannel,
     PasswordChangeGuardOptions,
 } from './server/lib/password-change-guard';
+export type {
+    AdmittedPasswordHash,
+    PasswordRuleAnswer,
+    PasswordRuleChannel,
+    PasswordRuleOptions,
+    PasswordRuleSubject,
+} from './server/lib/password-rule';
 
 // ============================================================================
 // Jobs

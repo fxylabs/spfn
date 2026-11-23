@@ -15,7 +15,8 @@ import { INVITATION_MAX_EXPIRY_DAYS, type InvitationStatus, type KeyAlgorithmTyp
 import { hashCredential, mintCredential } from '../lib/link-credentials';
 import { runBeforeRegister } from '../lib/config';
 import { assertEmailAllowedForRole } from '../lib/role-email-domains';
-import { hashPassword } from '../helpers';
+import { admitNewPassword, hashAdmittedPassword } from './password-rule.service';
+import type { AdmittedPassword } from '../lib/password-rule';
 import { invitationCreatedEvent, invitationAcceptedEvent } from '../events';
 import { registerPublicKeyService, registeredBinding } from './key.service';
 import { BadRequestError, NotFoundError, ConflictError } from '@spfn/core/errors';
@@ -377,16 +378,19 @@ interface AcceptInvitationParams
  */
 export async function acceptInvitation(params: AcceptInvitationParams)
 {
+    const password = await admitInviteePassword(params);
+
     // One transaction from the claim to the key: whatever refuses the
     // acceptance after the claim puts the invitation back to pending. An
     // inviter's role that moved under the judgement runs it all again, from
     // the claim (`runJudgedTransaction`); the stale premise is found before
-    // `beforeRegister` runs and the event is after commit, so neither repeats.
+    // `beforeRegister` runs, the password rule was asked before the first
+    // attempt and the event is after commit, so none of them repeats.
     return await runJudgedTransaction(async () =>
     {
         const invitation = await claimInvitation(params.token);
         const { role, emailVerifiedAt } = await admitInvitee(invitation);
-        const newUser = await createInvitedAccount(invitation, params, emailVerifiedAt);
+        const newUser = await createInvitedAccount(invitation, params, password, emailVerifiedAt);
 
         // After the commit, like the device event: the account must be
         // readable by the time a subscriber hears of it.
@@ -409,6 +413,33 @@ export async function acceptInvitation(params: AcceptInvitationParams)
 }
 
 /**
+ * The app's password rule, asked about the invitee's password before the
+ * acceptance's transaction opens
+ *
+ * The rule may wait on anything (a breached-password lookup), so it is asked
+ * with nothing claimed or locked and no transaction open: the invitation is
+ * read, unlocked, only to name the invited address. The claim decides after
+ * it — an invitation accepted, resent, cancelled or expired meanwhile, or an
+ * inviter who lost the authority, is refused there as it is without a rule.
+ *
+ * @throws InvitationNotFoundError (404) / InvitationNoLongerValidError (410) as the claim would
+ * @throws ValidationError when the rule refuses the password
+ * @throws PasswordRuleFailedError when the rule throws
+ */
+async function admitInviteePassword(params: AcceptInvitationParams): Promise<AdmittedPassword>
+{
+    const invitation = await invitationsRepository.findClaimableByTokenHash(hashCredential(params.token))
+        ?? await refuseUnclaimable(params.token);
+
+    return await admitNewPassword(params.password, '/password', () => ({
+        channel: 'invitation',
+        userId: null,
+        email: invitation.email,
+        phone: null,
+    }));
+}
+
+/**
  * Mark the invitation a presented token names accepted, or refuse
  *
  * The claim comes first and is one conditional statement, so of an acceptance
@@ -420,14 +451,19 @@ export async function acceptInvitation(params: AcceptInvitationParams)
  */
 async function claimInvitation(token: string): Promise<InvitationRecord>
 {
-    const claimed = await invitationsRepository.claimPendingByTokenHash(hashCredential(token));
+    return await invitationsRepository.claimPendingByTokenHash(hashCredential(token))
+        ?? await refuseUnclaimable(token);
+}
 
-    if (claimed)
-    {
-        return claimed;
-    }
-
-    // Nothing matched; the lookup a stale token gets says why.
+/**
+ * Refuse a token that names no invitation that can be accepted; the lookup a
+ * stale token gets says why.
+ *
+ * @throws InvitationNotFoundError (404) when the token names no invitation
+ * @throws InvitationNoLongerValidError (410) when it was accepted, cancelled or has expired
+ */
+async function refuseUnclaimable(token: string): Promise<never>
+{
     await requireAcceptableInvitation(token);
 
     throw new InvitationNoLongerValidError();
@@ -486,17 +522,19 @@ async function assertInviterStillAuthorizes(invitation: InvitationRecord): Promi
 }
 
 /**
- * The invitee's account and its public key
+ * The invitee's account and its public key, with the password the app's rule
+ * accepted before the transaction opened (`admitInviteePassword`)
  */
 async function createInvitedAccount(
     invitation: InvitationRecord,
     params: AcceptInvitationParams,
+    password: AdmittedPassword,
     emailVerifiedAt: Date,
 )
 {
     const newUser = await usersRepository.create({
         email: invitation.email,
-        passwordHash: await hashPassword(params.password),
+        passwordHash: await hashAdmittedPassword(password),
         roleId: invitation.roleId,
         emailVerifiedAt, // Auto-verify invited users
         passwordChangeRequired: false,

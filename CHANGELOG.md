@@ -44,6 +44,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `update` list that leaves out a `$onUpdate` column (`timestamps()`' `updatedAt`) are an
   `AppPrivilegesError` at load, not a 42501 on the app's first write; a `select` list works with
   explicit column selections only (the core db README, "Column lists").
+- **@spfn/auth: one password rule, applied on every path that writes a password —
+  `createAuthLifecycle({ password: { validate } })` (#458).** A new password was held to
+  `PasswordSchema` (length) alone, stated per route, and since #417 a session with
+  `passwordChangeRequired` reaches no app route, so an app had nowhere to apply its own policy —
+  `PUT /_auth/password` answered 204 to `aaaaaaaa` after a temporary password. `validate(password,
+  { channel, userId, email, phone })`, sync or async, is now asked before the hash is computed on
+  `register`, `signup-link`, `invitation`, `change`, `reset`, admin seeding (`seed`) and the new
+  `hashNewPassword` (`operator`); `subject` carries identifiers only, `userId: null` where no account
+  exists yet. Messages answer **400 `ValidationError`** with one `fields` entry per message on
+  `/password` (`/newPassword` on a change), the TypeBox failure's shape and message (`Invalid request
+  body`) without `value`; a throw answers **500 `PasswordRuleFailedError`** (`channel`,
+  `hookErrorClass`, `hookErrorCode?`) and accepts nothing. The rule is never asked inside a
+  transaction or with anything locked: on a change after the step-up and before the current password
+  is checked; on a reset before the account is read; on register, the signup link and an invitation
+  before the transaction that claims and creates the account — `POST /_auth/register`,
+  `/_auth/signup/password` and `/_auth/password/reset/complete` no longer run under a route-wide
+  `Transactional()`; their services open the transaction once the rule has answered, and a setup
+  session that expires meanwhile is refused by its claim. Omitted, nothing changes;
+  `validatePasswordStrength` stays opt-in, called inside the rule. **BREAKING (types):**
+  `usersRepository.create`/`updateById`/`updatePassword`/`replaceVerifiedPasswordHash` and
+  `updateUserService` take `passwordHash` as an `AdmittedPasswordHash`, which only the rule's path
+  makes: app code writing `await hashPassword(…)` there moves to `await hashNewPassword(…)`. New
+  exports from `@spfn/auth/server`: `hashNewPassword` and the types `PasswordRuleOptions`,
+  `PasswordRuleSubject`, `PasswordRuleChannel`, `PasswordRuleAnswer`, `AdmittedPasswordHash`,
+  `NewUserRow`; from `@spfn/auth/errors`: `PasswordRuleFailedError`. No schema change, no migration;
+  the mobile contract does not move.
+- **@spfn/core: `invalidInputMessage(part)` and `REQUEST_BODY` from `@spfn/core/route`** — the
+  message of the `ValidationError` a part of the request fails its schema with
+  (`invalidInputMessage(REQUEST_BODY)` is `Invalid request body`), for a check a handler makes on
+  the same body after the schema's, so the two failures cannot read differently. `validateField`
+  builds its message with it; nothing it answers changes. `@spfn/auth`'s password rule (#458)
+  refuses with it.
 - **@spfn/auth: a seat for the app inside a password change — `createAuthLifecycle({ passwordChange:
   { admit, changed } })` and `auth.password.changed` (#434).** Since the required password change is
   enforced, a flagged session reaches no app route, so an app could no longer wrap the change in its

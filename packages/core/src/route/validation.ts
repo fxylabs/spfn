@@ -130,6 +130,25 @@ function validateSingleFile(
 }
 
 /**
+ * What a request body is called in the message it fails its schema with:
+ * `invalidInputMessage(REQUEST_BODY)` is `Invalid request body`.
+ */
+export const REQUEST_BODY = 'request body';
+
+/**
+ * The message of the `ValidationError` a part of the request fails its schema
+ * with. Exported so that a check a handler makes on the same body after the
+ * schema's answers with the message the schema's failure has, and cannot drift
+ * from it.
+ *
+ * @param part - what the part is called (`REQUEST_BODY`, `'query parameters'`)
+ */
+export function invalidInputMessage(part: string): string
+{
+    return `Invalid ${part}`;
+}
+
+/**
  * Validate a value against a TypeBox schema
  *
  * @param schema - TypeBox schema to validate against
@@ -155,7 +174,7 @@ export function validateField<T extends Record<string, unknown>>(
     if (errors.length > 0)
     {
         throw new ValidationError({
-            message: `Invalid ${fieldName}`,
+            message: invalidInputMessage(fieldName),
             fields: errors.map((e): ValidationFieldError => ({
                 path: e.path,
                 message: e.message,
@@ -274,7 +293,7 @@ export function validateFormData<T extends Record<string, unknown>>(
     if (fileErrors.length > 0)
     {
         throw new ValidationError({
-            message: `Invalid ${fieldName}`,
+            message: invalidInputMessage(fieldName),
             fields: fileErrors,
         });
     }
@@ -294,7 +313,7 @@ export function validateFormData<T extends Record<string, unknown>>(
         if (errors.length > 0)
         {
             throw new ValidationError({
-                message: `Invalid ${fieldName}`,
+                message: invalidInputMessage(fieldName),
                 fields: errors.map((e): ValidationFieldError => ({
                     path: e.path,
                     message: e.message,

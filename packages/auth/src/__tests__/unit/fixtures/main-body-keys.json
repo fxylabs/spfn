@@ -393,6 +393,13 @@
         "message",
         "details"
     ],
+    "PasswordRuleFailedError": [
+        "__type",
+        "message",
+        "channel",
+        "hookErrorClass",
+        "hookErrorCode"
+    ],
     "PurgeHookFailedError": [
         "__type",
         "message",

@@ -55,6 +55,7 @@ import { defineRouter, route } from '@spfn/core/route';
 import { deviceProvenance } from '../../lib/device-provenance';
 import { channelStates } from '../../lib/channels-config';
 import { authenticateForSignOut } from '../../middleware/authenticate-for-sign-out';
+import { reportDatabaseErrors } from '../../middleware/report-database-errors';
 import { deviceAuthLongPoll, DEVICE_AUTH_WAITED_MILLIS } from '../../middleware/device-auth-long-poll';
 import {
     deviceLinkPollLongPoll,
@@ -122,6 +123,10 @@ export const verifyCode = route.post('/_auth/codes/verify')
 /**
  * POST /_auth/register - Register new user
  * Register with email/phone and password, includes public key
+ *
+ * No `Transactional()`: the app's password rule is asked before any
+ * transaction opens, and the service opens the one that creates the account;
+ * `reportDatabaseErrors()` still feeds the reconnect trigger, as it did.
  */
 export const register = route.post('/_auth/register')
     .input({
@@ -150,7 +155,7 @@ export const register = route.post('/_auth/register')
             platform: Type.Optional(PlatformSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-register', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 100 }) }), Transactional()])
+    .use([rateLimitPolicy('auth-register', { limit: 10, windowMs: 60_000, by: byIpAndAccount({ ipLimit: 100 }) }), reportDatabaseErrors()])
     .skip(['auth'])
     .handler(async (c) =>
     {
@@ -225,7 +230,9 @@ export const confirmSignupLink = route.post('/_auth/signup/email/confirm')
  * Authorized by the setup-session cookie, not by a session: the interceptor
  * reads that cookie into `setupSecret` and injects the device key the same way
  * it does for register. Creating the user, registering the key and marking the
- * setup session used all commit together.
+ * setup session used all commit together, in the transaction the service opens
+ * once the app's password rule has answered — hence no `Transactional()`, and
+ * `reportDatabaseErrors()` in its place for the reconnect trigger.
  */
 export const completeSignup = route.post('/_auth/signup/password')
     .input({
@@ -247,7 +254,7 @@ export const completeSignup = route.post('/_auth/signup/password')
             platform: Type.Optional(PlatformSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-signup-password', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .use([rateLimitPolicy('auth-signup-password', { limit: 10, windowMs: 60_000 }), reportDatabaseErrors()])
     .skip(['auth'])
     .handler(async (c) =>
     {

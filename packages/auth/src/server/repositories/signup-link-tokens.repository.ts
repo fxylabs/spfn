@@ -106,11 +106,13 @@ export class SignupLinkTokensRepository extends BaseRepository
 
     /**
      * Find a row by the hash of a setup session secret, in any state.
-     * Read replica.
+     *
+     * Write primary: read before the completion's transaction opens, moments
+     * after the session was opened, which a replica may not have yet.
      */
     async findBySetupSecretHash(setupSecretHash: string): Promise<SignupLinkToken | null>
     {
-        const result = await this.readDb
+        const result = await this.db
             .select()
             .from(signupLinkTokens)
             .where(eq(signupLinkTokens.setupSecretHash, setupSecretHash))
@@ -152,20 +154,24 @@ export class SignupLinkTokensRepository extends BaseRepository
 
     /**
      * Mark a setup session as completed, but only if it has not completed
-     * already.
+     * already, nor been superseded, nor expired: the session was found usable
+     * before the app's password rule was asked, and this is the check that
+     * still holds after it.
      *
      * @returns the updated row, or null if another request completed it first
      */
     async claimSetupSession(id: number): Promise<SignupLinkToken | null>
     {
+        const now = new Date();
         const result = await this.db
             .update(signupLinkTokens)
-            .set({ completedAt: new Date() })
+            .set({ completedAt: now })
             .where(
                 and(
                     eq(signupLinkTokens.id, id),
                     isNull(signupLinkTokens.completedAt),
                     isNull(signupLinkTokens.supersededAt),
+                    gt(signupLinkTokens.setupExpiresAt, now),
                 ),
             )
             .returning();

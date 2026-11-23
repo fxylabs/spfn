@@ -26,6 +26,7 @@ import { authMigrationContaining } from '../helpers/migrations';
 import { accountExistsNotices, passwordResetTokens, users, verificationCodes } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 import { hashPassword } from '@/server/helpers/password';
+import type { AdmittedPassword } from '@/server/lib/password-rule';
 
 vi.mock('@spfn/notification/server', async (importOriginal) =>
 {
@@ -507,7 +508,7 @@ describe.skipIf(!dbAvailable)('Email normalization', () =>
 
             await expect(createVerifiedAccount({
                 email: 'owner@example.com',
-                password: PASSWORD,
+                password: PASSWORD as AdmittedPassword,
                 publicKey: key.publicKey,
                 keyId: key.keyId,
                 fingerprint: key.fingerprint,

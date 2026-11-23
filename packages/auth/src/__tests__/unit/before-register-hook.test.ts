@@ -43,6 +43,7 @@ const {
         keysRepository: { create: vi.fn() },
         socialAccountsRepository: { createIfAbsent: vi.fn(async () => ({ id: 1 })) },
         invitationsRepository: {
+            findClaimableByTokenHash: vi.fn(),
             claimPendingByTokenHash: vi.fn(),
         },
         rolesRepository: { findById: findRole, findByIdOnPrimary: findRole },
@@ -285,7 +286,7 @@ describe('beforeRegister hook', () =>
         {
             const { hook, contexts } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            invitationsRepository.claimPendingByTokenHash.mockResolvedValue({
+            const invitation = {
                 id: 5,
                 email: 'invitee@example.com',
                 status: 'pending',
@@ -293,7 +294,9 @@ describe('beforeRegister hook', () =>
                 roleId: 2,
                 invitedBy: 7,
                 metadata: { team: 'design' },
-            });
+            };
+            invitationsRepository.findClaimableByTokenHash.mockResolvedValue(invitation);
+            invitationsRepository.claimPendingByTokenHash.mockResolvedValue(invitation);
             rolesRepository.findById.mockResolvedValue({ id: 2, name: 'member' });
 
             await expect(acceptInvitation({
@@ -317,7 +320,7 @@ describe('beforeRegister hook', () =>
         {
             const { hook, contexts } = rejectAll();
             configureAuth({ beforeRegister: hook });
-            invitationsRepository.claimPendingByTokenHash.mockResolvedValue({
+            const invitation = {
                 id: 6,
                 email: 'invitee@example.com',
                 status: 'pending',
@@ -325,7 +328,9 @@ describe('beforeRegister hook', () =>
                 roleId: 2,
                 invitedBy: 7,
                 metadata: null,
-            });
+            };
+            invitationsRepository.findClaimableByTokenHash.mockResolvedValue(invitation);
+            invitationsRepository.claimPendingByTokenHash.mockResolvedValue(invitation);
             rolesRepository.findById.mockResolvedValue({ id: 2, name: 'member' });
 
             await expect(acceptInvitation({

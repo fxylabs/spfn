@@ -14,6 +14,7 @@ import type { Router } from './router';
 import { resolveRouteMiddlewares, type ResolvedRoute } from './route-chain';
 import type { HttpMethod } from './types';
 import {
+    REQUEST_BODY,
     validateField,
     validateFormData,
     extractQueryParams,
@@ -199,7 +200,7 @@ async function createRouteBuilderContext<TInput extends RouteInput>(
         {
             const rawBody = await parseJsonBody(c);
             body = input.body
-                ? validateField(input.body, rawBody, 'request body')
+                ? validateField(input.body, rawBody, REQUEST_BODY)
                 : rawBody;
         }
     }

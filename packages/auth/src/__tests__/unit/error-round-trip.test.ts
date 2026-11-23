@@ -21,7 +21,8 @@
  * `fixtures/main-body-keys.json` was taken from `main` at d0105b3b: each
  * registered class, built there with this file's fixtures (the two refusals
  * with `code` beside `details`, main's constructor), serialized, and its keys
- * listed in order.
+ * listed in order. `PasswordRuleFailedError` (#458) is not on `main`: its
+ * entry is what it sends when it is first registered, taken the same way.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -66,6 +67,7 @@ const fixtures: Fixtures = {
     SignInRefusedError: { message: 'refused', details: { ...DETAILS, code: 'LOCKED' } },
     PasswordChangeRefusedError: { message: 'refused', details: { ...DETAILS, code: 'TEMPORARY_PASSWORD_EXPIRED' } },
     PasswordChangeHookFailedError: { hook: 'admit', userId: 3, hookErrorClass: 'PostgresError', hookErrorCode: '23505' },
+    PasswordRuleFailedError: { channel: 'register', hookErrorClass: 'PostgresError', hookErrorCode: '23505' },
     InvalidVerificationCodeError: PLAIN,
     InvalidVerificationTokenError: PLAIN,
     KeyIdAlreadyRegisteredError: PLAIN,

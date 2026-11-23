@@ -22,6 +22,9 @@ export type {
     MfaChallengeHandle,
 } from './auth.service';
 
+// Password Rule — the app's own code writing a password through the repository
+export { hashNewPassword } from './password-rule.service';
+
 // Verification Service
 export {
     sendVerificationCodeService,

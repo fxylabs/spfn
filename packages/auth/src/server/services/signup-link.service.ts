@@ -15,6 +15,7 @@
  * is a second entry point to the same account creation, not a replacement.
  */
 
+import { runInTransaction } from '@spfn/core/db';
 import { env } from '@spfn/auth/config';
 import { InvalidSignupLinkError, InvalidSignupSetupSessionError } from '@spfn/auth/errors';
 import { authLogger } from '../logger';
@@ -24,7 +25,9 @@ import { hashCredential, mintCredential } from '../lib/link-credentials';
 import { deliverLinkMail } from '../lib/link-mail-delivery';
 import { issueSignupLink } from './link-mail.service';
 import { noticeAccountExistsOnce } from './verification.service';
-import { createVerifiedAccount } from './auth.service';
+import { createVerifiedAccount, newAccountSubject } from './auth.service';
+import { admitNewPassword } from './password-rule.service';
+import type { AdmittedPassword } from '../lib/password-rule';
 import type { RegisterResult } from './auth.service';
 import type { KeyAlgorithmType, KeyPlatformType } from '../types';
 
@@ -247,9 +250,14 @@ function setupRefusalReason(row: SignupLinkToken | null): string | null
 /**
  * Step 3 — set the password, which is what creates the account.
  *
- * Run under `Transactional()`: the user row, the device key and the completion
+ * The session is found and the app's password rule asked first, outside any
+ * transaction: the rule may wait on anything (a breached-password lookup), and
+ * no connection should wait with it. Then one transaction claims the session
+ * and creates the account: the user row, the device key and the completion
  * mark commit together. A device-key failure must not leave an account nobody
  * can sign into, and a completion mark must not survive a rolled-back account.
+ * A session used, superseded or expired while the rule was asked is refused by
+ * the claim, as one found so is refused before it.
  *
  * A refusal that is the user's to fix — a weak password, an app policy that
  * rejects the registration — leaves the setup session usable, so the fix is
@@ -274,22 +282,37 @@ export async function completeSignupService(
         throw new InvalidSignupSetupSessionError();
     }
 
-    // Claim first: the mark is what makes this session one-time, and claiming
-    // before creating the account means two concurrent submits cannot both reach
-    // account creation. The transaction rolls the mark back with everything else
-    // if creation then fails, which is what keeps a rejected password retryable.
-    const claimed = await signupLinkTokensRepository.claimSetupSession(row.id);
+    const password = await admitNewPassword(params.password, '/password', () => newAccountSubject('signup-link', row.email, undefined));
+
+    return await runInTransaction(() => claimAndCreateAccount(row.id, params, password), { context: 'auth:signup-complete' });
+}
+
+/**
+ * Claim the setup session, then create the account on it.
+ *
+ * Claim first: the mark is what makes this session one-time, and claiming
+ * before creating the account means two concurrent submits cannot both reach
+ * account creation. The transaction rolls the mark back with everything else
+ * if creation then fails, which is what keeps a refused registration retryable.
+ */
+async function claimAndCreateAccount(
+    rowId: number,
+    params: CompleteSignupParams,
+    password: AdmittedPassword,
+): Promise<RegisterResult>
+{
+    const claimed = await signupLinkTokensRepository.claimSetupSession(rowId);
 
     if (!claimed)
     {
-        authLogger.service.warn('Signup setup session refused', { reason: 'lost the claim race' });
+        authLogger.service.warn('Signup setup session refused', { reason: 'used, superseded or expired since it was found' });
 
         throw new InvalidSignupSetupSessionError();
     }
 
     return await createVerifiedAccount({
         email: claimed.email,
-        password: params.password,
+        password,
         publicKey: params.publicKey,
         keyId: params.keyId,
         fingerprint: params.fingerprint,

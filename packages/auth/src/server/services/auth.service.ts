@@ -19,7 +19,6 @@ import { runBeforeRegister } from '../lib/config';
 import { assertPasskeyProven, type PasskeyProof } from '../lib/passkey-proof';
 import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
 import {
-    hashPassword,
     verifyPassword,
     getDummyPasswordHash,
     isLegacyPasswordHash,
@@ -34,7 +33,9 @@ import { updateLastLoginService } from './user.service';
 import { accountRefusalReason, signingKeyOf, type PrincipalCredential } from './admission.service';
 import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { assertPasswordChangeAdmits, reportPasswordChanged } from './password-change-guard.service';
+import { admitNewPassword, hashAdmittedPassword, reencodeProvenPassword } from './password-rule.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
+import type { AdmittedPassword, AdmittedPasswordHash, PasswordRuleSubject } from '../lib/password-rule';
 import type { User } from '../entities/users';
 import { authLoginEvent, authPasswordChangedEvent, authRegisterEvent } from '../events';
 
@@ -71,8 +72,10 @@ export interface RegisterParams
  * here having proved the address, one with a six-digit code and one with an
  * emailed link, and the device event has to be able to say which.
  */
-export type CreateVerifiedAccountParams = Omit<RegisterParams, 'verificationToken'> & {
+export type CreateVerifiedAccountParams = Omit<RegisterParams, 'verificationToken' | 'password'> & {
     channel: 'register' | 'signup-link';
+    /** Accepted by the app's password rule (`admitNewPassword`) before the transaction opened. */
+    password: AdmittedPassword;
 };
 
 export interface RegisterResult
@@ -207,7 +210,29 @@ export async function registerService(
         throw new VerificationTokenTargetMismatchError();
     }
 
-    return await createVerifiedAccount({ ...params, phone, channel: 'register' });
+    // The app's password rule, before the transaction: it may be slow (a
+    // breached-password lookup), and nothing it waits on should hold a
+    // connection. The duplicate check and `beforeRegister` run inside, after it.
+    const password = await admitNewPassword(params.password, '/password', () => newAccountSubject('register', email, phone));
+
+    return await runInTransaction(
+        () => createVerifiedAccount({ ...params, phone, password, channel: 'register' }),
+        { context: 'auth:register' },
+    );
+}
+
+/**
+ * Who a new account's password is for, as the app's password rule is asked
+ * about it: the address being registered, with `userId: null` — there is no
+ * account yet. Empty identifiers are null, as `createVerifiedAccount` stores them.
+ */
+export function newAccountSubject(
+    channel: CreateVerifiedAccountParams['channel'],
+    email: string | undefined,
+    phone: string | undefined,
+): PasswordRuleSubject
+{
+    return { channel, userId: null, email: email || null, phone: phone || null };
 }
 
 /**
@@ -225,8 +250,10 @@ export async function registerService(
  * duplicate refusal, the same policy hook, the same event — instead of two
  * paths that drift.
  *
- * Call it inside a transaction. The user row and the device key must land
- * together or not at all.
+ * Call it inside a transaction, with a password the app's rule accepted
+ * before that transaction opened (`admitNewPassword`): the rule may wait on
+ * anything, and no transaction should wait with it. The user row and the
+ * device key must land together or not at all.
  */
 export async function createVerifiedAccount(
     params: CreateVerifiedAccountParams,
@@ -253,8 +280,7 @@ export async function createVerifiedAccount(
     // App-level pre-registration policy gate — throws to reject
     await runBeforeRegister({ channel: 'credentials', email, phone, metadata });
 
-    // Hash password
-    const passwordHash = await hashPassword(password);
+    const passwordHash = await hashAdmittedPassword(password);
 
     // Get default user role
     const { getRoleByName } = await import('./role.service');
@@ -310,9 +336,9 @@ export async function createVerifiedAccount(
         ...await secondFactorEnrolmentFields(newUser.id),
     };
 
-    // After the commit: both routes that reach here run under `Transactional()`,
-    // and an inline emit would announce an account another connection cannot
-    // read yet, or one a rollback then erased.
+    // After the commit: both callers run this in a transaction, and an inline
+    // emit would announce an account another connection cannot read yet, or
+    // one a rollback then erased.
     onAfterCommit(() => authRegisterEvent.emit({
         userId: result.userId,
         provider: email ? 'email' : 'phone',
@@ -435,7 +461,7 @@ function passwordAttempt(user: User | null, params: LoginParams): SignInAttempt
  * re-encoded hash, `lastLoginAt` and the login event — one transaction, under
  * the account lock the key write takes.
  */
-async function startPasswordSession(user: User, params: LoginParams, upgradedHash: string | null): Promise<LoginResult>
+async function startPasswordSession(user: User, params: LoginParams, upgradedHash: AdmittedPasswordHash | null): Promise<LoginResult>
 {
     const { email } = params;
 
@@ -522,10 +548,10 @@ async function startPasswordSession(user: User, params: LoginParams, upgradedHas
  * over the hash that was verified (`replaceVerifiedPasswordHash`): a password
  * changed since stays changed.
  */
-async function upgradedPasswordHash(password: string, verifiedHash: string): Promise<string | null>
+async function upgradedPasswordHash(password: string, verifiedHash: string): Promise<AdmittedPasswordHash | null>
 {
     return isLegacyPasswordHash(verifiedHash) && legacyHashProvesWholePassword(password)
-        ? await hashPassword(password)
+        ? await reencodeProvenPassword(password)
         : null;
 }
 
@@ -572,13 +598,21 @@ export async function logoutService(
  * password does not clear `passwordChangeRequired` (#362). The change clears
  * it in the same transaction, under the account lock, as it writes the hash.
  *
+ * The app's password rule (`password.validate`, #458) is asked first, after
+ * the step-up and before the current password is checked: its answer must not
+ * depend on whether the current password was right, or a stolen session could
+ * test guesses with a password the rule refuses and change nothing. Nothing
+ * is hashed — not the new password, not a comparison with the current one —
+ * for a password it refuses.
+ *
  * The app's `passwordChange` guard runs in that transaction too (#434):
  * `admit` before the hash is written, `changed` once the sessions are ended,
  * with `channel: 'change'` and `required` read from the locked row.
  * `auth.password.changed` is published after the commit.
  *
  * @throws PasskeyProofRequiredError when a bound account sets its first password without the proof
- * @throws ValidationError when the new password is the current one
+ * @throws ValidationError when the app's password rule refuses the new password, or it is the current one
+ * @throws PasswordRuleFailedError when the app's password rule throws
  * @throws PasswordChangeRefusedError when the app's `passwordChange.admit` refuses the change
  * @throws PasswordChangeHookFailedError when `passwordChange.admit` or `changed` throws
  */
@@ -590,12 +624,13 @@ export async function changePasswordService(
 
     await assertStepUp({ userId, credential: params.credential });
 
+    const newPassword = await admitNewPassword(params.newPassword, '/newPassword', () => changeSubject(userId));
     const verifiedHash = await verifyCurrentPassword(params);
-    await assertNewPasswordDiffers(params.newPassword, verifiedHash);
+    await assertNewPasswordDiffers(newPassword, verifiedHash);
     // Hashed before the account lock is taken: the hash is the slow step.
     const change = {
         userId,
-        newPasswordHash: await hashPassword(params.newPassword),
+        newPasswordHash: await hashAdmittedPassword(newPassword),
         spareKeyId: params.includeCurrent ? null : signingKeyOf(params.credential),
     };
 
@@ -628,8 +663,16 @@ export async function changePasswordService(
 interface PasswordChange
 {
     userId: number;
-    newPasswordHash: string;
+    newPasswordHash: AdmittedPasswordHash;
     spareKeyId: string | null;
+}
+
+/** Who a change's new password is for, read only when there is a rule to ask. */
+async function changeSubject(userId: number): Promise<PasswordRuleSubject>
+{
+    const user = await usersRepository.findByIdOnPrimary(userId);
+
+    return { channel: 'change', userId, email: user?.email ?? null, phone: user?.phone ?? null };
 }
 
 /**

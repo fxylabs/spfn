@@ -40,7 +40,8 @@ import {
     usersRepository,
 } from '../repositories';
 import type { PasswordResetToken } from '../entities/password-reset-tokens';
-import { hashPassword, normalizeEmail } from '../helpers';
+import { normalizeEmail } from '../helpers';
+import type { AdmittedPasswordHash } from '../lib/password-rule';
 import { hashCredential, mintCredential } from '../lib/link-credentials';
 import { deliverLinkMail } from '../lib/link-mail-delivery';
 import { authPasswordResetEvent } from '../events';
@@ -50,6 +51,7 @@ import { registerPublicKeyService, type RegisterPublicKeyResult } from './key.se
 import { accountRefusal, admitsAccount } from './admission.service';
 import { reportAccountRefusal, signInAttempt } from './sign-in-guard.service';
 import { assertPasswordChangeAdmits, reportPasswordChanged } from './password-change-guard.service';
+import { admitNewPassword, hashAdmittedPassword } from './password-rule.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { assertNewPasswordDiffers, loginBindingFields, type LoginResult } from './auth.service';
@@ -301,7 +303,7 @@ export interface CompletePasswordResetParams
 async function replaceCredentials(
     row: PasswordResetToken,
     user: { id: number; emailVerifiedAt: Date | null; sessionBinding: SessionBindingType },
-    passwordHash: string,
+    passwordHash: AdmittedPasswordHash,
     params: CompletePasswordResetParams,
 ): Promise<RegisterPublicKeyResult>
 {
@@ -343,7 +345,7 @@ async function replaceCredentials(
 
     if (!await passwordResetTokensRepository.complete(row))
     {
-        authLogger.service.warn('Password reset session refused', { reason: 'lost the claim race' });
+        authLogger.service.warn('Password reset session refused', { reason: 'used, superseded or expired since it was found' });
 
         throw new PasswordResetSessionError();
     }
@@ -354,12 +356,17 @@ async function replaceCredentials(
 /**
  * Step 3 — set the new password, which is what completes the reset.
  *
- * Run under `Transactional()`: the password, the revocations, the new device key
- * and the completion mark commit together. A key registration that failed after
- * the revoke-all would otherwise leave an account with a new password and
- * nothing signed in.
+ * The setup session is found, the app's password rule asked and the password
+ * hashed first, outside any transaction: the rule may wait on anything (a
+ * breached-password lookup), and no connection should wait with it. Then one
+ * transaction (`resetUnderLock`): the password, the revocations, the new device
+ * key and the completion mark commit together. A key registration that failed
+ * after the revoke-all would otherwise leave an account with a new password and
+ * nothing signed in. An account suspended, or a session used, superseded or
+ * expired, while the rule was asked is refused in there, as before it.
  *
- * A refusal that is the user's to fix — a password the policy rejects, a body
+ * A refusal that is the user's to fix — a password the app's rule
+ * (`password.validate`) or `PasswordSchema` rejects, a body
  * with no device key, the current password on an account that must change it
  * (400 `ValidationError`, the flag kept: #362) — leaves the setup session
  * usable, so the fix is retyping the password rather than asking for a fresh
@@ -406,8 +413,30 @@ export async function completePasswordResetService(
         throw new PasswordResetSessionError();
     }
 
-    // Hashed before the account lock is taken: the hash is the slow step.
-    const passwordHash = await hashPassword(params.password);
+    // The app's password rule, before the account is read: asked with what the
+    // setup session holds, so its answer is the same whether the account is
+    // still active or not. Hashed here too, before the transaction: the hash is
+    // the slow step.
+    const passwordHash = await hashAdmittedPassword(await admitNewPassword(params.password, '/password', () => ({
+        channel: 'reset',
+        userId: row.userId,
+        email: row.email,
+        phone: null,
+    })));
+
+    return await runInTransaction(() => resetUnderLock(row, passwordHash, params), { context: 'auth:password-reset-complete' });
+}
+
+/**
+ * The reset itself, in its one transaction: the account locked and read
+ * active, the guard asked, the credentials replaced and the session started.
+ */
+async function resetUnderLock(
+    row: PasswordResetToken,
+    passwordHash: AdmittedPasswordHash,
+    params: CompletePasswordResetParams,
+): Promise<LoginResult>
+{
     const user = await lockActiveUserOf(row.userId, params);
 
     if (!user)
@@ -440,11 +469,17 @@ export async function completePasswordResetService(
         email: row.email,
     }));
 
-    if (registered.pending)
-    {
-        return { mfaRequired: true, challenge: registered.challenge };
-    }
+    return registered.pending
+        ? { mfaRequired: true, challenge: registered.challenge }
+        : await signedInByReset(user, registered);
+}
 
+/** The answer of a reset that needs no second factor: the session it started. */
+async function signedInByReset(
+    user: { id: number; publicId: string; email: string | null; phone: string | null },
+    registered: Extract<RegisterPublicKeyResult, { pending: false }>,
+): Promise<LoginResult>
+{
     await updateLastLoginService(user.id);
 
     return {

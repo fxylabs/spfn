@@ -33,6 +33,7 @@ import { generateKeyPair, type KeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
 import { hashPassword } from '@/server/helpers/password';
 import type { NormalizedIdentity } from '@/server/lib/oauth';
+import type { AdmittedPassword } from '@/server/lib/password-rule';
 
 vi.mock('@spfn/notification/server', async (importOriginal) =>
 {
@@ -450,7 +451,7 @@ describe.skipIf(!dbAvailable)('auth events are published after the transaction c
 
             await rolledBack(() => createVerifiedAccount({
                 email: 'rollback@test.com',
-                password: PASSWORD,
+                password: PASSWORD as AdmittedPassword,
                 ...deviceKeyBody(),
                 channel: 'register',
             }));

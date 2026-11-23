@@ -31,6 +31,7 @@ import { userInvitations, userProfiles, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { hashCredential } from '@/server/lib/link-credentials';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
+import type { AdmittedPassword } from '@/server/lib/password-rule';
 import {
     configurePasswordChange,
     resetPasswordChangeGuardForTests,
@@ -371,7 +372,7 @@ describe.skipIf(!dbAvailable)('the password-change guard (#434)', () =>
     {
         await runInTransaction(() => createVerifiedAccount({
             email: 'registered@pcg434.test',
-            password: PASSWORD,
+            password: PASSWORD as AdmittedPassword,
             ...deviceKey(),
             channel: 'register',
         }));

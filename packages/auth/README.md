@@ -91,7 +91,8 @@ Four edits in the consuming app. All four are required for the flow to work end 
 ### 1. Lifecycle — `server.config.ts`
 
 `createAuthLifecycle()` validates env before DB connect, then seeds admin accounts and
-initializes RBAC after the DB is ready. Pass custom roles/permissions here (see RBAC below).
+initializes RBAC after the DB is ready. Pass custom roles/permissions here (see RBAC below),
+and the app's rule for a new password, if it has one ([`password`](#the-password-rule-password)).
 
 ```typescript
 import { defineServerConfig } from '@spfn/core/server';
@@ -860,6 +861,9 @@ usable for another try until it expires.
 An app route cannot run for such a session, so what the app does with the change — refuse it on its
 own state, mark the account set up, write an audit line — runs inside it, in the
 [password-change guard](#the-password-change-guard-passwordchange), with `required: true`.
+What the new password must satisfy beyond its length is the app's
+[password rule](#the-password-rule-password), asked on the change and the reset alike: a
+refusal is 400 `ValidationError` with the rule's messages, and the flag stays.
 
 **With a second factor to enrol as well**, both requirements are outstanding. A request is admitted
 when the route admits **either** one — requiring both would leave no route at all, since the change
@@ -1293,7 +1297,7 @@ type PasswordChangeAdmission = void | undefined | { refuse: { code: string } }; 
 ```
 
 **`admit(attempt)`** is asked once the account is locked and the package's own checks passed (the
-current password, the step-up, a first password's passkey proof, the new password differing from the
+[password rule](#the-password-rule-password), the current password, the step-up, a first password's passkey proof, the new password differing from the
 current one — on a reset, a flagged account's), before anything is written. `{ refuse: { code } }` refuses: nothing
 is written — the old password still signs in, the flag stays — and the client gets **403
 `PasswordChangeRefusedError`** with the app's string in `details.code`, the code shaped as a
@@ -1339,7 +1343,8 @@ commits with the change or rolls back with it. The rules of the sign-in guard's 
 | `updateUserService`, `usersRepository.updateById` / `updatePassword` | no | the app's own code calling a package writer: the app is already where its own step runs, and puts it beside the call, in one transaction |
 
 The package has no administrator route that sets a password; an operator who does so through the
-writers in the last row clears the flag only if the code says so.
+writers in the last row clears the flag only if the code says so, and writes a hash from
+`hashNewPassword`, which asks the [password rule](#the-password-rule-password).
 
 A refusal or a throw on a **reset** rolls the whole completion back — the new key, the revocations,
 the completion mark — and leaves the setup session usable until it expires, as a refused new
@@ -1364,6 +1369,135 @@ The change stays in one place, the package's, and the app joins it there.
 
 A second `createAuthLifecycle()` that omits `passwordChange` leaves it as it is; one that states
 other functions refuses boot in `afterInfrastructure`, the first statement staying in force.
+
+### The password rule (`password`)
+
+`PasswordSchema` (8 to 256 characters) is the only rule the package holds a new password to.
+An app whose policy asks for more — character classes, a deny list, not containing the account
+name — states it once, and it is asked on **every path that writes a password hash**:
+
+```typescript
+import { createAuthLifecycle, validatePasswordStrength, type PasswordRuleSubject } from '@spfn/auth/server';
+
+createAuthLifecycle({
+    password: {
+        validate: async (password: string, { email, userId }: PasswordRuleSubject) =>
+        {
+            const local = email?.split('@')[0].toLowerCase();
+
+            return [
+                ...validatePasswordStrength(password).errors,
+                ...(local && password.toLowerCase().includes(local) ? ['The password must not contain your account name'] : []),
+                ...(userId !== null && await passwordHistory.wasUsed(userId, password) ? ['Choose a password you have not used before'] : []),
+            ];
+        },
+    },
+})
+```
+
+```typescript
+type PasswordRuleChannel = 'register' | 'signup-link' | 'invitation' | 'change' | 'reset' | 'seed' | 'operator';
+
+interface PasswordRuleSubject
+{
+    channel: PasswordRuleChannel;
+    userId: number | null;   // the existing account: 'change', 'reset', and 'operator' when given; otherwise null
+    email: string | null;
+    phone: string | null;
+}
+
+interface PasswordRuleOptions
+{
+    validate: (password: string, subject: PasswordRuleSubject) => string[] | void | Promise<string[] | void>;
+}
+```
+
+- **Nothing or `[]` accepts.** Leave the option out and nothing changes: `PasswordSchema` alone,
+  as before. `validatePasswordStrength` is never applied by itself — call it inside the rule, as
+  above, if its settings are yours.
+- **Messages refuse: 400 `ValidationError`**, one entry per message in `fields`, on the password
+  field — `/password`, or `/newPassword` on `PUT /_auth/password` — with the shape and the message
+  (`Invalid request body`) a `PasswordSchema` failure of the same body has, so the screen shows the
+  app's messages where it shows that one.
+  There is no `value`: nothing about the password is answered, logged or published. Nothing is
+  hashed and nothing is written; the setup session of a reset or a signup link, and a pending
+  invitation, stay usable for another try.
+- **A throw is 500 `PasswordRuleFailedError`** (`@spfn/auth/errors`) — never an acceptance. It names
+  the path (`channel`) and what the rule threw by identifiers only, `hookErrorClass` and
+  `hookErrorCode?` (SQLSTATE): the rule was handed the password, and the package keeps no
+  reference to what it threw. An answer that is neither nothing nor an array of strings is a 500
+  too.
+- **`subject` is identifiers, never an account row.** Where no account exists yet — register, the
+  signup link, an invitation, seeding — it carries the address being registered and `userId: null`.
+  On a reset it carries what the setup session holds, and the rule is asked before the account is
+  read, so its answer is the same whether the account is still active: the rule cannot tell anyone
+  whether it exists.
+- **Sync or async, and never inside a transaction.** On every path the package asks it before any
+  transaction opens and before anything is claimed or locked, so a slow rule — a breached-password
+  lookup over the network — holds no lock and no pooled connection, and cannot run into the
+  transaction's idle timeout. A database read of the app's runs on its own connection.
+
+**Where it is asked, and in what order:**
+
+| Path | `channel` | Asked |
+|---|---|---|
+| `PUT /_auth/password` (`changePasswordService`), a first password included | `change` | after the step-up, **before the current password is checked**; then the transaction (lock, `passwordChange.admit`, write) |
+| `POST /_auth/password/reset/complete` (`completePasswordResetService`) | `reset` | once the setup session is found (unlocked), before the account is read; then the hash, then the transaction (account lock, `passwordChange.admit`, write, completion mark) |
+| `POST /_auth/register` (`registerService`) | `register` | once the verification token is checked; then the transaction (duplicate check, `beforeRegister`, hash, account, key) |
+| `POST /_auth/signup/password` (`completeSignupService`) | `signup-link` | once the setup session is found (unlocked); then the transaction (claim, duplicate check, `beforeRegister`, hash, account, key) |
+| `POST /_auth/invitations/accept` (`acceptInvitation`) | `invitation` | once the invitation is found claimable (unlocked); then the transaction (claim, inviter's authority, `beforeRegister`, hash, account, key) — asked once, even when the inviter's authority is judged again; a refusal leaves the invitation pending |
+| admin seeding (`SPFN_AUTH_ADMIN_*`) | `seed` | before the hash; a refused account is not created and counts as failed in the boot log |
+| the app's own code: `hashNewPassword(password, subject?)` | `operator` (default) | before the hash — call it before opening a transaction of your own |
+
+What the rule accepted can still be refused after it, by the check that held without a rule: an
+invitation accepted, resent, cancelled or expired meanwhile, an inviter who lost the authority, a
+setup session used, superseded or expired, an account suspended — each is refused by the claim or
+the lock inside the transaction, and nothing is written.
+
+It is always asked before the password is hashed, so no hash — not the new one, not the comparison
+with the current one — is computed for a password it refuses. On a change it comes before the
+current password is checked, so the answer cannot tell a stolen session whether the current
+password it guessed was right; and before `passwordChange.admit`, which runs under the account lock
+after the hash is computed and is about the account, not the password.
+
+**A temporary password is held to it too.** Seeding asks it (`seed`), and so does
+`hashNewPassword`: until it is changed, a temporary password signs in, and whoever guesses it picks
+the next one — on a superadmin account, as on any other. The one hash written without asking is a
+password sign-in re-encoding a legacy hash: the account's current password, proven, not a new one.
+OAuth sign-ins and account linking write no password; a purge erases it.
+
+**No path can skip it silently.** `usersRepository` writes `passwordHash` only as an
+`AdmittedPasswordHash` — `create`, `updateById` (and `updateUserService`), `updatePassword`,
+`replaceVerifiedPasswordHash` — and the only ways to make one are the rule's own: a hash from
+`hashPassword` does not type-check there. App code that sets a password (an operator's temporary
+password, an import) writes it with `hashNewPassword`:
+
+```typescript
+import { hashNewPassword, updateUserService } from '@spfn/auth/server';
+
+await updateUserService(user.id, {
+    passwordHash: await hashNewPassword(temporaryPassword, { userId: user.id, email: user.email }),
+    passwordChangeRequired: true,
+});
+```
+
+| Error | HTTP | When |
+|---|---|---|
+| `ValidationError` | 400 | the rule answered messages; `fields: [{ path: '/password' \| '/newPassword', message }]` |
+| `PasswordRuleFailedError` | 500 | the rule threw; nothing hashed or written; `channel`, `hookErrorClass`, `hookErrorCode?` |
+
+A second `createAuthLifecycle()` that omits `password` leaves the rule as it is; one that states
+another function refuses boot in `afterInfrastructure`, the first statement staying in force.
+
+### Migration — a password hash is written only through the password rule
+
+**BREAKING (types).** `usersRepository.create`, `updateById`, `updatePassword` and
+`replaceVerifiedPasswordHash`, and `updateUserService`, take `passwordHash` as an
+`AdmittedPasswordHash` (`NewUserRow`, `UserUpdate`). App code that wrote
+`passwordHash: await hashPassword(password)` no longer compiles: write
+`await hashNewPassword(password, { userId, email })`, which asks the app's `password.validate`
+first (and, with no rule stated, hashes exactly as `hashPassword` does). `null` still erases a
+password. Nothing changes at runtime for an app that states no rule.
 
 ### Migration — a sign-in replaces a key only with proof of the old key
 

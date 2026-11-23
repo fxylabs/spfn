@@ -10,7 +10,6 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import { Transactional } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { route } from '@spfn/core/route';
@@ -19,6 +18,7 @@ import { EmailSchema, PasswordSchema, DeviceNameSchema, PlatformSchema } from '.
 import { KEY_ALGORITHM } from '../../types';
 import { byIpAndAccount } from '../../lib/rate-limit-keys';
 import { deviceProvenance } from '../../lib/device-provenance';
+import { reportDatabaseErrors } from '../../middleware/report-database-errors';
 import {
     requestPasswordResetService,
     confirmPasswordResetService,
@@ -94,7 +94,10 @@ export const confirmPasswordReset = route.post('/_auth/password/reset/confirm')
  * that cookie into `setupSecret` and injects the device key the same way it does
  * for login — but no `oldKeyId`, because this revokes every key rather than
  * rotating one. The new hash, the revocation of every earlier key, the new
- * device key and the completion mark all commit together.
+ * device key and the completion mark all commit together, in the transaction
+ * the service opens once the app's password rule has answered — hence no
+ * `Transactional()`, and `reportDatabaseErrors()` in its place for the
+ * reconnect trigger.
  */
 export const completePasswordReset = route.post('/_auth/password/reset/complete')
     .input({
@@ -113,7 +116,7 @@ export const completePasswordReset = route.post('/_auth/password/reset/complete'
             platform: Type.Optional(PlatformSchema),
         }),
     })
-    .use([rateLimitPolicy('auth-password-reset-complete', { limit: 10, windowMs: 60_000 }), Transactional()])
+    .use([rateLimitPolicy('auth-password-reset-complete', { limit: 10, windowMs: 60_000 }), reportDatabaseErrors()])
     .skip(['auth'])
     .handler(async (c) =>
     {

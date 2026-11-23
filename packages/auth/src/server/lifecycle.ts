@@ -25,6 +25,7 @@ import {
     type SecondFactorOptions,
 } from './lib/second-factor-policy';
 import { assertSignInGuardConsistent, configureSignIn, type SignInGuardOptions } from './lib/sign-in-guard';
+import { assertPasswordRuleConsistent, configurePasswordRule, type PasswordRuleOptions } from './lib/password-rule';
 import {
     assertPasswordChangeGuardConsistent,
     configurePasswordChange,
@@ -530,6 +531,48 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```
      */
     passwordChange?: PasswordChangeGuardOptions;
+
+    /**
+     * The application's rule for a new password
+     *
+     * Omitted, nothing changes: a new password is held to `PasswordSchema`
+     * (8 to 256 characters) alone. Stated, `validate(password, subject)` is
+     * asked on every path that writes a password hash — `register`,
+     * `signup-link`, `invitation`, `change`, `reset`, admin seeding (`seed`)
+     * and the app's own `hashNewPassword` (`operator`) — before the hash is
+     * computed, and on the package's paths before any transaction opens: a
+     * slow rule holds no lock and no connection. `subject` is `{ channel, userId, email, phone }`: identifiers,
+     * never an account row; `userId` is null where no account exists yet.
+     *
+     * - Answer nothing or `[]` to accept.
+     * - Answer the app's messages to refuse: 400 `ValidationError`, one entry
+     *   per message in `fields`, on the password field (`/password`, or
+     *   `/newPassword` on `PUT /_auth/password`), the shape a `PasswordSchema`
+     *   failure has, without `value`. Nothing is hashed or written.
+     * - A throw is 500 `PasswordRuleFailedError`, which keeps only the thrown
+     *   value's class and SQLSTATE; never an acceptance.
+     *
+     * Sync or async. `validatePasswordStrength` is not applied unless the
+     * rule calls it. See the README, "The password rule".
+     *
+     * A later `createAuthLifecycle()` that omits it leaves it as it is; one
+     * that states another function refuses boot in `afterInfrastructure`.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     password: {
+     *         validate: (password, { email }) => [
+     *             ...validatePasswordStrength(password).errors,
+     *             ...(email && password.toLowerCase().includes(email.split('@')[0].toLowerCase())
+     *                 ? ['The password must not contain your account name']
+     *                 : []),
+     *         ],
+     *     },
+     * })
+     * ```
+     */
+    password?: PasswordRuleOptions;
 }
 
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
@@ -571,6 +614,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // it is; a contradicting statement is refused below, in afterInfrastructure.
     configureSignIn(options.signIn);
     configurePasswordChange(options.passwordChange);
+    // Before afterInfrastructure, where admin seeding asks it.
+    configurePasswordRule(options.password);
 
     return {
         /**
@@ -631,6 +676,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             assertSignInGuardConsistent();
             // Same reasoning, for the password-change guard.
             assertPasswordChangeGuardConsistent();
+            // Same reasoning, for the password rule.
+            assertPasswordRuleConsistent();
 
             await initializeAuth(options);
             // Before any account is looked up: the repository folds addresses to

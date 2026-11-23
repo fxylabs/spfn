@@ -17,6 +17,7 @@ import { oauth2Grants, type OAuth2Grant } from '../entities/oauth2-grants';
 import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 import { AccountBusyError } from '@spfn/auth/errors';
 import { isLockTimeout } from '../lib/lock-timeout';
+import type { AdmittedPasswordHash } from '../lib/password-rule';
 import { recordAccountLock } from './account-lock';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
@@ -45,7 +46,23 @@ type Database = RepositoryDatabase<PostgresJsDatabase<EmptyRelations>>;
  * account's sessions in the same transaction — a column write here would
  * change it and clear nothing.
  */
-export type UserUpdate = Omit<Partial<NewUser>, 'status' | 'deletion'>;
+export type UserUpdate = Omit<Partial<NewUser>, 'status' | 'deletion' | 'passwordHash'> & PasswordHashWrite;
+
+/**
+ * What `create` writes: a new row, whose password hash — like every one this
+ * repository writes — is an `AdmittedPasswordHash`.
+ */
+export type NewUserRow = Omit<NewUser, 'passwordHash'> & PasswordHashWrite;
+
+/**
+ * A password hash is written only as an `AdmittedPasswordHash`, which the
+ * app's `password.validate` has been asked about (`services/password-rule`);
+ * null erases it. A hash from `hashPassword` alone does not type-check here.
+ */
+interface PasswordHashWrite
+{
+    passwordHash?: AdmittedPasswordHash | null;
+}
 
 /**
  * A role as a user-with-role read loads it. `isActive` travels with it because
@@ -612,7 +629,7 @@ export class UsersRepository extends AccountStateRepository
      * 사용자 생성
      * Write primary 사용
      */
-    async create(data: NewUser)
+    async create(data: NewUserRow)
     {
         return await this._create(users, { ...data, email: normalizeOptionalEmail(data.email) });
     }
@@ -779,7 +796,7 @@ export class UsersRepository extends AccountStateRepository
      */
     async updatePassword(
         id: number,
-        passwordHash: string,
+        passwordHash: AdmittedPasswordHash,
         clearPasswordChangeRequired: boolean = true,
     ) 
     {
@@ -812,7 +829,7 @@ export class UsersRepository extends AccountStateRepository
      * (`lockAccount`); the hash it writes was computed before the lock.
      * Write primary 사용
      */
-    async replaceVerifiedPasswordHash(id: number, verifiedHash: string, passwordHash: string): Promise<boolean>
+    async replaceVerifiedPasswordHash(id: number, verifiedHash: string, passwordHash: AdmittedPasswordHash): Promise<boolean>
     {
         const result = await this.db
             .update(users)

@@ -346,6 +346,35 @@ export class PasswordChangeHookFailedError extends InternalServerError
 }
 
 /**
+ * Password Rule Failed Error (500)
+ *
+ * The app's `password.validate` (`createAuthLifecycle({ password })`) threw, so
+ * the new password was neither accepted nor hashed, and nothing was written.
+ * The rule was handed the password and the person's address, and what it
+ * throws may quote either, so this error keeps none of it — the rule
+ * `PasswordChangeHookFailedError` follows: which path (`channel`), and what it
+ * threw by class name and, when a database statement failed, SQLSTATE.
+ */
+export class PasswordRuleFailedError extends InternalServerError
+{
+    readonly channel: string;
+    readonly hookErrorClass: string;
+    readonly hookErrorCode?: string;
+
+    constructor(data: { channel: string; hookErrorClass: string; hookErrorCode?: string })
+    {
+        super({
+            message: `password.validate failed on ${data.channel}: ${data.hookErrorClass}`
+                + (data.hookErrorCode === undefined ? '' : ` (SQLSTATE ${data.hookErrorCode})`),
+        });
+        this.name = 'PasswordRuleFailedError';
+        this.channel = data.channel;
+        this.hookErrorClass = data.hookErrorClass;
+        this.hookErrorCode = data.hookErrorCode;
+    }
+}
+
+/**
  * Invalid Verification Code Error (400)
  *
  * Thrown when verification code is invalid, expired, or already used
