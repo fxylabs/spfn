@@ -119,6 +119,28 @@ export interface PasskeySummary
      * `PASSKEY_USER_VERIFICATION_REQUIRED`.
      */
     userVerified: boolean;
+    /**
+     * The AAGUID the authenticator reported at registration — its model, which
+     * an app maps to a name ("iCloud Keychain", a security key's model).
+     * Lowercase and hyphenated; `null` when it reported none. What the
+     * authenticator claims, not what it proved: attestation is `none`.
+     */
+    aaguid: string | null;
+}
+
+/** The AAGUID an authenticator reports when it names no model. */
+const UNREPORTED_AAGUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * The stored AAGUID as the summary answers it, with one meaning for "not
+ * reported": registration keeps the all-zero AAGUID as the authenticator sent
+ * it, so that answers `null`, as the nullable column's own null does — an app
+ * need not know the convention. Registration stores the library's lowercase,
+ * hyphenated form, so nothing else is rewritten.
+ */
+function reportedAaguid(stored: string | null): string | null
+{
+    return stored === UNREPORTED_AAGUID ? null : stored;
 }
 
 /**
@@ -126,7 +148,7 @@ export interface PasskeySummary
  *
  * They are what an authenticator is addressed by, and the list exists to let
  * someone recognise a credential and point at it — which the label, the device
- * type and the last-used moment do.
+ * type, the authenticator's model and the last-used moment do.
  */
 function toSummary(row: Passkey): PasskeySummary
 {
@@ -140,6 +162,7 @@ function toSummary(row: Passkey): PasskeySummary
         lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
         secondFactor: row.secondFactor,
         userVerified: row.registeredUserVerified,
+        aaguid: reportedAaguid(row.aaguid),
     };
 }
 

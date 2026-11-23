@@ -76,6 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same body after the schema's, so the two failures cannot read differently. `validateField`
   builds its message with it; nothing it answers changes. `@spfn/auth`'s password rule (#458)
   refuses with it.
+- **@spfn/auth: `listPasskeys` answers each passkey's `aaguid` (#470).** The `passkeys` table kept
+  the AAGUID an authenticator reports at registration, but `PasskeySummary` left it out, so an app
+  could not say where a passkey is kept ("iCloud Keychain", "Google Password Manager", a security
+  key's model) without reading the package's table. `PasskeySummary` gains `aaguid: string | null`:
+  lowercase and hyphenated, `null` when the authenticator reported none — the all-zero AAGUID that
+  registration stores for it answers `null` too, so an app need not know the convention. Attestation
+  stays `none`, so it is what the authenticator claims; the package maps it to no name. Only the
+  passkey's owner is answered it, on `POST /_auth/passkeys/list`. No migration: the column exists.
+  An app that compares a summary with an exact key list gains one key.
+
 - **@spfn/auth: a seat for the app inside a password change — `createAuthLifecycle({ passwordChange:
   { admit, changed } })` and `auth.password.changed` (#434).** Since the required password change is
   enforced, a flagged session reaches no app route, so an app could no longer wrap the change in its

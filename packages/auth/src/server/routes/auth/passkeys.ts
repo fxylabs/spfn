@@ -219,7 +219,8 @@ export const passkeyLoginVerify = route.post('/_auth/passkeys/login/verify')
  * Each with `secondFactor` and `userVerified` (#399): an app shows which one
  * is the second factor, and offers `mfa/passkey/mark` only where it can
  * succeed — the repair for a passkey registered before a required policy
- * marked spares.
+ * marked spares. Each with `aaguid` too (#470), the authenticator's model as it
+ * reported it, so an app can say where a passkey is kept.
  *
  * POST with the arguments in the body, like the key-management routes and for
  * the same reason: the mobile auth profile signs the request body, and a GET has

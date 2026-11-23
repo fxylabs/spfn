@@ -901,10 +901,53 @@ describe.skipIf(!dbAvailable)('Passkeys (WebAuthn)', () =>
             expect(listed.map((entry: { label: string }) => entry.label).sort()).toEqual(['One', 'Two']);
             expect(Object.keys(listed[0]).sort()).toEqual(
                 [
-                    'backedUp', 'createdAt', 'deviceType', 'label', 'lastUsedAt', 'passkeyId', 'secondFactor',
-                    'transports', 'userVerified',
+                    'aaguid', 'backedUp', 'createdAt', 'deviceType', 'label', 'lastUsedAt', 'passkeyId',
+                    'secondFactor', 'transports', 'userVerified',
                 ],
             );
+        });
+
+        /** Enrol through the real registration path an authenticator reporting `aaguid` (hex, no hyphens). */
+        async function enrolledReporting(session: Session, aaguid: string): Promise<void>
+        {
+            const authenticator = await FixtureAuthenticator.create(new Uint8Array(Buffer.from(aaguid, 'hex')));
+
+            expect((await enroll(session, authenticator)).status).toBe(200);
+        }
+
+        async function listedAaguids(session: Session): Promise<Array<string | null>>
+        {
+            const { passkeys: listed } = await (await list(session)).json();
+
+            return listed.map((entry: { aaguid: string | null }) => entry.aaguid);
+        }
+
+        it('row M11: the list answers the AAGUID the authenticator reported, lowercase and hyphenated', async () =>
+        {
+            const session = await signIn('owner@test.com');
+            await enrolledReporting(session, 'fbfc3007154e4ecc8c0b6e020557d7bd');
+
+            expect(await listedAaguids(session)).toEqual(['fbfc3007-154e-4ecc-8c0b-6e020557d7bd']);
+        });
+
+        it('row M12: an authenticator that reported no model (the all-zero AAGUID) is listed with null', async () =>
+        {
+            const session = await signIn('owner@test.com');
+            await enrolled(session);
+
+            expect((await passkeyRows('owner@test.com'))[0].aaguid).toBe('00000000-0000-0000-0000-000000000000');
+            expect(await listedAaguids(session)).toEqual([null]);
+        });
+
+        it('row M13: another account\'s passkeys never appear in the list', async () =>
+        {
+            const owner = await signIn('owner@test.com');
+            const other = await signIn('other@test.com');
+            await enrolledReporting(owner, 'fbfc3007154e4ecc8c0b6e020557d7bd');
+            await enrolledReporting(other, 'ea9b8d664d011d213ce4b6b48cb575d4');
+
+            expect(await listedAaguids(owner)).toEqual(['fbfc3007-154e-4ecc-8c0b-6e020557d7bd']);
+            expect(await listedAaguids(other)).toEqual(['ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4']);
         });
 
         it('row M2: another account\'s passkey is a 404 from both rename and revoke', async () =>

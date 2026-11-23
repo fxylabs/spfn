@@ -13,7 +13,8 @@
 
 import crypto from 'crypto';
 
-const AAGUID = new Uint8Array(16);
+/** The AAGUID an authenticator reports when it names no model. */
+const UNREPORTED_AAGUID = new Uint8Array(16);
 
 /** CBOR: a definite-length header for `major` carrying `value`. */
 function cborHead(major: number, value: number): Uint8Array
@@ -92,7 +93,7 @@ function authenticatorData(
     rpId: string,
     flags: number,
     counter: number,
-    attested?: { credentialId: Uint8Array; cose: Uint8Array },
+    attested?: { aaguid: Uint8Array; credentialId: Uint8Array; cose: Uint8Array },
 ): Uint8Array
 {
     const head = concat(
@@ -108,7 +109,7 @@ function authenticatorData(
 
     return concat(
         head,
-        AAGUID,
+        attested.aaguid,
         Uint8Array.from([attested.credentialId.length >> 8, attested.credentialId.length & 0xff]),
         attested.credentialId,
         attested.cose,
@@ -156,10 +157,12 @@ export class FixtureAuthenticator
         private readonly privateKey: crypto.KeyObject,
         private readonly cose: Uint8Array,
         readonly credentialIdBytes: Uint8Array,
+        private readonly aaguid: Uint8Array,
     ) 
     {}
 
-    static async create(): Promise<FixtureAuthenticator>
+    /** `aaguid`: the model this authenticator reports at registration; all zero (none) unless given. */
+    static async create(aaguid = UNREPORTED_AAGUID): Promise<FixtureAuthenticator>
     {
         const pair = await crypto.subtle.generateKey(
             { name: 'ECDSA', namedCurve: 'P-256' },
@@ -180,6 +183,7 @@ export class FixtureAuthenticator
                 new Uint8Array(Buffer.from(jwk.y!, 'base64url')),
             ),
             new Uint8Array(crypto.randomBytes(32)),
+            aaguid,
         );
     }
 
@@ -192,6 +196,7 @@ export class FixtureAuthenticator
     attest(input: CeremonyInput): Record<string, unknown>
     {
         const authData = authenticatorData(input.rpId, withUserVerification(REGISTRATION_FLAGS, input), 0, {
+            aaguid: this.aaguid,
             credentialId: this.credentialIdBytes,
             cose: this.cose,
         });

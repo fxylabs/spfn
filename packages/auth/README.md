@@ -3941,7 +3941,8 @@ becomes an oracle for which accounts are OAuth-only.
 
 ```typescript
 const { passkeys } = await authApi.listPasskeys.call({ body: {} });
-// → [{ passkeyId, label, deviceType, backedUp, transports, createdAt, lastUsedAt, secondFactor, userVerified }]
+// → [{ passkeyId, label, deviceType, backedUp, transports, createdAt, lastUsedAt, secondFactor, userVerified,
+//      aaguid }]
 
 await authApi.renamePasskey.call({ body: { passkeyId, label: 'Old iPhone' } });
 await authApi.revokePasskey.call({ body: { passkeyId } });
@@ -3966,6 +3967,15 @@ await authApi.revokePasskey.call({ body: { passkeyId } });
   is false and `userVerified` true; elsewhere the mark answers 409
   `PASSKEY_USER_VERIFICATION_REQUIRED`. A mark proves a factor only while the policy lists
   `'passkey'`.
+- **`aaguid` is the authenticator's model as it reported it at registration** — lowercase,
+  hyphenated (`fbfc3007-154e-4ecc-8c0b-6e020557d7bd`), or `null` when it reported none. An
+  authenticator that names no model sends the all-zero AAGUID; the list answers that as `null` too,
+  so `null` is the one meaning of "not reported". Map it to a name ("iCloud Keychain", "Google
+  Password Manager", a security key's model) with data bundled into your app, such as
+  [passkeydeveloper/passkey-authenticator-aaguids](https://github.com/passkeydeveloper/passkey-authenticator-aaguids);
+  the package ships no names and no icons. [Attestation is `none`](#how-the-ceremonies-are-kept-honest),
+  so it is what the authenticator claims, not what it proved: show it, never decide anything by it.
+  It names a model, not a device or a person, and only the passkey's owner is answered it.
 
 #### Recovery — read this before shipping a passkey-only sign-up
 

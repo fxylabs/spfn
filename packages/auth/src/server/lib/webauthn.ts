@@ -201,7 +201,12 @@ export interface RegistrationOutcome
     transports: string[] | null;
     deviceType: PasskeyDeviceType;
     backedUp: boolean;
-    aaguid: string | null;
+    /**
+     * The authenticator's model, as it claims it — lowercase, hyphenated. Always
+     * present: the library refuses a registration without one, and an
+     * authenticator that names no model reports the all-zero AAGUID.
+     */
+    aaguid: string;
 }
 
 export interface AuthenticationOptionsParams
@@ -329,7 +334,7 @@ export async function verifyRegistration(
         transports: credential.transports ?? null,
         deviceType: credentialDeviceType,
         backedUp: credentialBackedUp,
-        aaguid: aaguid || null,
+        aaguid,
     };
 }
 
