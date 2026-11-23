@@ -280,14 +280,17 @@ export class RegistrationRejectedError extends ForbiddenError
  * expired temporary password, anything the app keeps. `details.code` is the
  * app's string, for the client to branch on; the status is always 403.
  *
+ * The constructor takes the code where the body carries it, in `details`, so
+ * `ErrorRegistry.deserialize` rebuilds the error from its own serialized form.
+ *
  * An account the app refuses is answered this, whatever the password was: the
  * refusal says nothing about the credential.
  */
 export class SignInRefusedError extends ForbiddenError
 {
-    constructor(data: { code: string; message?: string; details?: Record<string, any> })
+    constructor(data: { message?: string; details: { code: string } & Record<string, any> })
     {
-        super({ message: data.message || 'Sign-in refused', details: { ...data.details, code: data.code } });
+        super({ message: data.message || 'Sign-in refused', details: data.details });
         this.name = 'SignInRefusedError';
     }
 }
@@ -299,13 +302,14 @@ export class SignInRefusedError extends ForbiddenError
  * reset's completion — in its own `passwordChange.admit`
  * (`createAuthLifecycle({ passwordChange })`): an expired temporary password,
  * anything the app keeps. Nothing was written. `details.code` is the app's
- * string, for the client to branch on; the status is always 403.
+ * string, for the client to branch on; the status is always 403. Like
+ * `SignInRefusedError`, the code is given in `details`, where the body carries it.
  */
 export class PasswordChangeRefusedError extends ForbiddenError
 {
-    constructor(data: { code: string; message?: string; details?: Record<string, any> })
+    constructor(data: { message?: string; details: { code: string } & Record<string, any> })
     {
-        super({ message: data.message || 'Password change refused', details: { ...data.details, code: data.code } });
+        super({ message: data.message || 'Password change refused', details: data.details });
         this.name = 'PasswordChangeRefusedError';
     }
 }

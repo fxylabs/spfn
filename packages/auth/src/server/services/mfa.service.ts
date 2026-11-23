@@ -1414,7 +1414,7 @@ async function assertBudgetOpen(userId: number, step: SecondStep | null = null):
 
     const refusal = step && await recordSignInFailure(step.attempt, 'secondFactorLocked', step.keyId);
 
-    throw refusal ? new SignInRefusedError({ code: refusal.code }) : budgetLockedError(lockedUntil);
+    throw refusal ? new SignInRefusedError({ details: { code: refusal.code } }) : budgetLockedError(lockedUntil);
 }
 
 /**
@@ -1459,7 +1459,7 @@ async function refuseProof(userId: number, step: SecondStep | null): Promise<nev
 
     if (refusal)
     {
-        throw new SignInRefusedError({ code: refusal.code });
+        throw new SignInRefusedError({ details: { code: refusal.code } });
     }
 
     if (!counted)

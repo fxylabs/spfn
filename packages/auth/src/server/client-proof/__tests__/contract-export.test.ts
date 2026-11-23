@@ -1540,7 +1540,7 @@ describe('declared errors match the refusals', () =>
     {
         // Added in 0.14.7 (#361): an app's signIn.admit refused the sign-in.
         // Compared with its class for the key-algorithm refusal's reason.
-        const thrown = new SignInRefusedError({ code: 'LOCKED' });
+        const thrown = new SignInRefusedError({ details: { code: 'LOCKED' } });
         const entry = declared.find((candidate) => candidate.code === thrown.name);
 
         expect(entry).toBeDefined();

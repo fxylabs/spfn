@@ -553,6 +553,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `installed`, `owner`, `owners`, `appRole`, `database`, `appOwnsQueue`, `appMayCreateOnDatabase`,
   `notPgBoss`, `start`, `refusal`, `refusalStep` — `owner`, `grant` or `null`; `{ checked: false,
   detail, schema? }` when unreadable); absent without a declaration.
+- **BREAKING (source): @spfn/auth: `SignInRefusedError` and `PasswordChangeRefusedError` take the
+  shape their body has — `new SignInRefusedError({ details: { code } })`, not `{ code }` (#459).**
+  `ErrorRegistry.deserialize` hands a constructor the fields where `toJSON()` put them, and these
+  two put `code` in `details`; a constructor that took `{ code }` rebuilt the refusal without it
+  (see Fixed). A call with `{ code }` no longer compiles. Apps answer refusals from the `admit`
+  hooks with `{ refuse: { code } }`, which is unchanged; only code that constructs these two classes
+  itself has to move `code` into `details`.
+- **BREAKING (security-relevant): @spfn/core: `DuplicateEntryError`'s `value` no longer reaches the
+  client (#459).** Its message and `details` already left the value out — echoing an email back
+  confirms it exists — but `value` was a public field, so the body carried it all the same and the
+  client restored it. It is now a getter over a private field: `error.value` still reads it on the
+  server, `toJSON()` no longer sends it, and an error the client restored has none. Only `field`
+  names what collided.
 - **BREAKING (deployment, security-relevant): @spfn/core: `TRUSTED_PROXY_HOPS=0` declares that
   nothing stands in front of the Next.js app, and an invalid value is refused (#451).** Every value
   that was not a positive integer was read as `1`, and the forwarded-chain reader clamped to at
@@ -1507,6 +1520,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **@spfn/auth, @spfn/core: an error the client restores keeps every field it was thrown with —
+  `SignInRefusedError` and `PasswordChangeRefusedError` keep `details.code`, `HttpError`,
+  `DatabaseError`, `QueryError` and `TransactionError` keep their `statusCode` (#459).** The two
+  refusals took `{ code }` and stored it as `details.code`, but `ErrorRegistry.deserialize` hands a
+  constructor the fields where the body carries them, `{ message, details: { code } }`, so the
+  missing `code` overwrote the one in `details`: an app's page could only show a generic failure for
+  every refusal the `admit` hooks gave. The two constructors now take that serialized shape (see
+  Changed); the refusals' wire is unchanged. `toJSON()` left `statusCode` out of every
+  body, so an instance given its status came back with none (`HttpError`) or 500 (a
+  `DatabaseError`, `QueryError` or `TransactionError` thrown with another): such an instance now
+  carries `statusCode` in its body, and its constructor reads it back; the production body of an
+  internal database error keeps it beside `__type`, read with the new `carriedStatusCode(error)`
+  and never through the error's `toJSON()`, so an app's internal error whose serializer throws is
+  still answered with the generic body. The constructor marks it with the new protected
+  `SerializableError.carryStatusCode()` only when `new` was called on that class itself, so every
+  class that fixes its status — `NotFoundError`, `DeadlockError`, every auth error — and a
+  `QueryError` or `TransactionError` thrown without one keep the body they had. A class whose status is
+  fixed by its type is restored with its own status whatever the response was answered with; the
+  client still never reads the response status into an error. A body from an older server, without
+  `statusCode`, restores as before: `HttpError` with none, the three database classes with 500. A test round-trips every class of `errorRegistry` and of
+  `authErrorRegistry`, each built with every constructor field set, and fails for a registered class
+  with no fixture.
+- **@spfn/auth: a role check an app calls itself, judged on a stale premise, reaches the client as
+  `AuthorityContendedError` (409) (#459).** Outside `runJudgedTransaction`, `assertCanChangeRole`,
+  `assertCanChangeAuthority` and `roleChangeRefusal` throw it as an internal subclass, which
+  travelled under its own name: no registry holds that name, so the client restored a generic
+  `ApiError`, and `error.code` named a class no SDK knows. It now serializes as the refusal it is
+  answered as.
 - **@spfn/core, @spfn/mcp: a stream says no intermediary may transform it — `Cache-Control: no-cache,
   no-transform` (spfn/spfn#174).** The Next.js server (`next start`, `next dev`) runs the `compression`
   middleware on every response, one rewritten to the SPFN server included, and skips only a response

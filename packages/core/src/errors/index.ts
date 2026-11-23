@@ -34,7 +34,7 @@ import {
 } from './database-errors';
 
 // Base Classes
-export { SerializableError, SERIALIZABLE_ERROR_BRAND } from './serializable-error';
+export { SerializableError, SERIALIZABLE_ERROR_BRAND, carriedStatusCode } from './serializable-error';
 export type { SerializedError } from './serializable-error';
 export { ErrorRegistry } from './error-registry';
 export type { SerializableErrorConstructor, ErrorRegistryInput } from './error-registry';

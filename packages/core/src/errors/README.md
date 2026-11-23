@@ -48,6 +48,9 @@ From `@spfn/core/errors`:
   `DatabaseErrors` (`DatabaseErrors.QueryError`, …)
 - Type guards: `isHttpError`, `isDatabaseError`, `hasStatusCode`, `isSerializableError`
 - `errorLogLevel(error)`: the level the error handler logs a caught error at — `error` for a 5xx status (a typed error's `statusCode`, another error's numeric `statusCode`, else 500), `warn` otherwise
+- `carriedStatusCode(error)`: the `statusCode` the error carries in its body — its own when the
+  instance was given it (`carryStatusCode()`), `undefined` when its class fixes it; the error
+  handler's redacted production body reads it without calling the error's `toJSON()`
 - `SERIALIZABLE_ERROR_BRAND`: the `Symbol.for('spfn.core.serializableError')` key every `SerializableError` answers `true` under; `isSerializableError` reads it
 - Types: `SerializedError`, `SerializableErrorConstructor`, `ErrorRegistryInput`
 
@@ -57,9 +60,10 @@ From `@spfn/core/errors`:
 > these were old signatures and will not compile. Use the object forms below.
 >
 > There is **no** `name` or `timestamp` field on the serialized output. Serialized JSON is
-> `{ __type, message, ...publicFields }` — `statusCode` is intentionally excluded (it is
-> inferred from the type on deserialize). Old docs showing `{ "name": ..., "timestamp": ... }`
-> responses are wrong. The `code` a response carries lives inside the `error` envelope the
+> `{ __type, message, ...publicFields }` — `statusCode` is excluded where the class fixes it
+> (`NotFoundError`: always 404) and present only where the instance was given it: an
+> `HttpError`, or a `DatabaseError`, `QueryError` or `TransactionError` constructed with a
+> `statusCode`. Old docs showing `{ "name": ..., "timestamp": ... }` responses are wrong. The `code` a response carries lives inside the `error` envelope the
 > handler adds (below), never as a top-level field.
 
 ---
@@ -174,7 +178,7 @@ provided fields.
 | `ConstraintViolationError` | 400 | `{ message, details? }` | |
 | `TransactionError` | 500 (default) | `{ message, statusCode?, details? }` | |
 | `DeadlockError` | 409 | `{ message, details? }` | |
-| `DuplicateEntryError` | 409 | `{ field, value }` | message auto-built; `field`, `value` public; `details = { field, value }` |
+| `DuplicateEntryError` | 409 | `{ field, value }` | message auto-built; `field` public; `details = { field }`; `value` server-side only, never in the body |
 
 ```typescript
 import {
@@ -188,7 +192,7 @@ throw new EntityNotFoundError({ resource: 'User', id: 123 });
 // message: "User with id 123 not found", statusCode 404
 
 throw new DuplicateEntryError({ field: 'email', value: 'john@example.com' });
-// message: "email 'john@example.com' already exists", statusCode 409
+// message: "email already exists", statusCode 409 — the value never reaches the client
 
 throw new ConnectionError({ message: 'Failed to connect to database' });
 throw new QueryError({ message: 'Syntax error in SQL query' });
@@ -217,7 +221,8 @@ catch (error) { throw fromPostgresError(error); }
 ## Serialization & the ErrorRegistry
 
 `SerializableError.toJSON()` emits `{ __type: this.constructor.name, message, ...publicFields }`,
-skipping `name`, `message`, `stack`, and `statusCode`. The `ErrorHandler` middleware calls
+skipping `name`, `message`, `stack`, and `statusCode` — the last added back for an instance
+given its status (below). The `ErrorHandler` middleware calls
 `toJSON()`, adds the `error` envelope, and responds with the matching status code (plus
 `stack` — the frames of `describeError(error)`, not the raw stack — when `includeStack` is on).
 
@@ -253,6 +258,17 @@ Going the other way, `ErrorRegistry.deserialize()` drops `__type` and `error` be
 constructor: `__type` routed the lookup and `error` describes the response, so neither is a field
 of the error. Without that, the documented `Object.assign(this, data)` constructor would copy both
 onto the instance and the error would refuse to serialize the moment a server re-threw it.
+
+`deserialize` never reads the response's HTTP status: a class is restored from its body alone.
+A class whose status is fixed by its type sets it in its constructor and ignores any status the
+response was answered with — an interceptor or a proxy may rewrite that one. An instance given
+its status by whoever constructed it — an `HttpError`, or a `DatabaseError`, `QueryError` or
+`TransactionError` constructed with a `statusCode` — carries it in the body as `statusCode`, and
+its constructor reads it back. Its constructor marks it so with the protected
+`carryStatusCode()`, only when `new` was called on that class itself: a subclass that passes its
+own fixed status to `super` (`NotFoundError`, `DeadlockError`, every auth error) is never marked,
+and its body is what it always was. A body without it — from a server older than this rule —
+restores `HttpError` with no `statusCode` and the three database classes with 500.
 
 On the client, the SPFN API client deserializes a response body that has a `__type` field
 back into a real error instance using an `ErrorRegistry`. Built-in HTTP and DB errors are
@@ -331,7 +347,12 @@ export class PaymentFailedError extends SerializableError
 To make the client receive `instanceof PaymentFailedError`, register the class in the
 `ErrorRegistry` passed to the API client (otherwise the client gets a plain `Error`).
 For a custom subclass to round-trip, **its constructor must accept the serialized object**
-(`deserialize` calls `new ErrorClass(data)` with the whole JSON body).
+(`deserialize` calls `new ErrorClass(data)` with the JSON body less `__type` and `error`). A
+field the constructor reads must arrive where `toJSON()` put it: a constructor that takes `{ code }` and stores it as `details.code` receives
+`{ details: { code } }` back and loses it. A subclass that takes its status from its caller
+rather than fixing it calls `this.carryStatusCode()` in its constructor when `new` was called on
+it — `Object.getPrototypeOf(new.target)` is its parent class, the test the built-in classes use —
+so the status travels in its body.
 
 ---
 
@@ -365,8 +386,11 @@ if (isSerializableError(error)) { /* error: SerializableError — read off its b
 - **Custom errors don't deserialize on the client unless registered.** Built-ins are in the
   exported `errorRegistry` and always merged in, but your own classes must be added to the
   registry you pass to the API client, or the client receives a plain `Error`.
-- **`statusCode` is not in the serialized JSON.** It's excluded by `toJSON()` and re-derived
-  from the class on deserialize. Don't expect it in the response body.
+- **`statusCode` is in the serialized JSON only for an instance given it.** A class whose
+  status is fixed (`NotFoundError`, the README's `PaymentFailedError`) leaves it out and is
+  restored with its own; an `HttpError`, and a `DatabaseError`, `QueryError` or
+  `TransactionError` constructed with a `statusCode`, carry it. Read the status
+  off the restored error, not off the HTTP response, which an interceptor may have rewritten.
 - **No `name` / `timestamp` / `code` fields** in the response — only `__type`, `message`,
   and the error's own public fields (plus `stack` in dev). Don't parse for those.
 - **In a transactional route, re-throw caught errors.** Errors propagate to trigger
@@ -438,8 +462,9 @@ catch (err)
 - `SerializedError` — `{ __type: string; message: string; [key: string]: unknown }`
 - `SerializableErrorConstructor` — `new (data: any) => SerializableError`
 - `ErrorRegistryInput` — `SerializableErrorConstructor | SerializableErrorConstructor[] | ErrorRegistry`
-- `SerializableError` (abstract) — `Error` subclass with abstract `readonly statusCode: number`
-  and `toJSON(): SerializedError`
+- `SerializableError` (abstract) — `Error` subclass with abstract `readonly statusCode: number`,
+  `toJSON(): SerializedError`, and the protected `carryStatusCode()` a constructor calls when
+  its caller gave the instance its status
 
 ---
 

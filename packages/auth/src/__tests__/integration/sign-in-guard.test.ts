@@ -4,7 +4,9 @@
  * Each row names what would go unnoticed without it.
  *
  * 1. a sign-in channel that skips the guard — every channel, read from
- *    `DeviceRegistrationChannelSchema`, plus `mfa/verify` and `deletion/cancel`
+ *    `DeviceRegistrationChannelSchema`, plus `mfa/verify` and `deletion/cancel` —
+ *    and a refusal the auth client restores without the app's `details.code`
+ *    (#459), so the page shows a generic failure for every refusal
  * 2. an app lock signing owners out as their keys expire (rotation, renewal)
  * 3. the refusal as a password oracle, or by its cost an account oracle
  * 4. a limit that is not a limit under concurrent attempts
@@ -48,6 +50,7 @@ import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } f
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { restoredByAuthApi } from '../helpers/auth-api-restore';
 import {
     accountDeletionRequests,
     mfaAttemptBudgets,
@@ -429,11 +432,14 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     /** @returns the body without the envelope's per-request id, for comparing two answers */
     async function expectRefused(response: Response): Promise<unknown>
     {
+        const restored = await restoredByAuthApi(response.clone());
         const { error: { requestId: _requestId, ...envelope }, ...body } = await response.json();
 
         expect(response.status).toBe(403);
         expect(envelope).toMatchObject({ code: 'SignInRefusedError' });
         expect(body).toMatchObject({ details: { code: 'LOCKED' } });
+        expect(restored).toBeInstanceOf(SignInRefusedError);
+        expect((restored as InstanceType<typeof SignInRefusedError>).details).toEqual({ code: 'LOCKED' });
 
         return { ...body, error: envelope };
     }

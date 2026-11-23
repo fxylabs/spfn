@@ -96,7 +96,7 @@ export async function assertSignInAdmits(attempt: SignInAttempt, keyId?: string)
     {
         await reportRefusal(attempt, 'refused', keyId);
 
-        throw new SignInRefusedError({ code: refusal.code });
+        throw new SignInRefusedError({ details: { code: refusal.code } });
     }
 }
 
@@ -297,12 +297,12 @@ export async function failedCredentialAnswer(
     {
         await reportRefusal(attempt, 'refused', keyId);
 
-        return new SignInRefusedError({ code: refusal.code });
+        return new SignInRefusedError({ details: { code: refusal.code } });
     }
 
     const latest = await recordSignInFailure(attempt, reason, keyId);
 
-    return latest ? new SignInRefusedError({ code: latest.code }) : wrong();
+    return latest ? new SignInRefusedError({ details: { code: latest.code } }) : wrong();
 }
 
 /**

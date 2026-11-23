@@ -1,0 +1,566 @@
+{
+    "AccountAlreadyExistsError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "AccountBusyError": [
+        "__type",
+        "message",
+        "details",
+        "retryAfter"
+    ],
+    "AccountDisabledError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "AccountNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "AccountPendingDeletionError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "AuthorityContendedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "ChannelDisabledError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "ConfigOwnedMappingError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "ConfigOwnedRoleError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "DeferredCredentialUnsupportedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "DeletionAlreadyRequestedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeletionNotRequestedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceAuthAlreadyHandledError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceAuthDeniedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceAuthExpiredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceAuthNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkAlreadyHandledError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkDeniedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkExpiredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkNotRedeemedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeviceLinkWrongMatchError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ImmediateDeletionNotAllowedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InsufficientPermissionsError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InsufficientRoleError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidCredentialsError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidKeyFingerprintError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidSignupLinkError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidSignupSetupSessionError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidSocialTokenError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidTokenError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidVerificationCodeError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvalidVerificationTokenError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvitationChangedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InvitationNoLongerValidError": [
+        "__type",
+        "message",
+        "details",
+        "resource"
+    ],
+    "InvitationNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "KeyAlgorithmMismatchError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "KeyExpiredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "KeyIdAlreadyRegisteredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "KeyNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "KeyRevokedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "LastRecoveryCredentialError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "MfaAlreadyEnrolledError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "MfaConfigError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "MfaNotEnrolledError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "MfaVerificationFailedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "NativeSignInUnsupportedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "NonceKeyBindingError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuth2AuthorizeRedirectError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuth2GrantNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuth2RedirectUriMismatchError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuth2UnknownClientError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthAccountNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthCookieMissingError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthEmailInUseError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "OAuthLinkCredentialUnsupportedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "OAuthLinkNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthProviderAlreadyLinkedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "OAuthProviderError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthProviderLinkOnlyError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "OAuthSignInContendedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "OAuthStateExpiredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "OAuthStateInvalidError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasskeyAlreadyRegisteredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasskeyChallengeError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasskeyConfigError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasskeyNotFoundError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasskeyProofRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "PasskeyUserVerificationRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "PasskeyVerificationError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasswordChangeHookFailedError": [
+        "__type",
+        "message",
+        "hook",
+        "userId",
+        "hookErrorClass",
+        "hookErrorCode"
+    ],
+    "PasswordChangeRefusedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasswordChangeRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "PasswordResetLinkError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PasswordResetSessionError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "PurgeHookFailedError": [
+        "__type",
+        "message",
+        "requestId",
+        "hookErrorClass",
+        "hookErrorCode"
+    ],
+    "RbacSyncBusyError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "RecentAuthenticationRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "RegistrationRejectedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ReservedUsernameError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "RevokeAllLinkError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "RoleEmailDomainNotAllowedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "RoleInUseError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SecondFactorEnrolmentRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SecondFactorLockedError": [
+        "__type",
+        "message",
+        "details",
+        "retryAfter",
+        "code"
+    ],
+    "SecondFactorMethodDisabledError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SecondFactorRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionBindingUnavailableError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionContextChangedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionDecisionMissingError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionPendingExpiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionPendingMismatchError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionRenewalRefusedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionRenewalRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionResealFailedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SessionSealFailedError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "SignInRefusedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "SignupDisabledError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "StepUpRequiredError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
+    "TokenExpiredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UnverifiedEmailLinkError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UserSettingNotDeclaredError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UsernameAlreadyTakenError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "VerificationTokenPurposeMismatchError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "VerificationTokenTargetMismatchError": [
+        "__type",
+        "message",
+        "details"
+    ]
+}

@@ -68,6 +68,24 @@ function refuseReservedKey(className: string, key: string): never | void
 export const SERIALIZABLE_ERROR_BRAND: unique symbol = Symbol.for('spfn.core.serializableError');
 
 /**
+ * The key `carryStatusCode()` marks an instance with. A global-registry symbol,
+ * like the brand, so the error handler of a second module copy reads the mark
+ * an instance of the first was given.
+ */
+const STATUS_CODE_CARRIED: unique symbol = Symbol.for('spfn.core.statusCodeCarried');
+
+/**
+ * The status `error` carries in its body: its `statusCode` when it was given
+ * to the instance (`carryStatusCode()`), `undefined` when its class fixes it
+ */
+export function carriedStatusCode(error: SerializableError): number | undefined
+{
+    return (error as unknown as Record<symbol, unknown>)[STATUS_CODE_CARRIED] === true
+        ? error.statusCode
+        : undefined;
+}
+
+/**
  * Base class for all serializable errors
  *
  * Features:
@@ -115,12 +133,32 @@ export abstract class SerializableError extends Error
     abstract readonly statusCode: number;
 
     /**
+     * Mark this instance's `statusCode` as its own data, given by whoever
+     * constructed it: `toJSON()` then sends it, for the constructor to read it
+     * back on the client. Called by the constructor `new` was called on, when
+     * that constructor took the status from its argument — `HttpError`, and
+     * `DatabaseError`, `QueryError` and `TransactionError` when given one. A
+     * class that fixes its status, as every subclass of those does, never
+     * calls it, so its body carries no `statusCode`: its constructor sets it.
+     *
+     * A constructor tells `new` was called on it by `new.target`'s parent
+     * being its own parent, not by `new.target === ThisClass`: a class that
+     * names itself in its own body is bundled by esbuild as `_ThisClass`, and
+     * `__type`, its constructor's name, changes with it.
+     */
+    protected carryStatusCode(): void
+    {
+        Object.defineProperty(this, STATUS_CODE_CARRIED, { value: true });
+    }
+
+    /**
      * Serialize error to JSON-compatible object
      *
      * Automatically includes:
      * - __type: Constructor name for deserialization
      * - message: Error message
-     * - All public instance properties (except name, stack)
+     * - All public instance properties (except name, stack, statusCode)
+     * - statusCode, when it was given to this instance (`carryStatusCode()`)
      */
     toJSON(): SerializedError
     {
@@ -132,7 +170,8 @@ export abstract class SerializableError extends Error
         // Extract all public instance properties
         for (const key of Object.keys(this))
         {
-            // Skip Error built-ins and statusCode (inferred from type)
+            // Skip Error built-ins and statusCode: the class sets it, or it is
+            // carried below
             if (key === 'name' || key === 'stack' || key === 'statusCode')
             {
                 continue;
@@ -147,6 +186,8 @@ export abstract class SerializableError extends Error
             json[key] = (this as unknown as Record<string, unknown>)[key];
         }
 
-        return json;
+        const statusCode = carriedStatusCode(this);
+
+        return statusCode === undefined ? json : { ...json, statusCode };
     }
 }

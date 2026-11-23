@@ -192,7 +192,9 @@ Converts a thrown error into a JSON HTTP response. Register it with **`app.onErr
   driver: standard (uncaught) `Error`s become `"Internal Server Error"` with no `cause`, and
   any error exposing `internal === true` (the `DatabaseError` family — `QueryError`,
   `ConnectionError`, `TransactionError`, … carrying raw SQL / table / column / parameter
-  text) becomes `"Internal server error"` with no `details`. Full detail is still logged
+  text) becomes `"Internal server error"` with no `details`, keeping only `__type` and,
+  for an instance given its status, `statusCode`, which restore the class with its status on
+  the client. Full detail is still logged
   server-side. Errors with a safe, constructed message (`EntityNotFoundError`,
   `DuplicateEntryError`, and all non-DB `SerializableError`s) are returned unchanged.
 - **Logging** (when `enableLogging`): `warn` for 4xx, `error` for 5xx, via the

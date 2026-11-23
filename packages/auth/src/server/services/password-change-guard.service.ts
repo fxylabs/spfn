@@ -55,7 +55,7 @@ export async function assertPasswordChangeAdmits(attempt: PasswordChangeAttempt)
             + 'digits, `_`, `-` or `.`.');
     }
 
-    throw new PasswordChangeRefusedError({ code });
+    throw new PasswordChangeRefusedError({ details: { code } });
 }
 
 /**

@@ -8,7 +8,7 @@
  *
  * | Row | Checks | Unnoticed without it |
  * | --- | --- | --- |
- * | G1 | a refusing `admit` is 403 `PasswordChangeRefusedError` with the app's code; the old password still signs in, the new one does not, the flag stays set, `changed` is not told | a refusal asked after the write, or ignored: an expired temporary password is exchanged for a real one |
+ * | G1 | a refusing `admit` is 403 `PasswordChangeRefusedError` with the app's code, which the auth client restores in `details.code` (#459); the old password still signs in, the new one does not, the flag stays set, `changed` is not told | a refusal asked after the write, or ignored: an expired temporary password is exchanged for a real one; a restored error without its code: the page shows a generic failure for every refusal |
  * | G2 | a throwing `changed` is 500 `PasswordChangeHookFailedError` carrying none of the hook's text; the old password still signs in, the flag stays, the hook's own row is gone, no `auth.password.changed` | `changed` run after the commit: the change stands and the app's "set up" row is missing, with the address in the 500 |
  * | G3 | `admit` and `changed` see `required: true` on a flagged account's change and `false` on its next one, `channel: 'change'` | `required` read after the flag was cleared, or not at all: the app cannot tell a first set-up from an ordinary change |
  * | G4 | the hook's own repository write commits with the change | the app's write lands outside the change's transaction or is dropped |
@@ -26,6 +26,7 @@ import postgres from 'postgres';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { restoredByAuthApi } from '../helpers/auth-api-restore';
 import { userInvitations, userProfiles, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { hashCredential } from '@/server/lib/link-credentials';
@@ -58,6 +59,7 @@ const { createVerifiedAccount } = await import('@/server/services/auth.service')
 const { acceptInvitation } = await import('@/server/services/invitation.service');
 const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { authPasswordChangedEvent } = await import('@/server/events');
+const { PasswordChangeRefusedError } = await import('@spfn/auth/errors');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -264,11 +266,14 @@ describe.skipIf(!dbAvailable)('the password-change guard (#434)', () =>
         admitWith = () => ({ refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } });
 
         const refused = await changePassword(PASSWORD, NEW_PASSWORD);
+        const restored = await restoredByAuthApi(refused.clone());
         const body = await refused.json();
 
         expect(refused.status, JSON.stringify(body)).toBe(403);
         expect(body.error.code).toBe('PasswordChangeRefusedError');
         expect(body.details.code).toBe('TEMPORARY_PASSWORD_EXPIRED');
+        expect(restored).toBeInstanceOf(PasswordChangeRefusedError);
+        expect((restored as InstanceType<typeof PasswordChangeRefusedError>).details).toEqual({ code: 'TEMPORARY_PASSWORD_EXPIRED' });
         expect(await flag()).toBe(true);
         expect((await signIn(PASSWORD)).status).toBe(200);
         expect((await signIn(NEW_PASSWORD)).status).toBe(401);

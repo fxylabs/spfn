@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { errorLogLevel, isSerializableError } from '@spfn/core/errors';
+import { carriedStatusCode, errorLogLevel, isSerializableError } from '@spfn/core/errors';
 import type { SerializableError, SerializedError } from '@spfn/core/errors';
 import { describeError, logger } from '@spfn/core/logger';
 import type { DatabaseErrorDescription, ErrorDescription } from '@spfn/core/logger';
@@ -304,6 +304,21 @@ function serializeTypedError(err: SerializableError, includeStack: boolean): Ser
 }
 
 /**
+ * The production answer of an internal error: nothing the driver may have
+ * written. `__type` restores the class and `statusCode`, where the instance was
+ * given one, is its own status — neither is driver text. Read off the instance,
+ * never through its `toJSON()`: an app's serializer that throws would leave the
+ * failure unanswered.
+ */
+function redactedTypedError(err: SerializableError): SerializedError
+{
+    const statusCode = carriedStatusCode(err);
+    const redacted = { __type: err.constructor.name, message: 'Internal server error' };
+
+    return statusCode === undefined ? redacted : { ...redacted, statusCode };
+}
+
+/**
  * `Retry-After` for an error that says when to send the request again —
  * `TooManyRequestsError` and `ServiceUnavailableError` carry `retryAfter` in
  * seconds — so a client reads it where HTTP puts it for a 429 or a 503, not
@@ -408,11 +423,7 @@ export function ErrorHandler(options: ErrorHandlerOptions = {}): (err: Error, c:
             // kept in the log above; the client gets a generic message.
             if ((err as { internal?: boolean }).internal === true && !includeStack)
             {
-                return respond(
-                    c,
-                    { __type: err.constructor.name, message: 'Internal server error' },
-                    statusCode,
-                );
+                return respond(c, redactedTypedError(err), statusCode);
             }
 
             setRetryAfter(c, err);

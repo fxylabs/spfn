@@ -39,7 +39,7 @@
  */
 
 import { getTransaction, runInTransaction } from '@spfn/core/db';
-import { ConflictError, ForbiddenError, NotFoundError } from '@spfn/core/errors';
+import { ConflictError, ForbiddenError, NotFoundError, type SerializedError } from '@spfn/core/errors';
 import { AuthorityContendedError } from '@spfn/auth/errors';
 
 import { permissionsRepository, rolePermissionsRepository, rolesRepository, userPermissionsRepository, usersRepository } from '../repositories';
@@ -268,6 +268,15 @@ export interface HeldAuthority
  */
 class StaleAuthorityPremise extends AuthorityContendedError
 {
+    /**
+     * The body of the refusal it is answered as. `__type` would otherwise name
+     * this class, which no client registry holds: the client could restore it
+     * only as a generic error.
+     */
+    override toJSON(): SerializedError
+    {
+        return new AuthorityContendedError().toJSON();
+    }
 }
 
 /**

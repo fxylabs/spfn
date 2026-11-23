@@ -1,0 +1,118 @@
+{
+    "BadRequestError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ConflictError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ConnectionError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ConstraintViolationError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DatabaseError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DeadlockError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "DuplicateEntryError": [
+        "__type",
+        "message",
+        "details",
+        "field",
+        "value"
+    ],
+    "EntityNotFoundError": [
+        "__type",
+        "message",
+        "details",
+        "resource",
+        "id"
+    ],
+    "ForbiddenError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "GoneError": [
+        "__type",
+        "message",
+        "details",
+        "resource"
+    ],
+    "HttpError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "InternalServerError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "NotFoundError": [
+        "__type",
+        "message",
+        "details",
+        "resource"
+    ],
+    "QueryError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "ServiceUnavailableError": [
+        "__type",
+        "message",
+        "details",
+        "retryAfter"
+    ],
+    "TooManyRequestsError": [
+        "__type",
+        "message",
+        "details",
+        "retryAfter"
+    ],
+    "TransactionError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UnauthorizedError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UnprocessableEntityError": [
+        "__type",
+        "message",
+        "details"
+    ],
+    "UnsupportedMediaTypeError": [
+        "__type",
+        "message",
+        "details",
+        "mediaType",
+        "supportedTypes"
+    ],
+    "ValidationError": [
+        "__type",
+        "message",
+        "details",
+        "fields"
+    ]
+}

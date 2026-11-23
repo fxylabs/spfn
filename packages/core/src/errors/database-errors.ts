@@ -31,6 +31,13 @@ export class DatabaseError<TDetails extends Record<string, unknown> = Record<str
         this.name = 'DatabaseError';
         this.statusCode = data.statusCode ?? 500;
         this.details = data.details;
+
+        // `new` called on this class itself: its caller gave the status
+        if (Object.getPrototypeOf(new.target) === SerializableError && data.statusCode !== undefined)
+        {
+            this.carryStatusCode();
+        }
+
         Error.captureStackTrace(this, this.constructor);
     }
 
@@ -82,6 +89,12 @@ export class QueryError extends DatabaseError
             cause: data.cause,
         });
         this.name = 'QueryError';
+
+        // `new` called on this class itself: its caller gave the status
+        if (Object.getPrototypeOf(new.target) === DatabaseError && data.statusCode !== undefined)
+        {
+            this.carryStatusCode();
+        }
     }
 }
 
@@ -150,6 +163,12 @@ export class TransactionError extends DatabaseError
             cause: data.cause,
         });
         this.name = 'TransactionError';
+
+        // `new` called on this class itself: its caller gave the status
+        if (Object.getPrototypeOf(new.target) === DatabaseError && data.statusCode !== undefined)
+        {
+            this.carryStatusCode();
+        }
     }
 }
 
@@ -175,13 +194,12 @@ export class DeadlockError extends TransactionError
 export class DuplicateEntryError extends QueryError
 {
     public readonly field: string;
-    public readonly value: string | number;
+    readonly #value: string | number;
 
     constructor(data: { field: string; value: string | number; cause?: unknown })
     {
         // The client-facing message/details name the field but NOT the value: echoing
-        // the value back (e.g. an email) confirms it exists, an enumeration aid. The
-        // raw value stays on the instance for server-side handling/logging.
+        // the value back (e.g. an email) confirms it exists, an enumeration aid.
         super({
             message: `${data.field} already exists`,
             statusCode: 409,
@@ -190,7 +208,17 @@ export class DuplicateEntryError extends QueryError
         });
         this.name = 'DuplicateEntryError';
         this.field = data.field;
-        this.value = data.value;
+        this.#value = data.value;
+    }
+
+    /**
+     * The value that already exists, for server-side handling. A getter over a
+     * private field, so `toJSON()` — which sends own fields — never sends it;
+     * an error the client restored has none.
+     */
+    get value(): string | number
+    {
+        return this.#value;
     }
 
     // Field-only message/details — safe to surface to the client (not internal)

@@ -33,6 +33,12 @@ export class HttpError extends SerializableError
             this.details = data.details;
         }
 
+        // `new` called on this class itself: its caller gave the status
+        if (Object.getPrototypeOf(new.target) === SerializableError)
+        {
+            this.carryStatusCode();
+        }
+
         Error.captureStackTrace(this, this.constructor);
     }
 }
