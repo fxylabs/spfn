@@ -1317,6 +1317,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **@spfn/core, @spfn/mcp: a stream says no intermediary may transform it — `Cache-Control: no-cache,
+  no-transform` (spfn/spfn#174).** The Next.js server (`next start`, `next dev`) runs the `compression`
+  middleware on every response, one rewritten to the SPFN server included, and skips only a response
+  whose `Cache-Control` carries `no-transform`. The SSE stream carried hono's `no-cache` alone, so
+  behind a rewrite such as `/events/:path*` and with the browser's `Accept-Encoding: gzip` it was
+  gzipped, and the zlib buffer held the small frames: the headers arrived, then no `connected`, no
+  `ping`, no event, and the client never reconnected. Every `createSSEHandler` stream now answers with
+  `Cache-Control: no-cache, no-transform` beside `X-Accel-Buffering: no`, written through the context
+  after `streamSSE`'s own header, so a middleware that read `c.res` first (hono's `cors`) does not
+  bring `no-cache` back. `@spfn/mcp` adds `no-transform` to the SDK's `text/event-stream` answers on
+  `/mcp`, which the SDK sends with `no-cache` alone on a request's stream and on
+  `subscriptions/listen`. No new option or export.
+
 - **spfn: `db push` replaces a check whose expression changed (#442).** drizzle-kit 1.0.0-rc.4's
   push never alters an existing check (`mode !== "push"` in its diff): PostgreSQL stores a check
   normalised (`op in ('a', 'b')` reads back as `(op = ANY (ARRAY['a'::text, 'b'::text]))`), so the

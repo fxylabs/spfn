@@ -329,7 +329,7 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
 
         return fetch(request, {
             authInfo: toAuthInfo(auth, bearer, resource, { auth, ctx, requestId }),
-        });
+        }).then(passThroughIntermediaries);
     }
     catch (error)
     {
@@ -337,6 +337,26 @@ async function handleRequest<Auth extends McpAuth, Ctx>(
 
         return contextError(error);
     }
+}
+
+/**
+ * Mark a stream the SDK answers with as one an intermediary must not transform.
+ *
+ * The SDK sends `Cache-Control: no-cache` alone on the stream of a request and
+ * on `subscriptions/listen`. The resource is on `appUrl` — the Next.js app's
+ * origin in the documented setup — so the stream reaches the client through
+ * the Next.js server, whose `compression`
+ * middleware gzips every response without `no-transform` and holds the small
+ * frames in the zlib buffer: the client gets the headers and then nothing.
+ */
+function passThroughIntermediaries(response: Response): Response
+{
+    if (response.headers.get('content-type')?.startsWith('text/event-stream'))
+    {
+        response.headers.set('Cache-Control', 'no-cache, no-transform');
+    }
+
+    return response;
 }
 
 function validateSource<Auth extends McpAuth, Ctx>(

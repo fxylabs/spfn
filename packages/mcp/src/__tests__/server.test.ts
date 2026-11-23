@@ -139,6 +139,31 @@ describe('createMcpRoute', () =>
         expect(body).toContain('"name":"test-server"');
     });
 
+    it('marks an SSE answer as one an intermediary must not transform', async () =>
+    {
+        const response = await createApp().request('/mcp', {
+            method: 'POST',
+            headers: {
+                authorization: 'Bearer valid-token',
+                accept: 'application/json, text/event-stream',
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'initialize',
+                params: {
+                    protocolVersion: '2025-11-25',
+                    capabilities: {},
+                    clientInfo: { name: 'legacy-client', version: '1.0.0' },
+                },
+            }),
+        });
+
+        expect(response.headers.get('content-type')).toContain('text/event-stream');
+        expect(response.headers.get('cache-control')).toBe('no-cache, no-transform');
+    });
+
     it('runs application tools with the resolved SPFN context', async () =>
     {
         const toolCalls: string[] = [];

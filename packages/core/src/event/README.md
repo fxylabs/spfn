@@ -223,6 +223,14 @@ SSEAuthConfig<TRouter> }`. The `auth` field is the **generic** `SSEAuthConfig<TR
 > `pingInterval`, `auth`, and `maxQueue`. Setting custom `headers` here is a no-op — set
 > response headers in middleware instead.
 
+> **Proxies between the client and the stream.** Every stream answers with
+> `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`. `no-transform` tells a
+> compressing hop to pass the stream as written: the Next.js server (`next start`, `next dev`)
+> compresses every response, a rewrite such as `/events/:path*` → the SPFN server included,
+> unless it carries `no-transform` — a gzipped stream would hold the small frames in its buffer,
+> so the client would get the headers and then nothing. `X-Accel-Buffering: no` turns off
+> nginx's response buffering for the stream.
+
 ### Contracted events (for separately compiled clients)
 
 A web client takes its event names and payload types from `typeof eventRouter`. A native app

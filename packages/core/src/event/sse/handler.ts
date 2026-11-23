@@ -137,9 +137,12 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
         }
 
         // ── 6. SSE Stream ──
-        c.header('X-Accel-Buffering', 'no');
+        return streamSSE(c, (stream) =>
+        {
+            passThroughIntermediaries(c);
 
-        return streamSSE(c, stream => runStream(c, stream, admission, streamConfig), async (err: Error) =>
+            return runStream(c, stream, admission, streamConfig);
+        }, async (err: Error) =>
         {
             sseLogger.error('SSE stream error', { error: err });
         });
@@ -155,6 +158,28 @@ export function createSSEHandler<TRouter extends EventRouterDef<any>>(
         /** @internal Open registered connections whose token was minted with a key (tests). */
         _openConnectionsByKey: (keyId: string): number => registry.countByKey(keyId),
     });
+}
+
+/**
+ * Tell every intermediary to pass the stream on as it is written.
+ *
+ * `no-transform` (RFC 9111 §5.2.2.6) is what the `compression` middleware of
+ * `next start` / `next dev` checks before it gzips a response — a rewrite to
+ * this server included. A gzipped stream holds the small frames in the zlib
+ * buffer, so the client gets the headers and then nothing, not even `ping`.
+ * `X-Accel-Buffering: no` keeps nginx from buffering it.
+ *
+ * Called first in the `streamSSE` callback: `streamSSE` writes its own
+ * `Cache-Control: no-cache` through `c.header` before it runs the callback, and
+ * builds the response right after the callback's synchronous part. A header
+ * set on the returned response instead is overwritten whenever a middleware
+ * read `c.res` before the handler (hono's `cors` does): hono copies that
+ * response's headers, `no-cache` among them, onto the one the handler returns.
+ */
+function passThroughIntermediaries(c: Context): void
+{
+    c.header('Cache-Control', 'no-cache, no-transform');
+    c.header('X-Accel-Buffering', 'no');
 }
 
 // ============================================================================

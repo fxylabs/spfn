@@ -10,6 +10,7 @@
  * | R7''| `getKeyId` unset, `auth.keyId` set                               | the token carries that `keyId`                       |
  * | R8 | `getKeyId` returns `''`                                           | the token has no `keyId`; consume runs no `verifyKey` |
  * | R9 | custom `getSubject`, `auth` has `userId` and `keyId`              | the token records `auth.userId` as `keyHolder` beside the tag, and `verifyKey` receives it — not a parse of the subject |
+ * | H1 | a stream opened through the server's middleware                   | `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, so a compressing hop (the Next.js server behind a rewrite) passes the frames as written |
  */
 
 import { Type } from '@sinclair/typebox';
@@ -196,5 +197,18 @@ describe('the token endpoint tags a token with the caller\'s device key', () =>
         expect(consumed).toEqual({ subject: 'u', expiresAt: expect.any(Number) });
         expect(verifyKey).not.toHaveBeenCalled();
         tokenManager.destroy();
+    });
+});
+
+describe('an opened stream tells intermediaries to pass it on as written', () =>
+{
+    it('H1 through the server\'s middleware, the stream says no-transform and no buffering', async () =>
+    {
+        const app = await serve(eventRouter());
+        const stream = await openStream(app, '/events/stream?events=a');
+        await stream.frame('connected');
+
+        expect(stream.headers.get('cache-control')).toBe('no-cache, no-transform');
+        expect(stream.headers.get('x-accel-buffering')).toBe('no');
     });
 });

@@ -29,6 +29,7 @@ export interface Frame
 export interface OpenStream
 {
     status: number;
+    headers: Headers;
     body: any;
     frames: Frame[];
 
@@ -119,6 +120,7 @@ export async function openStream(
     const named = (event: string) => frames.filter(f => f.event === event);
     const stream: OpenStream = {
         status: res.status,
+        headers: res.headers,
         body: isStream ? undefined : await res.json().catch(() => null),
         frames,
         named,
