@@ -44,7 +44,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # The wait for the Gitea release is bounded at 90 minutes inside the script.
+    # The script's waits are bounded inside it: 90 minutes for the Gitea
+    # release, then 15 for npmjs to serve the version it accepted.
     timeout-minutes: 120
     permissions:
       contents: write
@@ -113,23 +114,30 @@ jobs:
       # As on main, an existing git tag stops only a version npmjs does not
       # have yet: a dispatch backfilling a version npmjs already has, with
       # create_tag on and the tag in place, still goes on to move its dist-tags.
-      # Only npm's E404 means "does not have it"; any other failure stops here
-      # with npm's own error, as the script does for Gitea.
+      # It asks the per-version document, as the script does: its 404 is not
+      # cached, while `npm view` reads the packument, which npmjs's CDN keeps
+      # for 300 s — for minutes after npmjs starts serving a version, `npm view`
+      # still says it does not, and a re-run that finds the run's own git tag
+      # would stop on "already exists". A version npmjs is still processing
+      # answers 404 here too, rightly: only a run that saw npmjs serve the
+      # version tags it, so no tag can exist for it yet. Only a 404 means "does
+      # not have it"; any other answer stops here, as the script does.
       - name: Ask npmjs whether it has the version
         id: npmjs
         if: ${{ inputs.create_tag && steps.bump.outputs.moved != 'false' }}
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
         run: |
-          ERRORS="$RUNNER_TEMP/npm-view.err"
-          if npm view "${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}" version \
-              --registry https://registry.npmjs.org/ >/dev/null 2>"$ERRORS"; then
-            echo "has=true" >> "$GITHUB_OUTPUT"
-          elif grep -qE 'code E404$' "$ERRORS"; then
-            echo "has=false" >> "$GITHUB_OUTPUT"
-          else
-            cat "$ERRORS" >&2
-            echo "::error::npm view failed (above), so it is not known whether npmjs has ${{ steps.pkg.outputs.version }}"
-            exit 1
-          fi
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${NAME/\//%2f}/$VERSION")
+          case "$STATUS" in
+            200) echo "has=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "has=false" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::npmjs answered $STATUS for $NAME@$VERSION, so it is not known whether npmjs has it"
+              exit 1
+              ;;
+          esac
 
       - name: Check if tag exists
         if: ${{ steps.npmjs.outputs.has == 'false' }}
@@ -221,6 +229,6 @@ jobs:
             echo "| Item | Value |"
             echo "|------|-------|"
             echo "| Version moved | ${{ steps.bump.outputs.moved || 'not checked (manual run)' }} |"
-            echo "| npmjs | ${{ steps.republish.outputs.outcome || steps.republish.outcome }} |"
+            echo "| npmjs | ${{ steps.republish.outputs.outcome == 'not-served' && format('not served by npmjs within the 15-minute wait (npm''s typical figure for processing, not a bound): the step''s error lists the likely reasons (see https://www.npmjs.com/package/{0}/v/{1}); a re-run waits again and finishes only once npmjs serves it', steps.pkg.outputs.name, steps.pkg.outputs.version) || steps.republish.outputs.outcome || steps.republish.outcome }} |"
             echo "| git tag | ${{ steps.git-tag.outputs.result || 'skipped' }} |"
           } >> "$GITHUB_STEP_SUMMARY"

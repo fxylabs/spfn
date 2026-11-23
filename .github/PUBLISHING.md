@@ -77,8 +77,8 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 ## 공개 npmjs — Gitea 의 tarball 을 그대로 올린다
 
 `.github/workflows/publish-<pkg>.yml` 열네 개가 **공개 npm(npmjs.org)** 배포의 입구다.
-내용은 전부 재사용 워크플로우 `publish-from-gitea.yml` 하나를 부르는 것뿐이고, 일은
-`scripts/republish-from-gitea.mjs`(`scripts/lib/republish.mjs`) 가 한다.
+내용은 전부 재사용 워크플로우 `publish-from-gitea.yml` 하나를 부르는 것과 패키지별 `concurrency`
+그룹뿐이고, 일은 `scripts/republish-from-gitea.mjs`(`scripts/lib/republish.mjs`) 가 한다.
 
 - 트리거: `packages/<pkg>/package.json` 변경이 GitHub 의 `main` 에 push 될 때.
   origin 은 Gitea 이고 GitHub 은 미러라, Gitea 에 push 하면 미러를 타고 돌아간다.
@@ -98,13 +98,65 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 - npmjs 에 그 버전이 이미 있으면 integrity 를 비교한다. 같으면 아래 dist-tag 규칙만 다시
   적용하고 초록, **다르면 빨강** — 한 버전이 두 tarball 로 갈라진 상태이고, 어느 레지스트리에서도
   버전을 바꿔 올릴 수 없으므로 그 버전은 고칠 수 없다. 다음 버전부터 하나로 맞는다.
-- 없으면 `npm publish <파일> --access public --tag <tag> --registry https://registry.npmjs.org/ --provenance`
-  로 올리고(`<tag>` 는 아래 규칙으로 옮길 수 있는 tag 중 첫째, 채널 tag 가 먼저), npmjs 의
-  `dist.integrity` 를 버전 문서(`/<name>/<version>`)에서 다시 읽어 Gitea 와 다르면 실패한 뒤,
-  남은 dist-tag 를 옮긴다. 기다리지 않고 바로 읽어도 낡은 답이 오지 않는 이유 (2026-11-23
-  측정): 버전 문서의 404 는 캐시 헤더가 없고 캐시되지 않으며,
-  publish 전에 이 실행이 받은 답이 그 404 다. 200 은 scoped 이름이면 캐시되지 않지만 unscoped
-  `spfn` 은 `max-age=300` 으로 CDN 에서 나간다 — 그래도 publish 전에 200 이 캐시될 수는 없다.
+- 없으면 `npm publish <파일> --access public --tag publishing-<version> --registry https://registry.npmjs.org/ --provenance`
+  로 올린다. **채널 tag 로 올리지 않는다**: `npm publish` 의 `--tag` 는 npmjs 가 처리를 마칠 때 —
+  몇 분 뒤, 아래 규칙 밖에서 — 붙이므로, 채널 tag 로 올리면 더 새 버전이 먼저 처리를 마친 경우 그
+  tag 가 뒤로 간다. npm 은 tag 없이 올릴 수 없으니(`--tag` 를 빼면 `latest`) 규칙이 다루지 않는
+  **버전마다 다른** 임시 tag `publishing-<version>`(예: `publishing-0.4.0-beta.6`)으로 올리고, 채널
+  tag 와 `latest` 는 npmjs 가 버전을 내준 뒤 스크립트가 규칙대로 옮긴 다음 그 임시 tag 를 지운다.
+  npm 이 tag 이름으로 거절하는 것은 SemVer range 로 읽히는 이름과 `encodeURIComponent` 가 바꾸는
+  글자가 든 이름이다(npm 12.2.3 `publish`·`dist-tag add`·npm-package-arg) — alpha·beta·안정 버전
+  모두 해당하지 않는다(`+build` 접미사는 걸리지만 쓰는 패키지가 없다). 이름이 버전마다 달라서 실행은
+  자기 버전의 tag 만 지운다. 죽은 실행이 남긴 tag 도 이름에 버전이 있고, 그 버전의 재실행(이미 있는
+  버전 경로 포함)이 지운다. `npm dist-tag rm` 은 이미 없는 tag 에 실패하므로, 실패하면 dist-tag 를
+  다시 읽어 그 tag 가 없으면 지운 것으로 친다(같은 버전의 다른 실행이 먼저 지운 경우). 그 밖의 실패
+  (인증, 레지스트리, 네트워크)는 실패로 남고, 메시지가 "릴리스는 나머지가 다 끝났고 임시 tag
+  `publishing-<version>` 만 남았다" 고, 지우는 방법(`npm dist-tag rm <name> publishing-<version>` 또는
+  재실행)과 함께 말한다.
+- **npmjs 는 publish 를 받은 뒤 처리하고 나서야 그 버전을 내준다.** `npm publish` 는 버전·tarball·
+  `--tag` 를 PUT 한 번에 보내고 레지스트리가 받았다고(2xx) 답하면 끝난다 — 로그의 "Your package is
+  being processed and may take a few minutes to become available." 는 그 응답의 `npm-notice`
+  헤더다. npm 은 publish 마다 악성코드 검사를 하고, 그동안 버전 문서는 404 `version not found`,
+  dist-tag 도 그대로다 (`--tag` 로 준 tag 는 처리가 끝날 때 버전과 함께 붙는다). npm 이 밝힌 지연은
+  "typically around five minutes … up to 15 minutes or more", 보장값이 아니고 수동 검토로 붙들릴
+  수도 있다 ([GitHub changelog, 2026-07-28](https://github.blog/changelog/2026-07-28-npm-publish-time-malware-scanning-and-dual-use-metadata/)).
+  그래서 스크립트는 publish 뒤 버전 문서(`/<name>/<version>`)를 30초 간격으로 묻는다. 기다리는
+  시간은 **15분** — npm 이 밝힌 보통의 위쪽 값("up to 15 minutes or more", "aren't a service
+  guarantee")이지 상한이 아니다. 기다리는 건 404 뿐이고 다른 답은 즉시 실패다. npmjs 가 내주면
+  `dist.integrity` 를 Gitea 와 비교하고(다르면 실패), **그 다음에야** dist-tag 를 읽어 아래 규칙대로
+  옮긴다. 처리 중인 버전에도 `npm dist-tag add` 는 통하지만(npm 문서), 내주지도 않는 — 막힐 수도
+  있는 — 버전에 `latest` 를 붙이지 않으려고 기다린 뒤에 옮긴다. 버전 문서의 404 는 캐시되지
+  않아(2026-11-23 측정) 묻는 족족 지금 상태다.
+- **15분 안에 내주지 않으면** 실패하고(`outcome=not-served`, 요약의 npmjs 칸이 그렇게 말한다),
+  dist-tag 는 하나도 옮기지 않는다. 스크립트가 아는 것은 **npmjs 가 그 버전을 아직 내주지 않았다**
+  는 것뿐이다. 그럴 만한 이유: 아직 처리 중, 수동 검토로 붙들림, 차단됨, 또는 (publish 가 거절된
+  경우) npmjs 가 그 버전을 받은 적이 없음 — 같은 패키지의 다른 버전이 처리 중일 때도 E409 가
+  온다고 알려져 있고(**측정하지 않았다**), 그러면 재실행이 publish 한다 — 이거나 npmjs 가 다시 받지
+  않는 버전 번호 — 한 번 올렸다 지운 버전 번호는 다시 쓸 수 없고, 그러면 새 버전으로 릴리스해야
+  한다. 어느 쪽인지는 npmjs 의 패키지 페이지
+  (`https://www.npmjs.com/package/<name>/v/<version>`)에서 본다. **재실행은 다시 기다리고, npmjs 가
+  그 버전을 내줄 때에만 마무리된다**(비교하고 tag 를 옮긴다) — 내주지 않는 한 몇 번을 돌려도
+  같은 실패다.
+- **이미 쓰인 버전 번호라는 거절**(E409, 또는 "cannot publish over the previously published
+  versions") 을 받으면 스크립트는 그 거절로 실패하지 않고 위와 똑같이 기다린다. 결과는 내주면
+  `already-published`. 처리 중에 재실행한 경우가 이것이다: 버전 문서가 아직 404 라 다시 publish
+  하고 거절된다. 다만 처리 중인 버전에 npmjs 가 정확히 어떤 거절을 주는지는 **측정하지 않았다**
+  (publish 해야 잴 수 있다). 같은 거절이 이미 내주는 버전, 올렸다 지운 버전에도 오고, E409 는 같은 패키지의 다른 버전이 처리
+  중일 때도 온다고 알려져 있다(측정하지 않았다 — 이때 이 버전은 올라간 적이 없다). 거절만으로는
+  어느 쪽인지 알 수 없다. 지운 버전은 packument 의 `time` 에 남고 `versions` 에서 빠지지만,
+  처리 중인 버전이 `time` 에 없다고 밝힌 npm 자료가 없다 — 0.4.0-beta.5 의 `time` 값(12:29:20Z)이
+  publish 수락(12:27:11Z)보다 처리 끝(12:29:31Z)에 가깝다는 관측 하나뿐이고, 그 값은 항목이 언제
+  생겼는지는 말하지 않는다. 그래서 `time` 으로 "다시는 안 받는 번호" 를 가려 즉시 실패시키지
+  않고, 기다린 뒤 위의 메시지로 끝낸다.
+- Gitea 레지스트리는 이런 처리 단계가 없다: publish 요청 안에서 버전을 저장하고 답한다. 그래서
+  `publish-package.mjs` 가 publish 직후 `latest` 를 옮기고, `publish-changed.mjs` 가 E409 직후 다시
+  물어 "이미 있음" 을 확인하는 것이 그대로 맞다.
+- `create_tag` 인 실행은 publish 전에 npmjs 에 그 버전이 있는지 **버전 문서**로 묻는다(404 만 "없음").
+  `npm view` 는 packument 를 읽는데 npmjs CDN 이 300초 캐시해서(측정: `cache-control: public,
+  max-age=300`, `cf-cache-status: HIT`), npmjs 가 버전을 내주기 시작한 뒤에도 몇 분 동안 "없다" 고
+  답할 수 있다 — 그러면 그 실행이 만든 git tag 를 보고 "Tag … already exists" 로 멈춘다. 처리 중인
+  버전도 여기서는 "없음" 이지만, git tag 는 npmjs 가 버전을 내준 걸 본 실행만 만들므로 그 버전의
+  tag 는 아직 있을 수 없다.
 - **dist-tag 규칙.** 어느 tag 를 노리는지는 `main` 의 채널 규칙 그대로다 — 버전 문자열의
   채널(`-alpha` → `alpha`, `-beta` → `beta`, 그 외 → `latest`)과, alpha·beta 도 포함해 언제나
   `latest`. 바뀐 건 하나: **tag 는 지금 가리키는 버전보다 새 버전으로만 옮긴다** (Semantic
@@ -112,9 +164,23 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
   < 1.0.0 < 1.1.0-alpha.1`). 같은 패키지의 두 릴리스가 순서가 뒤바뀌어 끝나도 tag 는 새 쪽에
   남고, 실행 로그가 "left npmjs's latest dist-tag on …" 으로 옮기지 않았다고 말한다. tag 는
   npmjs 의 `/-/package/<name>/dist-tags` 에서 읽는다 — 캐시 헤더가 없고 거듭 물어도 Cloudflare
-  가 `DYNAMIC` 으로 답했다(측정). 패키지 문서(packument)는 300초 캐시라 쓰지 않는다. `npm publish` 는 tag
-  없이 올릴 수 없어서, 노리는 tag 가 모두 더 새 버전을 가리키는 버전은 **`superseded`** tag
-  로 올라간다.
+  가 `DYNAMIC` 으로 답했다(측정). 패키지 문서(packument)는 300초 캐시라 쓰지 않는다. 노리는 tag 가 모두 더 새
+  버전을 가리키는 버전은 어느 tag 도 받지 않는다(예전의 `superseded` tag 는 이제 붙지 않고, 이미
+  붙은 것은 그대로 남는다).
+- **한 패키지의 실행은 한 번에 하나다.** 규칙은 dist-tag 를 읽은 뒤 쓰는데 npm dist-tag 에는
+  compare-and-swap 이 없어서, 두 실행이 겹치면 A 가 읽고 → B 가 v10 으로 옮기고 → A 가 v9 를 쓰는
+  순서로 tag 가 옛 버전에 남을 수 있다. 그래서 열네 caller 가 각자 `concurrency: { group:
+  publish-npmjs-packages/<pkg>, queue: max }` 를 둔다. GitHub 문서
+  ([Control the concurrency of workflows and jobs](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs)):
+  기본값 `single` 은 "When a new job or workflow run is queued, any existing `pending` job or workflow
+  run in the same group is canceled and replaced" — 취소된 실행은 npmjs 에 끝내 안 올라가는 버전이라
+  쓰지 않는다. `max` 는 "Up to 100 jobs or workflow runs can be `pending` in the concurrency group",
+  대기 순서는 "processed in first-in-first-out (FIFO) order according to the time each one started
+  waiting on the concurrency group … Since the actual start time of a job or run may vary, ordering is
+  not guaranteed"([workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax))
+  — 순서가 바뀌어도 규칙이 tag 를 새 쪽에 둔다. 100개가 넘게 쌓이면 GitHub 이 그 뒤를 취소한다(그럴 일은 없지만
+  그 경우 그 버전은 workflow_dispatch 로 백필한다). 그룹 이름은 저장소 안에서만 유효하다("in the
+  repository"). 같은 버전의 push 실행과 dispatch 도 같은 그룹이라 겹치지 않는다.
 - 이미 있는 버전에도 규칙을 다시 적용하므로, publish 는 됐는데 `dist-tag` 에서 실패한 실행은
   어떤 재실행(push 의 "Re-run", workflow_dispatch)으로도 마무리된다. workflow_dispatch 는
   버전 비교를 건너뛰는 백필 경로다. `dry_run` 은 `npm publish --dry-run` 까지만 하고

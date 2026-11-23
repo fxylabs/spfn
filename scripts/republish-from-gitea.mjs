@@ -7,7 +7,8 @@
  * `.github/workflows/publish-<pkg>.yml` calls. The flow is in
  * `scripts/lib/republish.mjs`: wait for the Gitea release to publish the
  * version, compare with what npmjs has, download and verify, `npm publish`
- * the file, read npmjs's integrity back, move the dist-tags that may move.
+ * the file, wait for npmjs to serve it and read its integrity back, move the
+ * dist-tags that may move.
  *
  * Usage: node scripts/republish-from-gitea.mjs <package-dir> [--dry-run]
  *
@@ -19,7 +20,8 @@
  * registry. NPM_TOKEN, when set, is the npmjs token `npm publish` and
  * `npm dist-tag` authenticate with; only they receive it (`runDependencies`),
  * and the workflow refuses to run without it. With GITHUB_OUTPUT set, writes
- * `outcome=<result>` there.
+ * `outcome=<result>` there — also `outcome=not-served` for a run that failed
+ * because npmjs did not serve the version in time.
  */
 
 import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
@@ -71,12 +73,17 @@ async function main()
     const outcome = await republish(deps);
 
     console.log(`${deps.name}@${deps.version}: ${outcome}`);
-    if (process.env.GITHUB_OUTPUT)
+    writeOutcome(outcome);
+
+    return 0;
+}
+
+function writeOutcome(outcome)
+{
+    if (process.env.GITHUB_OUTPUT && outcome)
     {
         appendFileSync(process.env.GITHUB_OUTPUT, `outcome=${outcome}\n`);
     }
-
-    return 0;
 }
 
 main().then(
@@ -86,6 +93,7 @@ main().then(
         // Every refusal carries its whole explanation in the message; a stack
         // above it in a CI log only buries the sentence someone has to read.
         console.error(error.message);
+        writeOutcome(error.outcome);
         process.exit(1);
     },
 );

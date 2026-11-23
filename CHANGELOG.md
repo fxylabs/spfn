@@ -1658,6 +1658,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged (`NPM_TOKEN`, provenance kept); the one new secret is `GITEA_PACKAGES_READ_TOKEN` on
   GitHub, a read-only Gitea packages token. Versions already split stay as they are — a published version
   cannot be replaced.
+- **Release: the npmjs republish waits for npmjs to serve the version it accepted (#474).** npmjs
+  now scans a publish before serving it — npm states "typically around five minutes", "up to 15
+  minutes or more" (GitHub changelog, 2026-07-28) — and `npm publish` returns on acceptance, so
+  `scripts/republish-from-gitea.mjs` read the version back at once and failed the first real run
+  (`@spfn/core@0.4.0-beta.5`): the version was published, the run red, `latest` never moved. After
+  the publish it now asks npmjs's per-version document every 30 s, for at most 15 minutes, until it
+  serves the version — only a 404 waits, any other answer fails at once — then compares integrity
+  and only then reads and moves the dist-tags. 15 minutes is npm's typical upper figure, not a
+  bound: past it the run fails saying only that npmjs has not served the version, the likely
+  reasons (still processing, held for review, blocked, and on a refused publish also never taken —
+  E409 is reported while another version of the package processes, unmeasured — or a version number
+  npmjs will not reuse),
+  where to look (the version's npmjs page), and that a re-run waits again and finishes only once
+  npmjs serves it; the step's `outcome` is `not-served` and the summary says so. A refusal of the
+  version number (E409, or "cannot publish over the previously published versions"), which is what
+  a re-run during processing gets, waits the same way instead of failing. The version is published
+  under a temporary dist-tag of its own, `publishing-<version>`, instead of its channel's tag: npmjs
+  applies a publish's `--tag` when processing ends, outside the forward-only rule, so a version
+  served after a newer one moved the channel tag backwards. The run moves the channel tag and
+  `latest` by the rule once npmjs serves the version, then removes its version's temporary tag (also
+  one a killed run left). A removal npm refuses counts as done when a fresh read shows the tag gone;
+  any other failure says the release is otherwise complete and names the tag left. `superseded` is
+  no longer set. The forward-only rule reads the tags before it writes them, and npm dist-tags have no
+  compare-and-swap, so each of the 14 `publish-<pkg>.yml` callers now has a per-package
+  `concurrency` group with `queue: max`: runs of one package never overlap, and a waiting run is
+  queued, not cancelled as under the default `queue: single`. The workflow's `create_tag` check asks the per-version document instead of
+  `npm view`, whose packument npmjs's CDN keeps for 300 s.
 
 - **@spfn/core, @spfn/mcp: a stream says no intermediary may transform it — `Cache-Control: no-cache,
   no-transform` (spfn/spfn#174).** The Next.js server (`next start`, `next dev`) runs the `compression`

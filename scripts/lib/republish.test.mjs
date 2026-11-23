@@ -1,7 +1,8 @@
 /**
  * `node --test scripts/lib/` — the two registries are one local HTTP server
  * (`/gitea/` and `/npmjs/`), `npm` is a recorder that "publishes" into the
- * npmjs half, and the clock is injected: no network, no real minutes.
+ * npmjs half, and the clock is injected: no network, no real minutes. As on
+ * npmjs, a publish is accepted at once and served only after processing.
  *
  * Each case is a way the republish could go wrong while the run stays green.
  */
@@ -12,7 +13,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GITEA_POLL_MS, GITEA_WAIT_MS, republish, runDependencies } from "./republish.mjs";
+import { GITEA_POLL_MS, GITEA_WAIT_MS, NOT_SERVED, NPMJS_POLL_MS, NPMJS_WAIT_MS, publishTagOf, republish, runDependencies } from "./republish.mjs";
 
 const NAME = "@spfn/core";
 const VERSION = "1.0.0-beta.1";
@@ -22,9 +23,9 @@ const TARBALL = Buffer.from("the one tarball Gitea built");
 const integrity = (bytes) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 
 /**
- * Serve `state` — `{ gitea, npmjs, tags, tarballBytes }`, each changeable
- * mid-test, and `respond(request, response)` answering a request itself when
- * it returns true — and log every request.
+ * Serve `state` — `{ gitea, npmjs, tags, tarballBytes, processing }`, each
+ * changeable mid-test, and `respond(request, response)` answering a request
+ * itself when it returns true — and log every request.
  */
 async function listen(handler)
 {
@@ -48,7 +49,6 @@ async function registries(t, state)
         }
 
         const [, registry] = request.url.split("/");
-        const dist = state[registry];
 
         if (request.url.endsWith(".tgz"))
         {
@@ -63,14 +63,45 @@ async function registries(t, state)
             return;
         }
 
-        response.writeHead(dist ? 200 : 404, { "content-type": "application/json" });
-        response.end(JSON.stringify(dist ? { name: NAME, version: VERSION, dist } : { error: "Not found" }));
+        if (registry === "npmjs" && request.url.endsWith(`/${state.publishing}`))
+        {
+            serveWhenProcessed(state);
+        }
+
+        response.writeHead(state[registry] ? 200 : 404, { "content-type": "application/json" });
+        response.end(JSON.stringify(state[registry]
+            ? { name: NAME, version: VERSION, dist: state[registry] }
+            : { error: `version not found: ${state.publishing}` }));
     });
 
     t.after(() => server.close());
     state.tarballBytes ??= TARBALL;
 
     return { origin, requests };
+}
+
+/**
+ * npmjs processing a publish: `state.processing` (the accepted version, its
+ * dist and its `--tag`) is served, tag included, once `polls` asks for the
+ * version have answered "version not found". Until then the dist-tags do not
+ * name it either.
+ */
+function serveWhenProcessed(state)
+{
+    if (!state.processing)
+    {
+        return;
+    }
+    if (state.processing.polls > 0)
+    {
+        state.processing.polls -= 1;
+
+        return;
+    }
+
+    state.npmjs = state.processing.dist;
+    state.tags = { ...state.tags, [state.processing.tag]: state.publishing };
+    delete state.processing;
 }
 
 /** A clock whose `sleep` moves time instead of waiting, refusing to run past the bound by much. */
@@ -84,29 +115,67 @@ function fakeClock(onSleep = () => {})
         sleep: async (ms) =>
         {
             sleeps += 1;
-            assert.ok(sleeps <= GITEA_WAIT_MS / GITEA_POLL_MS + 2, "kept waiting past the bound");
+            assert.ok(sleeps <= GITEA_WAIT_MS / GITEA_POLL_MS + NPMJS_WAIT_MS / NPMJS_POLL_MS + 2, "kept waiting past the bound");
             now += ms;
             onSleep(sleeps);
         },
     };
 }
 
-/** `npm` as a recorder: `publish` and `dist-tag add` change the npmjs half of `state` the way npmjs would. */
+/** What npm prints for a publish npmjs refuses as a version it has or is processing. */
+const CANNOT_PUBLISH_OVER = "npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/@spfn%2fcore"
+    + ` - You cannot publish over the previously published versions: ${VERSION}.`;
+
+/**
+ * `npm` as a recorder that changes the npmjs half of `state` the way npmjs
+ * would: `publish` is accepted into processing (`state.pollsUntilServed`
+ * asks before it is served) or refused with `state.refusal` while the version
+ * is there or processing; `dist-tag add` works on a version still processing,
+ * as npm documents, and `dist-tag rm` fails on a tag that is not there, as npm's does.
+ */
 function fakeNpm(state, npmCalls)
 {
     return (args) =>
     {
         npmCalls.push(args);
+        if (args[0] === "publish" && (state.npmjs || state.processing))
+        {
+            return { status: 1, stderr: state.refusal ?? CANNOT_PUBLISH_OVER };
+        }
         if (args[0] === "publish")
         {
-            state.npmjs = { integrity: integrity(readFileSync(args[1])) };
-            state.tags = { ...state.tags, [args[args.indexOf("--tag") + 1]]: state.publishing };
+            state.processing = {
+                dist: { integrity: integrity(readFileSync(args[1])) },
+                tag: args[args.indexOf("--tag") + 1],
+                polls: state.pollsUntilServed ?? 0,
+            };
+        }
+        if (args[0] === "dist-tag" && args[1] === "rm")
+        {
+            return removeTag(state, args[3]);
         }
         if (args[0] === "dist-tag")
         {
             state.tags = { ...state.tags, [args[3]]: args[2].slice(args[2].lastIndexOf("@") + 1) };
+            state.taggedWhileProcessing ||= Boolean(state.processing);
         }
+
+        return { status: 0, stderr: "" };
     };
+}
+
+function removeTag(state, tag)
+{
+    if (!state.tags?.[tag])
+    {
+        return { status: 1, stderr: `npm error ${tag} is not a dist-tag on ${NAME}` };
+    }
+
+    const { [tag]: _removed, ...rest } = state.tags;
+
+    state.tags = rest;
+
+    return { status: 0, stderr: "" };
 }
 
 function deps(t, origin, state, overrides = {})
@@ -289,13 +358,39 @@ test("a version finishing after a newer one leaves latest and its channel tag on
     const d = deps(t, origin, state, { version: "1.0.0-beta.9" });
 
     assert.equal(await republish(d), "published");
-    assert.deepEqual(state.tags, { beta: newer, latest: newer, superseded: "1.0.0-beta.9" });
-    assert.deepEqual(d.npmCalls.map((args) => args[0]), ["publish"]);
+    assert.deepEqual(state.tags, { beta: newer, latest: newer });
+});
+
+// Unnoticed without it: a version published under its channel's tag gets
+// that tag from npmjs when processing ends, minutes later and past the rule
+// above. beta.10's run finishing while beta.9 is processing would see beta.9's
+// processing end move `beta` back to beta.9, green.
+test("a version served after a newer one took its channel tag leaves the channel tag on the newer", async (t) =>
+{
+    const newer = "1.0.0-beta.10";
+    const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" }, pollsUntilServed: 2 };
+    const { origin } = await registries(t, state);
+
+    state.gitea = giteaDist(origin);
+    const d = deps(t, origin, state, {
+        version: "1.0.0-beta.9",
+        clock: fakeClock((sleeps) =>
+        {
+            if (sleeps === 1)
+            {
+                state.tags = { beta: newer, latest: newer };
+            }
+        }),
+    });
+
+    assert.equal(await republish(d), "published");
+    assert.deepEqual(state.tags, { beta: newer, latest: newer });
 });
 
 // Unnoticed without it: `npm publish` succeeds and `npm dist-tag add … latest`
 // fails; "Re-run failed jobs" replays the push, finds the same bytes on npmjs
-// and would end green with `latest` never moved.
+// and would end green with `latest` never moved, and with the run's publish
+// tag left on the version for good.
 test("a re-run after a failed dist-tag moves latest on a version npmjs already has", async (t) =>
 {
     const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" } };
@@ -305,16 +400,9 @@ test("a re-run after a failed dist-tag moves latest on a version npmjs already h
     const failing = deps(t, origin, state);
     const recorder = failing.npm;
 
-    failing.npm = (args) =>
-    {
-        if (args[0] === "dist-tag")
-        {
-            throw new Error("npm error code E403");
-        }
-        recorder(args);
-    };
-    await assert.rejects(republish(failing), /E403/);
-    assert.deepEqual(state.tags, { beta: VERSION, latest: "1.0.0-beta.0" });
+    failing.npm = (args) => args[3] === "latest" ? { status: 1, stderr: "npm error code E403" } : recorder(args);
+    await assert.rejects(republish(failing), /npm dist-tag for @spfn\/core@1\.0\.0-beta\.1 exited with 1/);
+    assert.deepEqual(state.tags, { beta: VERSION, latest: "1.0.0-beta.0", [publishTagOf(VERSION)]: VERSION });
 
     assert.equal(await republish(deps(t, origin, state)), "already-published");
     assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
@@ -420,10 +508,85 @@ test("npmjs not holding the Gitea bytes after a publish is a failure, and no tag
 
     d.npm = (args) =>
     {
-        recorder(args);
-        state.npmjs = { integrity: integrity(Buffer.from("what npmjs ended up with")) };
+        const result = recorder(args);
+
+        state.processing.dist = { integrity: integrity(Buffer.from("what npmjs ended up with")) };
+
+        return result;
     };
 
     await assert.rejects(republish(d), /After publishing, npmjs reports/);
     assert.deepEqual(d.npmCalls.map((args) => args[0]), ["publish"]);
 });
+
+// Unnoticed without it: the first real run (#465, @spfn/core@0.4.0-beta.5).
+// npmjs accepts a publish and serves it minutes later; a read-back that does
+// not wait fails a run whose version did publish, and `latest` never moves.
+// A wait that moves `latest` before npmjs serves the version would point it
+// at a version that is not installable yet, or never is if npmjs blocks it —
+// and npmjs does not refuse that `dist-tag add`.
+test("a version npmjs serves only after processing is waited for, compared, and latest moved after", async (t) =>
+{
+    const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" }, pollsUntilServed: 3 };
+    const { origin } = await registries(t, state);
+
+    state.gitea = giteaDist(origin);
+    const d = deps(t, origin, state);
+
+    assert.equal(await republish(d), "published");
+    assert.equal(d.clock.now(), 3 * NPMJS_POLL_MS);
+    assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
+    assert.equal(state.taggedWhileProcessing, false);
+    assert.equal(published(d).length, 1);
+});
+
+// Unnoticed without it: a version npmjs never serves (held for review,
+// blocked) would hang the job until the workflow's timeout, or end with a
+// message that reads as a failed publish and a summary that says only
+// "failure" — when npmjs took the publish and the run cannot know why.
+test("a version npmjs never serves fails at the bound, saying npmjs accepted it, and no tag moves", async (t) =>
+{
+    const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" }, pollsUntilServed: Infinity };
+    const { origin } = await registries(t, state);
+
+    state.gitea = giteaDist(origin);
+    const d = deps(t, origin, state);
+
+    await assert.rejects(republish(d), (error) =>
+    {
+        assert.match(error.message, /npmjs accepted the publish of @spfn\/core@1\.0\.0-beta\.1 and has not served the version within 15 minutes/);
+        assert.equal(error.outcome, NOT_SERVED);
+
+        return true;
+    });
+    assert.ok(d.clock.now() >= NPMJS_WAIT_MS);
+    assert.deepEqual(state.tags, { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" });
+    assert.deepEqual(d.npmCalls.map((args) => args[0]), ["publish"]);
+});
+
+// Unnoticed without it: a re-run while npmjs is still processing the first
+// run's publish finds no version, publishes again and gets npm's refusal.
+// Read as a failure, every re-run in the window is red and `latest` is never
+// moved; read as success without the wait, the tags move onto a version not
+// served yet. Both refusals npm can print are read the same way.
+for (const [answer, refusal] of [
+    ["E403 cannot publish over", CANNOT_PUBLISH_OVER],
+    ["E409 Conflict", "npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/@spfn%2fcore - Conflict"],
+])
+{
+    test(`a re-run while npmjs processes the version waits for it after npm's ${answer}`, async (t) =>
+    {
+        const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" }, refusal };
+        const { origin } = await registries(t, state);
+
+        state.gitea = giteaDist(origin);
+        const d = deps(t, origin, state);
+
+        state.processing = { dist: { integrity: integrity(TARBALL) }, tag: publishTagOf(VERSION), polls: 2 };
+        assert.equal(await republish(d), "already-published");
+        assert.equal(d.clock.now(), NPMJS_POLL_MS);
+        assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
+        assert.equal(state.taggedWhileProcessing, false);
+        assert.equal(published(d).length, 1);
+    });
+}

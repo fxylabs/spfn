@@ -15,7 +15,7 @@
  * an injected clock.
  */
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -39,6 +39,24 @@ export const NPMJS_REGISTRY = "https://registry.npmjs.org/";
  */
 export const GITEA_WAIT_MS = 90 * 60 * 1000;
 export const GITEA_POLL_MS = 30 * 1000;
+
+/**
+ * How long to wait for npmjs to serve a version it accepted.
+ *
+ * `npm publish` is one PUT of the version, its tarball and its `--tag`
+ * (libnpmpublish `buildMetadata`), and returns on the registry's 2xx; the
+ * "Your package is being processed and may take a few minutes to become
+ * available." line is the registry's `npm-notice` header, printed by
+ * npm-registry-fetch. npmjs scans a publish before serving it (GitHub
+ * changelog, 2026-07-28, "npm publish-time malware scanning"): "typically
+ * around five minutes. It may take longer, up to 15 minutes or more, at peak
+ * times", "aren't a service guarantee", and a package can be "held for manual
+ * review, or blocked". 15 minutes is the typical upper figure npm gives, not a
+ * bound: past it the version may still come, or never, and the run says it
+ * does not know which (`notServedError`).
+ */
+export const NPMJS_WAIT_MS = 15 * 60 * 1000;
+export const NPMJS_POLL_MS = 30 * 1000;
 
 /** The `sha512-…` entry of a Subresource Integrity string, or `null`. */
 export function sha512Of(integrity)
@@ -118,17 +136,17 @@ function giteaHeaders(deps)
 }
 
 /**
- * Ask Gitea until it has the version or `GITEA_WAIT_MS` has passed. Waiting is
- * for an event that is expected — the release run publishing — and not a
+ * Ask a registry until it has the version or `wait.ms` has passed, then
+ * throw `wait.timeout()`. Waiting is for an event that is expected and not a
  * retry: `registryDist` fails at once on anything but "not there yet".
  */
-export async function waitForGitea(deps)
+async function waitForVersion(deps, registry, headers, wait)
 {
-    const deadline = deps.clock.now() + GITEA_WAIT_MS;
+    const deadline = deps.clock.now() + wait.ms;
 
     for (;;)
     {
-        const dist = await registryDist(deps, deps.giteaRegistry, giteaHeaders(deps));
+        const dist = await registryDist(deps, registry, headers);
 
         if (dist)
         {
@@ -136,16 +154,27 @@ export async function waitForGitea(deps)
         }
         if (deps.clock.now() >= deadline)
         {
-            throw new Error(`The Gitea release did not publish ${deps.name}@${deps.version}: `
-                + `the Gitea registry still did not have it after ${GITEA_WAIT_MS / 60000} minutes. `
-                + "Look at .gitea/workflows/release.yml's run for this push (if it did publish the version, "
-                + "check that GITEA_PACKAGES_READ_TOKEN can read it); nothing was published to npmjs. "
-                + "Once the version is there, run this workflow by hand to catch npmjs up.");
+            throw wait.timeout();
         }
 
-        deps.log(`${deps.name}@${deps.version} is not on the Gitea registry yet — asking again in ${GITEA_POLL_MS / 1000} s`);
-        await deps.clock.sleep(GITEA_POLL_MS);
+        deps.log(`${deps.name}@${deps.version} is not on ${wait.where} yet — asking again in ${wait.pollMs / 1000} s`);
+        await deps.clock.sleep(wait.pollMs);
     }
+}
+
+/** Wait for the Gitea release run to publish the version. */
+export function waitForGitea(deps)
+{
+    return waitForVersion(deps, deps.giteaRegistry, giteaHeaders(deps), {
+        ms: GITEA_WAIT_MS,
+        pollMs: GITEA_POLL_MS,
+        where: "the Gitea registry",
+        timeout: () => new Error(`The Gitea release did not publish ${deps.name}@${deps.version}: `
+            + `the Gitea registry still did not have it after ${GITEA_WAIT_MS / 60000} minutes. `
+            + "Look at .gitea/workflows/release.yml's run for this push (if it did publish the version, "
+            + "check that GITEA_PACKAGES_READ_TOKEN can read it); nothing was published to npmjs. "
+            + "Once the version is there, run this workflow by hand to catch npmjs up."),
+    });
 }
 
 /**
@@ -193,11 +222,22 @@ function splitVersionError(deps, giteaIntegrity, npmjsIntegrity)
 }
 
 /**
- * The tag a version is published under when every tag it would take already
- * names a newer version: `npm publish` always sets one, and moving the
- * channel's tag or `latest` backwards is what the rule below exists to stop.
+ * The tag a version is published under, its own. `npm publish` always sets
+ * one, and npmjs applies it when processing ends, minutes later and outside
+ * the rule below: published under its channel's tag, a version served after a
+ * newer one would move that tag backwards. So no version is published under a
+ * tag the rule governs; the run moves those itself once npmjs serves the
+ * version, then removes this one. One tag per version, so a run removes only
+ * its own, and one a killed run left is removed by its version's re-run.
+ * npm refuses a tag that is a valid SemVer range or holds a character
+ * `encodeURIComponent` encodes (npm 12.2.3: `publish`, `dist-tag add`,
+ * npm-package-arg); `publishing-<version>` is neither for an alpha, beta or
+ * stable version. A `+build` suffix would be refused, and no package has one.
  */
-export const SUPERSEDED_TAG = "superseded";
+export function publishTagOf(version)
+{
+    return `publishing-${version}`;
+}
 
 /**
  * npmjs answers 401, not 404, for the dist-tags of a scoped package it has
@@ -238,10 +278,12 @@ async function npmjsDistTags(deps)
  * beta, otherwise latest) and `latest`, for alpha and beta versions too. A tag
  * moves only to a version newer than the one it names now (`compareVersions`),
  * so two releases of one package finishing out of order leave it on the newer.
+ * The rule reads and then writes, and npm dist-tags have no compare-and-swap:
+ * it holds because each `publish-<pkg>.yml` runs one run of its package at a
+ * time (`concurrency` with `queue: max`).
  */
-async function tagsToMove(deps)
+function tagsToMove(deps, current)
 {
-    const current = await npmjsDistTags(deps);
     const tags = [...new Set([channelOf(deps.version), "latest"])];
 
     for (const tag of tags.filter((tag) => current[tag] && compareVersions(deps.version, current[tag]) <= 0))
@@ -251,6 +293,22 @@ async function tagsToMove(deps)
     }
 
     return tags.filter((tag) => !current[tag] || compareVersions(deps.version, current[tag]) > 0);
+}
+
+/** npm's own error is already on stderr, above this message in the log. */
+function npmFailure(deps, args, status)
+{
+    return new Error(`npm ${args[0]} for ${deps.name}@${deps.version} exited with ${status} (npm's error is above).`);
+}
+
+function runNpm(deps, args)
+{
+    const { status } = deps.npm(args);
+
+    if (status !== 0)
+    {
+        throw npmFailure(deps, args, status);
+    }
 }
 
 function moveTags(deps, tags)
@@ -265,66 +323,204 @@ function moveTags(deps, tags)
         }
         else
         {
-            deps.npm(["dist-tag", "add", spec, tag, "--registry", deps.npmjsRegistry]);
+            runNpm(deps, ["dist-tag", "add", spec, tag, "--registry", deps.npmjsRegistry]);
         }
     }
 }
 
 /**
- * Publish the downloaded bytes under `tag`. `--registry` on the command line
- * wins over a `publishConfig.registry` inside the tarball (the unscoped `spfn` CLI pins
- * the Gitea registry there for local publishes), so the file goes to npmjs
- * unchanged — the pin is part of the bytes both registries serve.
+ * Remove this version's `publishTagOf` tag when the dist-tags the run read
+ * hold it: npmjs set it when it served the version, after this run's publish
+ * or a killed run's. `npm dist-tag rm` fails on a tag that is already gone,
+ * and another run of this version may have removed it since that read; so on
+ * a failure the tags are read again, and the tag being gone is the removal
+ * done. Any other failure stays one (`publishTagLeftError`).
+ */
+async function removePublishTag(deps, current)
+{
+    const tag = publishTagOf(deps.version);
+
+    if (!current[tag])
+    {
+        return;
+    }
+    if (deps.dryRun)
+    {
+        deps.log(`dry run: would remove npmjs's ${tag} dist-tag from ${deps.name}`);
+
+        return;
+    }
+
+    const { status } = deps.npm(["dist-tag", "rm", deps.name, tag, "--registry", deps.npmjsRegistry]);
+
+    if (status !== 0 && await isPublishTagStillThere(deps, tag))
+    {
+        throw publishTagLeftError(deps, tag, status);
+    }
+}
+
+/** A fresh read of the dist-tags; one that fails is logged and counts as the tag still there. */
+async function isPublishTagStillThere(deps, tag)
+{
+    const tags = await npmjsDistTags(deps).catch((error) =>
+    {
+        deps.log(error.message);
+
+        return { [tag]: deps.version };
+    });
+
+    return Boolean(tags[tag]);
+}
+
+/** Cleanup is the only step left: the message says so, and how to finish it. */
+function publishTagLeftError(deps, tag, status)
+{
+    return new Error(`npm dist-tag rm for ${deps.name}@${deps.version} exited with ${status} (npm's error is above), `
+        + `and npmjs's dist-tags, read again, still hold ${tag} or could not be read. The release is otherwise `
+        + "complete: npmjs serves the version with the Gitea bytes and the dist-tags the rule moves are moved. "
+        + `Only the temporary dist-tag ${tag} is left; remove it with \`npm dist-tag rm ${deps.name} ${tag}\`, `
+        + "or re-run this workflow, which removes it.");
+}
+
+/**
+ * npmjs refusing the version number: E409 Conflict, or "cannot publish over
+ * the previously published versions" (E403 from the registry, or npm's own
+ * check of the packument). The refusal does not say why. npmjs gives it for a
+ * version it serves, for one it is still processing (a re-run during an
+ * earlier run's processing; not measured), and for one published and later
+ * removed, which it never accepts again; E409 is also reported while another
+ * version of the package is processing (not measured), and then npmjs never
+ * took this version and a re-run publishes it. A removed version stays in the packument's `time`
+ * map, but no npm source says a version still processing is absent from it,
+ * so the map cannot tell the cases apart: the run waits as after an accepted
+ * publish, and if npmjs does not serve the version, says it does not know why.
+ */
+function isVersionNumberRefused(stderr)
+{
+    return /code E409\b/.test(stderr) || /cannot publish over/i.test(stderr);
+}
+
+/**
+ * Publish the downloaded bytes under `publishTagOf`: true when npmjs accepted them,
+ * false when it refused the version number (`isVersionNumberRefused`).
+ * `--registry` on the command line wins over a `publishConfig.registry` inside
+ * the tarball (the unscoped `spfn` CLI pins the Gitea registry there for local
+ * publishes), so the file goes to npmjs unchanged — the pin is part of the
+ * bytes both registries serve.
  * `--provenance` signs over the file's sha512, which is all npm needs: it is
  * not limited to a directory publish, and `--dry-run` never reaches it.
  */
-function publishToNpmjs(deps, bytes, tag)
+function publishToNpmjs(deps, bytes)
 {
     const file = join(deps.workDir, `${deps.name.replace("@", "").replace("/", "-")}-${deps.version}.tgz`);
 
     writeFileSync(file, bytes);
-    deps.npm([
+    const args = [
         "publish", file,
         "--access", "public",
-        "--tag", tag,
+        "--tag", publishTagOf(deps.version),
         "--registry", deps.npmjsRegistry,
         "--provenance",
         ...(deps.dryRun ? ["--dry-run"] : []),
-    ]);
+    ];
+    const { status, stderr } = deps.npm(args);
+
+    if (status !== 0 && !isVersionNumberRefused(stderr))
+    {
+        throw npmFailure(deps, args, status);
+    }
+
+    return status === 0;
 }
 
 /**
- * Read npmjs's integrity back from the per-version document. Measured
- * 2026-11-23: a 404 carries no cache headers and is not cached; a 200 is
- * uncached for a scoped name (Cloudflare DYNAMIC) but `max-age=300` and served
- * from the CDN for the unscoped `spfn`. Before the publish this run got a 404
- * for the version, so no cached answer for it exists and the first ask sees
- * the version just published.
+ * The outcome a run reports when npmjs did not serve the version within
+ * `NPMJS_WAIT_MS`: "failure" alone would read as a failed publish.
  */
-async function confirmPublished(deps, giteaIntegrity)
-{
-    const published = await npmjsDist(deps);
+export const NOT_SERVED = "not-served";
 
-    if (!published)
+/**
+ * Only what the run knows: npmjs has not served the version. Why is npmjs's
+ * to say, on the package's page; a version it never took or a number it will
+ * not reuse is a reason only when it refused the publish
+ * (`isVersionNumberRefused`).
+ */
+function notServedError(deps, accepted)
+{
+    const spec = `${deps.name}@${deps.version}`;
+    const minutes = NPMJS_WAIT_MS / 60000;
+    const what = accepted
+        ? `npmjs accepted the publish of ${spec} and has not served the version within ${minutes} minutes`
+        : `npmjs refused to publish ${spec} (npm's error is above) and has not served the version within ${minutes} minutes`;
+    const reasons = accepted
+        ? "still processing it, or has held it for manual review or blocked it"
+        : "still processing it, has held it for manual review or blocked it, never took it (E409 is also reported "
+            + "while another version of the package is processing; a re-run then publishes it), or will not take this "
+            + "version number again (a version published and removed is never accepted twice; the release then needs "
+            + "a new version)";
+
+    return Object.assign(new Error(`${what}. No dist-tag was moved. npmjs does not say why; likely it is ${reasons}. `
+        + `See https://www.npmjs.com/package/${deps.name}/v/${deps.version}. A re-run of this workflow waits again `
+        + "and finishes (integrity compared, dist-tags moved) only once npmjs serves the version. "
+        + `${minutes} minutes is the typical upper figure npm gives for processing ("up to 15 minutes or more", `
+        + "\"aren't a service guarantee\"), not a bound."), { outcome: NOT_SERVED });
+}
+
+/**
+ * Wait for npmjs to serve the version: `npm publish` returns when npmjs has
+ * accepted it, and npmjs processes it before serving the version or the tag
+ * that came with it. The per-version document's 404 ("version not found")
+ * carries no cache headers and is not cached (measured 2026-11-23), so each
+ * ask sees the version as soon as npmjs serves it.
+ */
+function waitForNpmjs(deps, accepted)
+{
+    return waitForVersion(deps, deps.npmjsRegistry, {}, {
+        ms: NPMJS_WAIT_MS,
+        pollMs: NPMJS_POLL_MS,
+        where: "npmjs",
+        timeout: () => notServedError(deps, accepted),
+    });
+}
+
+/**
+ * Publish, wait for npmjs to serve the version, and compare its integrity.
+ * Returns the outcome; with `--dry-run` nothing is published to wait for.
+ */
+async function publishAndConfirm(deps, dist, giteaIntegrity)
+{
+    const bytes = await downloadFromGitea(deps, dist, giteaIntegrity);
+    const accepted = publishToNpmjs(deps, bytes);
+
+    if (deps.dryRun)
     {
-        throw new Error(`After publishing, npmjs does not have ${deps.name}@${deps.version}.`);
+        return "dry-run";
     }
-    if (requireSha512(published.integrity, `npmjs's ${deps.name}@${deps.version}`) !== giteaIntegrity)
+
+    const { integrity } = await waitForNpmjs(deps, accepted);
+    const served = requireSha512(integrity, `npmjs's ${deps.name}@${deps.version}`);
+
+    if (served !== giteaIntegrity)
     {
-        throw new Error(`After publishing, npmjs reports ${sha512Of(published.integrity)} for ${deps.name}@${deps.version}, `
-            + `not the Gitea registry's ${giteaIntegrity}.`);
+        throw accepted
+            ? new Error(`After publishing, npmjs reports ${served} for ${deps.name}@${deps.version}, `
+                + `not the Gitea registry's ${giteaIntegrity}.`)
+            : splitVersionError(deps, giteaIntegrity, served);
     }
+
+    return accepted ? "published" : "already-published";
 }
 
 /**
  * The whole flow for one version. Returns `"already-published"`,
  * `"published"` or `"dry-run"`; every refusal is a thrown `Error` whose
- * message is the explanation. A version npmjs already has with the same bytes
- * still gets its tags moved by the rule, so a run that published and then
- * failed to move a tag is finished by any re-run.
+ * message is the explanation (with `outcome: NOT_SERVED` when npmjs did not
+ * serve the version in time). The dist-tags are read and moved by the rule
+ * only once npmjs serves the version with the Gitea bytes, so a run that
+ * published and then failed is finished by a re-run once npmjs serves it.
  *
  * deps: { name, version, token, giteaRegistry, npmjsRegistry, fetch,
- *         clock: { now, sleep }, npm(args), workDir, dryRun, log }
+ *         clock: { now, sleep }, npm(args) → { status, stderr }, workDir, dryRun, log }
  */
 export async function republish(deps)
 {
@@ -342,36 +538,46 @@ export async function republish(deps)
         }
 
         deps.log(`${deps.name}@${deps.version} is already on npmjs with the same bytes as on the Gitea registry`);
-        moveTags(deps, await tagsToMove(deps));
-
-        return "already-published";
     }
 
-    const bytes = await downloadFromGitea(deps, dist, giteaIntegrity);
-    const [publishTag = SUPERSEDED_TAG, ...otherTags] = await tagsToMove(deps);
+    const outcome = present ? "already-published" : await publishAndConfirm(deps, dist, giteaIntegrity);
 
-    publishToNpmjs(deps, bytes, publishTag);
-    if (!deps.dryRun)
-    {
-        await confirmPublished(deps, giteaIntegrity);
-    }
-    moveTags(deps, otherTags);
+    const current = await npmjsDistTags(deps);
 
-    return deps.dryRun ? "dry-run" : "published";
+    moveTags(deps, tagsToMove(deps, current));
+    await removePublishTag(deps, current);
+
+    return outcome;
 }
 
 /**
  * `npm` with the npm token and no other secret: the Gitea token and both names
  * the npm token can arrive under are dropped from what it inherits, and the
  * token goes back only as NODE_AUTH_TOKEN, the variable setup-node's .npmrc
- * reads.
+ * reads. stderr is read so a refused publish can be told apart, and passed on
+ * to the log unchanged.
  */
 function npmWithItsToken(env)
 {
     const { GITEA_PACKAGES_READ_TOKEN: _gitea, NPM_TOKEN: npmToken, NODE_AUTH_TOKEN: _inherited, ...rest } = env;
     const childEnv = npmToken ? { ...rest, NODE_AUTH_TOKEN: npmToken } : rest;
 
-    return (args) => execFileSync("npm", args, { stdio: "inherit", env: childEnv });
+    return (args) =>
+    {
+        const { status, stderr, error } = spawnSync("npm", args, {
+            stdio: ["inherit", "inherit", "pipe"],
+            env: childEnv,
+            encoding: "utf8",
+        });
+
+        if (error)
+        {
+            throw error;
+        }
+        process.stderr.write(stderr);
+
+        return { status, stderr };
+    };
 }
 
 /**

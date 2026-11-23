@@ -24,6 +24,15 @@ on:
         type: boolean
         default: false
 
+# One run of this package at a time: npm dist-tags have no compare-and-swap,
+# and the forward-only rule reads them before it writes, so two overlapping
+# runs could leave a tag on the older version. `queue: max` keeps every waiting
+# run (FIFO, up to 100); the default keeps only the newest and cancels the
+# rest, and a cancelled run is a version that never reaches npmjs.
+concurrency:
+  group: publish-npmjs-packages/i18n
+  queue: max
+
 jobs:
   publish:
     permissions:
