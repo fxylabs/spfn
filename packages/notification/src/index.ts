@@ -24,8 +24,8 @@
  */
 
 // Types only (for client-side imports)
-export type { NotificationChannel, SendResult } from './channels/types';
-export type { SendEmailParams } from './channels/email/types';
+export type { NotificationChannel, SendResult, SendErrorCode } from './channels/types';
+export type { SendEmailParams, EmailAttachment } from './channels/email/types';
 export type { SendSMSParams } from './channels/sms/types';
 export type { SendSlackParams } from './channels/slack/types';
 export type { SendPushParams, PushTarget, PushOptions, PushResult } from './channels/push/types';

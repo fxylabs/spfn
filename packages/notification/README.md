@@ -169,6 +169,66 @@ const result = await sendEmailBulk(items, { distributed: true });
 // Actual sending happens in background via pg-boss workers
 ```
 
+### Attachments
+
+```typescript
+const result = await sendEmail({
+    to: 'user@example.com',
+    subject: 'Your documents',
+    text: 'Attached.',
+    attachments: [
+        { filename: 'invoice.pdf', contentType: 'application/pdf', content: pdfBytes },  // Uint8Array (a Buffer is one)
+    ],
+});
+
+if (result.errorCode === 'message_too_large')
+{
+    // over the provider's size limit — tell the person, don't retry
+}
+```
+
+- The app fetches the files; the package passes the bytes, names and types to the provider
+  unchanged. The SES provider sends them as SES v2 `Simple` content attachments.
+- **Filename.** Any text the recipient should see, non-ASCII included (`홍길동 진단서.pdf`),
+  that is not blank and holds no control character (C0, DEL, C1) and no line break — CR, LF,
+  NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029) are all refused, as they
+  are in a quoted `contentType` parameter.
+- Refused before the provider is called, with `success: false` and an `errorCode`:
+
+  | `errorCode` | When |
+  |---|---|
+  | `attachment_invalid` | `attachments` not an array (`null` and `undefined` both mean no attachments), an entry not an object, a `filename` or `contentType` that is not a string, empty `filename`, a control character or line break in it (see *Filename*), a `contentType` that is not `type/subtype[; name=value]`, or `content` that is not a `Uint8Array` or has no bytes — checked as values, so a plain-JavaScript caller gets this refusal, not a `TypeError` |
+  | `attachments_unsupported` | the provider does not declare `supportsAttachments` |
+  | `message_too_large` | the message's encoded size is certainly over the provider's `maxMessageBytes` |
+  | `attachments_not_deferrable` | `scheduleEmail`, or a `sendEmailBulk` item with `distributed: true` |
+
+- **Size.** SES v2 takes 40 MB per message, attachments included, counted after base64
+  encoding (SES Developer Guide, *Service quotas*), exported as `SES_MAX_MESSAGE_BYTES`
+  (41,943,040). base64 makes 3 bytes 4, so the files together can be about 30 MiB. A message
+  just under the limit by the package's count can still be over it by SES's (headers, MIME
+  parts): SES's own rejection comes back as the same `message_too_large`.
+- **Scheduled and distributed sends refuse attachments.** Their payload is stored as JSON in
+  the pg-boss job table: a `Uint8Array` does not survive JSON, and encoding it would park the
+  files — personal data, up to 40 MB a message — in that table until pg-boss archives the job.
+  Send attachments immediately (`sendEmail`, or `sendEmailBulk` in-process).
+- **History** never stores the bytes or the filenames (a filename is often personal data), and
+  the package itself writes no filename to a log line. A provider error that quotes one has
+  it replaced by `[attachment N]` before it is logged or written to `history.error_message`
+  — the name as written and percent-encoded (`encodeURIComponent`, or with `+` for a space).
+  Any other rendering a provider might invent (re-cased, trimmed, MIME-encoded) is not
+  recognised and stays in the text, and so does the rest of a filename that runs into an
+  address or phone number in the text: that address or number is masked instead. Text shaped
+  like the scrub's own output (`[attachment 1]`, a masked address such as `ab***@x.com`, a
+  masked number such as `12345*67`) also stands, and a filename that runs into such text stays
+  whole.
+  The `attachments` column records `{ contentType, size }` per file — `contentType` as the
+  lower-cased `type/subtype` alone, since a parameter (`name="…"`) can carry the filename —
+  under the same rule as `content`: nothing for a `sensitive` send or with `storeContent: false`.
+- **Idempotency.** The key is yours, not derived from the params: two sends with the same key
+  are one send whatever their attachments, and two sends without a key are never merged.
+- Inline images (`Content-ID`, `cid:`) are not supported; every file is sent as an
+  attachment.
+
 ### SMS
 
 ```typescript
@@ -581,6 +641,38 @@ const sendgridProvider: EmailProvider = {
 registerEmailProvider(sendgridProvider);
 ```
 
+A provider receives `params.attachments` (`{ filename, contentType, content: Uint8Array }[]`)
+only if it says it sends them. Without `supportsAttachments: true`, a send with attachments
+is refused before your provider is called (`attachments_unsupported`), so a provider written
+without attachments in mind never drops them silently. `maxMessageBytes` declares your
+service's encoded size limit; a send certainly over it is refused (`message_too_large`)
+without a call. Report your service's own size rejection the same way:
+
+```typescript
+const sendgridProvider: EmailProvider = {
+    name: 'sendgrid',
+    supportsAttachments: true,
+    maxMessageBytes: 30 * 1024 * 1024,
+    async send(params) {
+        const response = await sendgrid.send({
+            // …
+            attachments: params.attachments?.map(a => ({
+                filename: a.filename,
+                type: a.contentType,
+                content: Buffer.from(a.content).toString('base64'),
+            })),
+        });
+
+        if (response.status === 413)
+        {
+            return { success: false, error: 'Message too large', errorCode: 'message_too_large' };
+        }
+
+        return { success: true, messageId: response.id };
+    },
+};
+```
+
 ### SMS Provider
 
 ```typescript
@@ -620,8 +712,24 @@ is covered without doing anything — and again in the service that writes the
 column. Only address-shaped tokens are replaced: the error *name* (`MessageRejected`),
 the region, the request id, timestamps and message ids are the diagnostic value
 and survive untouched, and the built-in AWS providers log that name and the HTTP
-status alongside the scrubbed message. `scrubProviderError(text)` is exported for
-applications that log provider errors themselves.
+status alongside the scrubbed message. An email send's own attachment filenames are
+removed from the text at the channel's provider boundary and in the SES provider's own
+failure log, each replaced by its position (`[attachment 2]`): a provider that rejects a
+file may name it. The name is recognised as written and percent-encoded
+(`encodeURIComponent`, or with `+` for a space); any other encoding a provider might invent
+is not. A filename is matched as a whole token, never inside a longer run of letters or
+digits, so a one-letter name leaves the words around it alone; a percent escape just before
+it (`uploads%2Fa.pdf`) counts as a separator. Every candidate is found in the
+provider's original text before any is chosen — each spelling of each filename scanned on its
+own — and the choice is replaced in one pass: address and phone masks always stand, and so does
+text shaped like the scrub's own output (`[attachment N]`, a masked address, a masked phone
+number) where it overlaps no mask; a filename that partly overlaps a standing span is dropped;
+of the remaining filenames the longest is taken first and no two overlap. So a dropped filename
+never hides a shorter one inside it, a filename that holds a whole address is removed whole,
+and where a filename only overlaps an address or phone number, the address or number is masked
+and the rest of that filename stays; a filename that only overlaps text shaped like the scrub's
+output is left whole, so a second scrub changes nothing. `scrubProviderError(text, attachments?)` is exported for applications that
+log provider errors themselves.
 
 Channel tags:
 
@@ -698,7 +806,7 @@ await sendEmail({
     to: 'user@example.com',
     subject: 'Your access link',
     html: accessLinkHtml,
-    sensitive: true,    // no content, template data, or subject in the history row
+    sensitive: true,    // no content, template data, subject or attachment record in the history row
 });
 ```
 
@@ -876,7 +984,9 @@ undeclared load balancer every event shares one address. Before this, `X-Forward
 export type {
     NotificationChannel,
     SendResult,
+    SendErrorCode,
     SendEmailParams,
+    EmailAttachment,
     SendSMSParams,
     SendSlackParams,
     TemplateDefinition,
@@ -893,6 +1003,9 @@ export {
     sendEmail,
     sendEmailBulk,
     registerEmailProvider,
+    SES_MAX_MESSAGE_BYTES,
+    type EmailAttachment,
+    type SendErrorCode,
     type BulkEmailResult,
     type BulkEmailOptions,
 

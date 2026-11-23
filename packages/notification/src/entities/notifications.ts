@@ -61,6 +61,15 @@ export const notifications = notificationSchema.table('history',
         content: text('content'),
 
         /**
+         * Attachments sent with an email: media type (`type/subtype`, no
+         * parameters) and size of each.
+         * Never the bytes, never the filename: the package writes neither
+         * anywhere. Null when the send had none,
+         * and wherever `content` is withheld (sensitive send, storeContent off).
+         */
+        attachments: jsonb('attachments').$type<{ contentType: string; size: number }[]>(),
+
+        /**
          * Current status
          */
         status: text('status', {

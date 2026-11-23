@@ -52,6 +52,7 @@ const CLEARED_ON_TAKEOVER = {
     templateData: null,
     subject: null,
     content: null,
+    attachments: null,
     providerMessageId: null,
     errorMessage: null,
     scheduledAt: null,

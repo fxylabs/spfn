@@ -39,7 +39,7 @@ const emailSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ succ
 const smsSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ success: true, messageId: 'sns-1' }));
 const slackSend = vi.fn(async (_params: unknown): Promise<SendResult> => ({ success: true }));
 
-registerEmailProvider({ name: 'aws-ses', send: (p) => emailSend(p) });
+registerEmailProvider({ name: 'aws-ses', supportsAttachments: true, send: (p) => emailSend(p) });
 sesSend.mockImplementation((p: unknown) => emailSend(p));
 registerSMSProvider({ name: 'aws-sns', send: (p) => smsSend(p) });
 registerSlackProvider({ name: 'webhook', send: (p) => slackSend(p) });
@@ -118,6 +118,18 @@ describe('#114 idempotency key', () =>
         const keyed = await rows('email', 'k3');
         expect(keyed).toHaveLength(1);
         expect(keyed[0]).toMatchObject({ status: 'sent', errorMessage: null });
+    });
+
+    it('I3b a retry without the failed attempt\'s attachments does not keep their record (#443)', async () =>
+    {
+        const pdf = { filename: 'a.pdf', contentType: 'application/pdf', content: new Uint8Array([1, 2, 3]) };
+        failOnce();
+        await sendEmail({ ...mail('k3b'), attachments: [pdf] });
+        expect((await rows('email', 'k3b'))[0].attachments).toEqual([{ contentType: 'application/pdf', size: 3 }]);
+
+        await sendEmail(mail('k3b'));
+
+        expect((await rows('email', 'k3b'))[0]).toMatchObject({ status: 'sent', attachments: null });
     });
 
     it('I4 repeat while pending: refused as in progress, provider not called', async () =>

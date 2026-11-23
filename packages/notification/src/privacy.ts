@@ -165,6 +165,40 @@ const EMAIL_TOKEN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const PHONE_TOKEN = /\+[1-9]\d{6,14}|(?<![0-9A-Za-z])(?<!\d\.)\d{10,15}(?![0-9A-Za-z])(?!\.\d)/g;
 
 /**
+ * What this scrub itself writes: a filename label, a masked address, a masked
+ * phone number. The text is scrubbed again with the same attachments — the
+ * SES provider scrubs its result, the channel scrubs what it receives — and
+ * a filename must not be matched inside these then.
+ */
+const SCRUBBED_TOKEN = /\[attachment \d+\]|[A-Za-z0-9._%+-]{1,2}\*\*\*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|(?:\+\d{4}|\d{5})\*+\d{2}/g;
+
+/**
+ * A letter, mark or digit: what a filename match may not cut through. A
+ * percent escape just before a match (`uploads%2Fa.pdf`) is an encoded
+ * separator, not part of a word, though its hex digits are letters or digits.
+ */
+const WORD_EDGE_START = /^[\p{L}\p{M}\p{N}]/u;
+const WORD_EDGE_END = /[\p{L}\p{M}\p{N}]$/u;
+const NOT_WORD_BEFORE = '(?:(?<![\\p{L}\\p{M}\\p{N}])|(?<=%[0-9A-Fa-f]{2}))';
+const NOT_WORD_AFTER = '(?![\\p{L}\\p{M}\\p{N}])';
+
+/**
+ * A half of a surrogate pair standing alone: text with one has no
+ * percent-encoded form.
+ */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+/**
+ * A stretch of the original text and what is written in its place
+ */
+interface Replacement
+{
+    start: number;
+    end: number;
+    by: string;
+}
+
+/**
  * Mask the recipient values a provider embedded in its own error text.
  *
  * Provider failures are free text and routinely quote the address that caused
@@ -173,32 +207,193 @@ const PHONE_TOKEN = /\+[1-9]\d{6,14}|(?<![0-9A-Za-z])(?<!\d\.)\d{10,15}(?![0-9A-
  * `history.error_message`, so without this it re-introduces the raw recipient
  * that masked logging and hashed history were configured to keep out.
  *
- * Only address-shaped tokens are touched; the rest of the message — the error
+ * The same goes for the send's own attachment filenames (a rejected file type
+ * is reported by name): each is replaced by `[attachment N]`, as written and
+ * percent-encoded (`encodeURIComponent`, or with `+` for a space). Any other
+ * rendering a provider might invent — re-cased, trimmed, MIME-encoded — is not
+ * recognised. A filename is matched as a whole token only, never inside a
+ * longer run of letters or digits; a percent escape just before it counts as
+ * a separator.
+ *
+ * Every candidate is found in the original text first — each address, each
+ * phone number not inside an address, and each spelling of each filename
+ * scanned on its own, overlapping occurrences included — and only then
+ * chosen: address and phone masks always stand, and so does text that looks
+ * like this scrub's own output where it overlaps no mask. Among the filename
+ * candidates, those that partly overlap a standing span are dropped; of the
+ * rest, the longest is taken first, then the next longest that overlaps none
+ * taken so far, and so on. A filename taken over a whole standing span
+ * removes it with the rest of the name. The choice is replaced in one pass.
+ * So a dropped candidate never hides a shorter one inside it, a filename
+ * holding a whole address is removed whole, and where a filename only
+ * overlaps an address or a phone number the recipient mask wins and the rest
+ * of that filename stays. A filename is not matched inside what an earlier
+ * scrub wrote, so scrubbing scrubbed text again changes nothing.
+ *
+ * Only these tokens are touched; the rest of the message — the error
  * name, the region, the request id — is the diagnostic value and survives.
  * Never throws: a scrubbed message is written on the failure path, where a
- * second failure would cost the operator the original error.
+ * second failure would cost the operator the original error. A `null`
+ * attachment list from a plain-JS caller means none.
  */
-export function scrubProviderError(text: string): string
+export function scrubProviderError(text: string, attachments: readonly { filename: string }[] | null = []): string
 {
     if (typeof text !== 'string' || text.length === 0)
     {
         return '';
     }
 
-    return text.replace(EMAIL_TOKEN, m => maskEmail(m)).replace(PHONE_TOKEN, m => maskPhone(m));
+    const standing = standingSpans(text);
+    const filenames = chosenFilenames(filenameCandidates(text, attachments ?? []), standing);
+
+    return applied(text, [
+        ...standing.filter(span => !filenames.some(name => contains(name, span))),
+        ...filenames,
+    ]);
+}
+
+/**
+ * The masks of every address in `text` and of every phone number not inside
+ * one of those addresses, and the earlier scrub's output that overlaps none
+ * of those masks, left as it is
+ */
+function standingSpans(text: string): Replacement[]
+{
+    const addresses = replacementsOf(text, EMAIL_TOKEN, maskEmail);
+    const masks = [
+        ...addresses,
+        ...replacementsOf(text, PHONE_TOKEN, maskPhone).filter(phone => !overlapsAny(phone, addresses)),
+    ];
+
+    return [
+        ...masks,
+        ...replacementsOf(text, SCRUBBED_TOKEN, token => token).filter(token => !overlapsAny(token, masks)),
+    ];
+}
+
+/**
+ * Every whole-token occurrence of every spelling of every filename in
+ * `text`, labelled `[attachment N]`
+ */
+function filenameCandidates(text: string, attachments: readonly { filename: string }[]): Replacement[]
+{
+    return attachments.flatMap(({ filename }, index) => [...new Set(spellings(filename))]
+        .filter(spelling => spelling.length > 0)
+        .flatMap(spelling => occurrencesOf(text, spelling, `[attachment ${index + 1}]`)));
+}
+
+/**
+ * The candidates that partly overlap no standing span, longest first, each
+ * taken only if it overlaps none taken before it
+ */
+function chosenFilenames(candidates: Replacement[], standing: Replacement[]): Replacement[]
+{
+    return candidates
+        .filter(name => standing.every(span => !overlaps(name, span) || contains(name, span)))
+        .sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start)
+        .reduce<Replacement[]>((taken, name) => (overlapsAny(name, taken) ? taken : [...taken, name]), []);
+}
+
+/**
+ * A filename as written and percent-encoded, with `%20` and with `+` for a
+ * space. A name holding a lone surrogate has no encoded form.
+ */
+function spellings(filename: string): string[]
+{
+    if (LONE_SURROGATE.test(filename))
+    {
+        return [filename];
+    }
+
+    const encoded = encodeURIComponent(filename);
+
+    return [filename, encoded, encoded.replaceAll('%20', '+')];
+}
+
+/**
+ * A pattern for `spelling` that does not match inside a longer run of letters
+ * or digits: an edge that is itself a letter or digit may not touch another.
+ */
+function asWholeToken(spelling: string): string
+{
+    const literal = spelling.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+
+    return (WORD_EDGE_START.test(spelling) ? NOT_WORD_BEFORE : '')
+        + literal
+        + (WORD_EDGE_END.test(spelling) ? NOT_WORD_AFTER : '');
+}
+
+/**
+ * Every occurrence of `spelling` in `text`, overlapping ones included, so an
+ * occurrence that is later dropped cannot hide the next one
+ */
+function occurrencesOf(text: string, spelling: string, by: string): Replacement[]
+{
+    const pattern = new RegExp(asWholeToken(spelling), 'gu');
+    const found: Replacement[] = [];
+
+    for (let match = pattern.exec(text); match; match = pattern.exec(text))
+    {
+        found.push({ start: match.index, end: match.index + match[0].length, by });
+        // One code point on, not one unit: resumed inside a surrogate pair, a
+        // `u` pattern restarts at the pair's first half and finds this match again.
+        pattern.lastIndex = match.index + String.fromCodePoint(text.codePointAt(match.index)!).length;
+    }
+
+    return found;
+}
+
+function replacementsOf(text: string, pattern: RegExp, replace: (match: string) => string): Replacement[]
+{
+    return Array.from(text.matchAll(pattern), match => ({
+        start: match.index!,
+        end: match.index! + match[0].length,
+        by: replace(match[0]),
+    }));
+}
+
+function overlaps(a: Replacement, b: Replacement): boolean
+{
+    return a.start < b.end && b.start < a.end;
+}
+
+function overlapsAny(span: Replacement, others: Replacement[]): boolean
+{
+    return others.some(other => overlaps(span, other));
+}
+
+function contains(outer: Replacement, inner: Replacement): boolean
+{
+    return outer.start <= inner.start && inner.end <= outer.end;
+}
+
+/**
+ * `text` with each of the non-overlapping `replacements` written in
+ */
+function applied(text: string, replacements: Replacement[]): string
+{
+    const { scrubbed, end } = [...replacements]
+        .sort((a, b) => a.start - b.start)
+        .reduce(
+            (done, { start, end, by }) => ({ scrubbed: done.scrubbed + text.slice(done.end, start) + by, end }),
+            { scrubbed: '', end: 0 },
+        );
+
+    return scrubbed + text.slice(end);
 }
 
 /**
  * Scrub the error a provider returned, at the boundary where the channel
  * receives it — so a custom adopter provider is covered by the same guarantee
  * as the built-in ones, before the channel logs it or writes it to history.
+ * `attachments` are the send's own, whose filenames are removed as well.
  */
-export function scrubSendResult(result: SendResult): SendResult
+export function scrubSendResult(result: SendResult, attachments: readonly { filename: string }[] | null = []): SendResult
 {
     if (!result.error)
     {
         return result;
     }
 
-    return { ...result, error: scrubProviderError(result.error) };
+    return { ...result, error: scrubProviderError(result.error, attachments) };
 }

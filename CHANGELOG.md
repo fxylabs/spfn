@@ -31,6 +31,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type, and the types `PasswordChangeAttempt`, `PasswordChangeAdmission`, `PasswordChangeChannel`,
   `PasswordChangeGuardOptions`; from `@spfn/auth/errors`: the two errors. Omitted, nothing changes;
   sessions are ended as before. No schema change, no migration; the mobile contract does not move.
+- **@spfn/notification: `sendEmail` sends attachments — `attachments: { filename, contentType,
+  content: Uint8Array }[]` on `SendEmailParams`, `sendEmailBulk` items included (#443).** The
+  attachments travel on the provider contract (`InternalSendEmailParams.attachments`) to the
+  provider, the SES provider puts them on `Simple` content (`Attachments`, no raw MIME). A provider
+  takes them only when it declares `supportsAttachments: true`; a send with attachments to one that
+  does not is refused before the call (`errorCode: 'attachments_unsupported'`), so a custom
+  provider written before this cannot drop them silently. An attachment with an empty filename, a
+  control character or line break (CR, LF, NEL, U+2028, U+2029) in `filename`, a `contentType`
+  that is not a MIME type, or no bytes is refused before anything else (`attachment_invalid`), as
+  is a malformed value from a plain-JS caller (`attachments` not an array — `null`, like `undefined`,
+  means none — an entry not an object,
+  a non-string `filename` or `contentType`, `content` not a `Uint8Array`) — a refusal naming the
+  attachment's position, not a `TypeError`. A provider may declare `maxMessageBytes`: SES declares `SES_MAX_MESSAGE_BYTES` (40 MiB, encoded — SES v2's message quota), and a message
+  whose encoded size is certainly over it is refused without a provider call; SES's own size
+  rejection maps to the same `errorCode: 'message_too_large'`. `scheduleEmail` and a distributed
+  `sendEmailBulk` refuse attachments (`attachments_not_deferrable`): their payload is a JSON job row.
+  The package itself never writes a filename to the history row or a log line; the new nullable column
+  `history.attachments` (migration `20261122153946_low_klaw`) records the media type (lower-cased
+  `type/subtype`, parameters dropped: a `name=` parameter carries a filename) and size of each, only where `content` would be stored (not on a `sensitive` send, not with
+  `storeContent: false`). A provider error that quotes one of the send's filenames — as written
+  or percent-encoded (`encodeURIComponent`, or `+` for a space); any other encoding a provider
+  might invent is not recognised — has it replaced by `[attachment N]` before it is logged or
+  stored, where its addresses are scrubbed —
+  as a whole token (a percent escape just before it counts as a separator), in the same single pass, a recipient address always masked where a filename
+  overlaps it and the rest of that filename left in the text, text shaped like the scrub's own output
+  (`[attachment N]`, a masked address or phone number) left as it is and a filename that partly
+  overlaps it left whole, every candidate found before any is chosen so a dropped filename hides no shorter
+  one, the longest filename taken first (`scrubProviderError` and `scrubSendResult` take the send's attachments as an optional second
+  argument; `null` means none). `SendResult` and `ScheduleResult` gain `errorCode` (`SendErrorCode`).
+
 - **spfn: the app role is granted exactly what is declared — `spfn db grant [--dry-run]`, and a
   privileges step at the end of `db push`, `db migrate` and `spfn add` (#405).** As the owner
   (`DATABASE_OWNER_URL`), in a transaction of its own after the schema changes, the step brings the

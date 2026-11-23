@@ -2,7 +2,7 @@
  * @spfn/notification - Channels
  */
 
-export type { NotificationChannel, SendResult, ChannelProvider } from './types';
+export type { NotificationChannel, SendResult, SendErrorCode, ChannelProvider } from './types';
 
 // Email
 export {
@@ -10,10 +10,12 @@ export {
     sendEmailBulk,
     registerEmailProvider,
     type SendEmailParams,
+    type EmailAttachment,
     type EmailProvider,
     type BulkEmailResult,
     type BulkEmailOptions,
 } from './email';
+export { SES_MAX_MESSAGE_BYTES } from './email/providers/aws-ses';
 
 // SMS
 export {

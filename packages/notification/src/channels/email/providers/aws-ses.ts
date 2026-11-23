@@ -14,6 +14,20 @@ const log = logger.child('@spfn/notification:ses');
 let sesClient: any = null;
 
 /**
+ * SES v2's maximum message size, attachments included, measured after base64
+ * encoding: "40 MB per message" (SES Developer Guide, Service quotas, Message
+ * quotas). SES counts MB in binary units — its v1 rejection for the 10 MB
+ * limit reads "Message length is more than 10485760 bytes long".
+ */
+export const SES_MAX_MESSAGE_BYTES = 40 * 1024 * 1024;
+
+/**
+ * SES's rejection of a message over the size limit. The endpoint answering
+ * HTTP 413 before SES reads the message is the other form, told by status.
+ */
+const SIZE_REJECTION = /Message length is more than \d+ bytes/;
+
+/**
  * Get or create SES v2 client
  */
 async function getSESClient()
@@ -51,8 +65,9 @@ async function getSESClient()
 }
 
 /**
- * Build the message content: the subject and whichever of the HTML and text
- * bodies the send carries
+ * Build the message content: the subject, whichever of the HTML and text
+ * bodies the send carries, and its attachments. Simple content takes
+ * attachments in SES v2, so no raw MIME is built here.
  */
 function buildContent(params: InternalSendEmailParams): SendEmailCommandInput['Content']
 {
@@ -76,6 +91,14 @@ function buildContent(params: InternalSendEmailParams): SendEmailCommandInput['C
                     },
                 }),
             },
+            ...(params.attachments?.length && {
+                Attachments: params.attachments.map(attachment => ({
+                    RawContent: attachment.content,
+                    FileName: attachment.filename,
+                    ContentType: attachment.contentType,
+                    ContentDisposition: 'ATTACHMENT' as const,
+                })),
+            }),
         },
     };
 }
@@ -104,6 +127,8 @@ function buildSendEmailInput(params: InternalSendEmailParams): SendEmailCommandI
  */
 export const awsSesProvider: EmailProvider = {
     name: 'aws-ses',
+    supportsAttachments: true,
+    maxMessageBytes: SES_MAX_MESSAGE_BYTES,
 
     async send(params: InternalSendEmailParams): Promise<SendResult>
     {
@@ -126,7 +151,7 @@ export const awsSesProvider: EmailProvider = {
             // err.stack, whose first line repeats `${name}: ${message}` and with it
             // the address this scrub just removed. The name and the HTTP status
             // carry the diagnostic value instead.
-            const message = scrubProviderError(err.message) || 'Unknown error';
+            const message = scrubProviderError(err.message, params.attachments) || 'Unknown error';
 
             log.error('SES send failed', {
                 provider: 'aws-ses',
@@ -137,9 +162,12 @@ export const awsSesProvider: EmailProvider = {
                 from: params.from,
             });
 
+            const tooLarge = err.$metadata?.httpStatusCode === 413 || SIZE_REJECTION.test(err.message);
+
             return {
                 success: false,
                 error: message,
+                ...(tooLarge && { errorCode: 'message_too_large' as const }),
             };
         }
     },

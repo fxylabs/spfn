@@ -5,6 +5,8 @@
  */
 
 import type { SendEmailParams } from '../channels/email/types';
+import type { SendErrorCode } from '../channels/types';
+import { attachmentsError, deferredAttachmentsError } from '../channels/email/attachments';
 import type { SendSMSParams } from '../channels/sms/types';
 import type { SendPushParams, PushTarget } from '../channels/push/types';
 import { renderTemplateChannel, getTemplate } from '../templates';
@@ -66,6 +68,10 @@ export interface ScheduleResult
     jobId?: string;
     error?: string;
     /**
+     * Set on a refusal an app has to tell apart (see `SendErrorCode`)
+     */
+    errorCode?: SendErrorCode;
+    /**
      * The idempotency key was already used: nothing new was scheduled, and
      * `notificationId`/`jobId` are the first schedule's.
      */
@@ -119,6 +125,16 @@ export async function scheduleEmail(
     if (optionsError)
     {
         return { success: false, error: optionsError };
+    }
+
+    // The job payload is stored as JSON in the pg-boss table: a Uint8Array does
+    // not survive it, and base64 would park the files there until archiving.
+    // A malformed value is refused as such, not mistaken for no attachments.
+    const attachmentsRefusal = attachmentsError(params.attachments) ?? deferredAttachmentsError(params.attachments);
+
+    if (attachmentsRefusal)
+    {
+        return { success: false, error: attachmentsRefusal.error, errorCode: attachmentsRefusal.errorCode };
     }
 
     // Prepare recipients

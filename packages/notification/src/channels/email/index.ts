@@ -2,7 +2,7 @@
  * @spfn/notification - Email Channel
  */
 
-import type { SendEmailParams, EmailProvider, InternalSendEmailParams } from './types';
+import type { SendEmailParams, EmailAttachment, EmailProvider, InternalSendEmailParams } from './types';
 import type { SendResult } from '../types';
 import { awsSesProvider } from './providers/aws-ses';
 import { getEmailFrom, getEmailReplyTo, env, isHistoryContentStored, isTrackingEnabled, getTrackingBaseUrl } from '../../config';
@@ -16,12 +16,13 @@ import {
 import { idempotencyKeyError } from '../../services/idempotency.service';
 import { openHistoryRow, closeHistoryRow, openBulkHistoryRows, splitStopped, type HistoryRowData } from '../history';
 import { runWithConcurrency } from '../concurrency';
+import { attachmentsError, providerRefusal, deferredAttachmentsError, attachmentRecords } from './attachments';
 import { sendBulkEmailItemJob } from '../../jobs/send-bulk-email-item';
 import { logger } from '@spfn/core/logger';
 
 const log = logger.child('@spfn/notification:email');
 
-export type { SendEmailParams, EmailProvider, InternalSendEmailParams };
+export type { SendEmailParams, EmailAttachment, EmailProvider, InternalSendEmailParams };
 
 /**
  * Available email providers
@@ -108,6 +109,14 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
 
     // Prepare recipients
     const recipients = Array.isArray(params.to) ? params.to : [params.to];
+    const invalidAttachment = attachmentsError(params.attachments);
+
+    if (invalidAttachment)
+    {
+        log.warn(invalidAttachment.error!, { to: maskRecipients(recipients) });
+
+        return invalidAttachment;
+    }
 
     // Prepare content
     let subject = params.subject;
@@ -174,10 +183,20 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
         subject,
         text,
         html,
+        // A plain-JS caller's null is no attachments: the provider gets none.
+        attachments: params.attachments ?? undefined,
     };
 
     // Get provider
     const provider = getProvider();
+    const refusal = providerRefusal(provider, internalParams);
+
+    if (refusal)
+    {
+        log.warn(refusal.error!, { to: maskRecipients(recipients), ...sendLogContext(sensitive, params.template, subject) });
+
+        return refusal;
+    }
 
     const opened = scheduledRowId
         ? { historyId: scheduledRowId }
@@ -211,7 +230,7 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
     }
 
     // Send via provider
-    const result = scrubSendResult(await provider.send(internalParams));
+    const result = scrubSendResult(await provider.send(internalParams), internalParams.attachments);
 
     if (result.success)
     {
@@ -249,6 +268,7 @@ function emailHistoryRow(
         templateData: storePayload ? params.data : undefined,
         subject: sensitive ? undefined : subject,
         content: storePayload ? text : undefined,
+        attachments: storePayload ? attachmentRecords(params.attachments) : undefined,
         providerName,
     };
 }
@@ -304,10 +324,20 @@ export interface BulkEmailOptions
 }
 
 /**
+ * Why an item's attachments stop it before rendering: invalid, or carried by
+ * a distributed item, whose payload is stored as a JSON job.
+ */
+function itemAttachmentsError(item: SendEmailParams, distributed: boolean): SendResult | undefined
+{
+    return attachmentsError(item.attachments)
+        ?? (distributed ? deferredAttachmentsError(item.attachments) : undefined);
+}
+
+/**
  * Validate and prepare all email items.
  * Shared between in-process and distributed modes.
  */
-function prepareEmailItems(items: SendEmailParams[]): {
+function prepareEmailItems(items: SendEmailParams[], provider: EmailProvider, distributed: boolean): {
     prepared: PreparedEmail[];
     earlyFailures: { index: number; result: SendResult }[];
 }
@@ -324,6 +354,14 @@ function prepareEmailItems(items: SendEmailParams[]): {
         if (keyError)
         {
             earlyFailures.push({ index: i, result: { success: false, error: keyError } });
+            continue;
+        }
+
+        const attachmentFailure = itemAttachmentsError(item, distributed);
+
+        if (attachmentFailure)
+        {
+            earlyFailures.push({ index: i, result: attachmentFailure });
             continue;
         }
 
@@ -365,16 +403,27 @@ function prepareEmailItems(items: SendEmailParams[]): {
             continue;
         }
 
+        const params: InternalSendEmailParams = {
+            to: recipients,
+            from: item.from || getEmailFrom(),
+            replyTo: item.replyTo || getEmailReplyTo(),
+            subject,
+            text,
+            html,
+            // A plain-JS caller's null is no attachments: the provider gets none.
+            attachments: item.attachments ?? undefined,
+        };
+        const refusal = providerRefusal(provider, params);
+
+        if (refusal)
+        {
+            earlyFailures.push({ index: i, result: refusal });
+            continue;
+        }
+
         prepared.push({
             index: i,
-            params: {
-                to: recipients,
-                from: item.from || getEmailFrom(),
-                replyTo: item.replyTo || getEmailReplyTo(),
-                subject,
-                text,
-                html,
-            },
+            params,
             recipients,
             template: item.template,
             data: item.data,
@@ -410,7 +459,7 @@ export async function sendEmailBulk(
     const provider = getProvider();
 
     // 1. Validate and prepare all items
-    const { prepared, earlyFailures } = prepareEmailItems(items);
+    const { prepared, earlyFailures } = prepareEmailItems(items, provider, options?.distributed ?? false);
 
     // A queued item may only send the row it was enqueued for (see claimNotificationForJob).
     if (options?.distributed)
@@ -436,6 +485,7 @@ export async function sendEmailBulk(
                 templateData: storePayload ? p.data : undefined,
                 subject: p.sensitive ? undefined : p.subject,
                 content: storePayload ? p.text : undefined,
+                attachments: storePayload ? attachmentRecords(p.params.attachments) : undefined,
                 providerName: provider.name,
                 batchId,
                 claimToken: p.claimToken,
@@ -524,7 +574,7 @@ export async function sendEmailBulk(
 
     const sendResults = await runWithConcurrency(
         sendable,
-        (p) => provider.send(p.params).then(scrubSendResult),
+        (p) => provider.send(p.params).then(result => scrubSendResult(result, p.params.attachments)),
         concurrency,
     );
 
