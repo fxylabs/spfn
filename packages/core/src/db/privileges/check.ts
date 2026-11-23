@@ -14,7 +14,9 @@
  * beyond USAGE — CREATE, USAGE's grant option — the plan's `schemaChanges`,
  * for the same grantees; a grant to PUBLIC from another
  * grantor than the owner, which blocks the step, is the plan's
- * `publicGrantsByOthers`. What the plan leaves the app holding another way —
+ * `publicGrantsByOthers`; a declared column the database does not have, which
+ * blocks the step too, the plan's `absentColumns`, on any table, one the app
+ * owns included. What the plan leaves the app holding another way —
  * as a member of a role it does not plan for, or from a grantor other than the
  * owner — is `heldElsewhere`, never drift. A relation a planned role owns, or
  * whose owner it inherits (the plan's `ownedRelations`), is outside the step
@@ -38,8 +40,10 @@ import { publicMayCreateInPublic, readManagedObjects, readRoles } from './catalo
 import { catalogRows, type CatalogDb } from './ownership';
 import {
     planAppPrivileges,
+    type AbsentColumns,
     type AppPrivilegesTarget,
     type AppRoles,
+    type ColumnGrant,
     type GranteeChange,
     type OwnedRelation,
     type PrivilegeCatalog,
@@ -64,8 +68,12 @@ export interface AppPrivilegeDrift
     readonly excess: readonly string[];
     /** Declared, and held `WITH GRANT OPTION`, so the app can pass it on: the option is revoked */
     readonly grantOption: readonly string[];
-    /** Column grants, never declared, as `update (amount)`: revoked */
+    /** Column grants not declared, as `update (amount)`: revoked */
     readonly columns: readonly string[];
+    /** Declared column grants `spfn db grant` grants, as `update (status)`: not held, or held under a table-level grant of their privilege in `excess`, whose REVOKE takes them */
+    readonly missingColumns: readonly string[];
+    /** Declared column grants held `WITH GRANT OPTION`, as `update (status)`: the option is revoked */
+    readonly columnGrantOption: readonly string[];
 }
 
 /** What `spfn db grant` would revoke on one managed schema from one grantee: anything beyond USAGE. */
@@ -129,6 +137,8 @@ export interface AppPrivilegesCheck
     readonly heldElsewhere: readonly AppPrivilegeHeldElsewhere[];
     /** What it holds on the schemas beyond USAGE that `spfn db grant` reports and does not change */
     readonly schemaHeldElsewhere: readonly AppSchemaPrivilegeHeldElsewhere[];
+    /** Columns a table's column lists name that the table does not have: `spfn db grant` refuses until the migration that adds them has run */
+    readonly absentColumns: readonly AbsentColumns[];
     /** The managed schemas the app role owns or inherits the owner of: no `spfn db grant` statement for it there, and what it holds there not compared; with a read role, PUBLIC's and the read role's grants there are, as on any schema */
     readonly ownedSchemas: readonly string[];
     /** How many managed tables, views and materialized views the app role owns or inherits the owner of: declared, not enforced */
@@ -189,6 +199,7 @@ export function compareAppPrivileges(catalog: PrivilegeCatalog, target: AppPrivi
         heldElsewhere: plan.heldElsewhere.filter(entry => entry.role === roles.app)
             .map(({ schema, name, privilege, through }) => ({ schema, table: name, privilege, through })),
         schemaHeldElsewhere: plan.schemaHeldElsewhere.filter(entry => entry.role === roles.app).map(({ schema, privilege, through }) => ({ schema, privilege, through })),
+        absentColumns: plan.absentColumns,
         ownedSchemas: plan.ownedSchemas.filter(entry => entry.role === roles.app).map(entry => entry.schema),
         ownedTables: tableCount(plan.ownedRelations.filter(relation => relation.role === roles.app)),
         checkedTables: tableCount(catalog.relations) - tableCount(distinctRelations(plan.ownedRelations)),
@@ -207,8 +218,16 @@ function driftOf(change: GranteeChange, app: string): AppPrivilegeDrift
         missing: change.missing,
         excess: change.excess,
         grantOption: change.grantOption,
-        columns: change.columns.map(grant => `${grant.privilege} (${grant.column})`),
+        columns: change.columns.map(columnText),
+        missingColumns: change.missingColumns.map(columnText),
+        columnGrantOption: change.columnGrantOption.map(columnText),
     };
+}
+
+/** `update (status)`. */
+function columnText(grant: ColumnGrant): string
+{
+    return `${grant.privilege} (${grant.column})`;
 }
 
 function schemaDriftOf(change: SchemaChange, app: string): AppSchemaDrift

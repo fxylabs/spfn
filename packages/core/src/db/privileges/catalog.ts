@@ -266,8 +266,8 @@ const RELATION_KINDS = new Map<string, RelationKind>([
  * view (marked `security_invoker`, and whether it has a write rule or an
  * INSTEAD OF trigger), materialized view and
  * sequence of `schemas` — not an extension's member — with its table-level access list
- * (the owner's default one when it has none) and its columns' grants, each
- * with its grant option. A grantee of 0 is PUBLIC.
+ * (the owner's default one when it has none), its columns' grants, each
+ * with its grant option, and its columns' names. A grantee of 0 is PUBLIC.
  */
 export async function readRelations(db: CatalogDb, schemas: readonly string[]): Promise<CatalogRelation[]>
 {
@@ -294,7 +294,12 @@ export async function readRelations(db: CatalogDb, schemas: readonly string[]): 
                 FROM pg_catalog.pg_attribute att
                 CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) a
                 WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped AND att.attacl IS NOT NULL
-            ) AS "columnGrants"
+            ) AS "columnGrants",
+            (
+                SELECT coalesce(json_agg(att.attname::text ORDER BY att.attnum), '[]'::json)
+                FROM pg_catalog.pg_attribute att
+                WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+            ) AS columns
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = ANY(${sql.param([...schemas])}::text[]) AND c.relkind IN ('r', 'p', 'f', 'v', 'm', 'S')
@@ -326,7 +331,7 @@ async function readFunctions(db: CatalogDb, schema: string): Promise<CatalogRela
                     'grantable', a.is_grantable)), '[]'::json)
                 FROM pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
             ) AS grants,
-            '[]'::json AS "columnGrants"
+            '[]'::json AS "columnGrants", '[]'::json AS columns
         FROM pg_catalog.pg_proc p
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = ${schema} AND p.prokind = 'f'

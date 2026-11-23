@@ -1,0 +1,34 @@
+{
+    "$comment": "Generated from the entities' appPrivileges() declarations. Do not edit: regenerate.",
+    "version": 1,
+    "default": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+    ],
+    "tables": [
+        {
+            "schema": "acme",
+            "table": "ledger",
+            "privileges": [
+                "select",
+                "insert",
+                "references"
+            ]
+        },
+        {
+            "schema": "acme",
+            "table": "notes",
+            "privileges": "default"
+        },
+        {
+            "schema": "acme",
+            "table": "outbox",
+            "privileges": [
+                "select",
+                "insert"
+            ]
+        }
+    ]
+}

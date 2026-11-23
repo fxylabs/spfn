@@ -1,0 +1,167 @@
+{
+    "statements": [
+        "REVOKE UPDATE (\"message_id\", \"status\") ON TABLE \"acme\".\"outbox\" FROM \"app_user\"",
+        "REVOKE UPDATE ON TABLE \"acme\".\"ledger\" FROM \"app_user\"",
+        "REVOKE GRANT OPTION FOR REFERENCES ON TABLE \"acme\".\"ledger\" FROM \"app_user\"",
+        "REVOKE SELECT (\"amount\") ON TABLE \"acme\".\"ledger\" FROM \"app_user\"",
+        "GRANT SELECT ON TABLE \"acme\".\"ledger\" TO \"app_read\"",
+        "REVOKE UPDATE (\"amount\") ON TABLE \"acme\".\"ledger\" FROM \"app_read\"",
+        "REVOKE TRUNCATE ON TABLE \"acme\".\"notes\" FROM \"app_user\"",
+        "REVOKE INSERT (\"body\") ON TABLE \"acme\".\"notes\" FROM \"app_user\"",
+        "GRANT SELECT ON TABLE \"acme\".\"notes\" TO \"app_read\"",
+        "REVOKE SELECT ON TABLE \"acme\".\"notes\" FROM PUBLIC",
+        "REVOKE SELECT ON TABLE \"acme\".\"notes_2026\" FROM \"app_user\"",
+        "REVOKE INSERT ON TABLE \"acme\".\"notes_view\" FROM \"app_user\"",
+        "GRANT SELECT ON TABLE \"acme\".\"notes_view\" TO \"app_read\""
+    ],
+    "changes": [
+        {
+            "schema": "acme",
+            "name": "outbox",
+            "kind": "table",
+            "grantee": "app_user",
+            "missing": [],
+            "excess": [],
+            "grantOption": [],
+            "columns": [
+                {
+                    "privilege": "update",
+                    "column": "status"
+                },
+                {
+                    "privilege": "update",
+                    "column": "message_id"
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "ledger",
+            "kind": "table",
+            "grantee": "app_user",
+            "missing": [],
+            "excess": [
+                "update"
+            ],
+            "grantOption": [
+                "references"
+            ],
+            "columns": [
+                {
+                    "privilege": "select",
+                    "column": "amount"
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "ledger",
+            "kind": "table",
+            "grantee": "app_read",
+            "missing": [
+                "select"
+            ],
+            "excess": [],
+            "grantOption": [],
+            "columns": [
+                {
+                    "privilege": "update",
+                    "column": "amount"
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "notes",
+            "kind": "table",
+            "grantee": "app_user",
+            "missing": [],
+            "excess": [
+                "truncate"
+            ],
+            "grantOption": [],
+            "columns": [
+                {
+                    "privilege": "insert",
+                    "column": "body"
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "notes",
+            "kind": "table",
+            "grantee": "app_read",
+            "missing": [
+                "select"
+            ],
+            "excess": [],
+            "grantOption": [],
+            "columns": []
+        },
+        {
+            "schema": "acme",
+            "name": "notes",
+            "kind": "table",
+            "grantee": null,
+            "missing": [],
+            "excess": [
+                "select"
+            ],
+            "grantOption": [],
+            "columns": []
+        },
+        {
+            "schema": "acme",
+            "name": "notes_2026",
+            "kind": "table",
+            "grantee": "app_user",
+            "missing": [],
+            "excess": [
+                "select"
+            ],
+            "grantOption": [],
+            "columns": []
+        },
+        {
+            "schema": "acme",
+            "name": "notes_view",
+            "kind": "view",
+            "grantee": "app_user",
+            "missing": [],
+            "excess": [
+                "insert"
+            ],
+            "grantOption": [],
+            "columns": []
+        },
+        {
+            "schema": "acme",
+            "name": "notes_view",
+            "kind": "view",
+            "grantee": "app_read",
+            "missing": [
+                "select"
+            ],
+            "excess": [],
+            "grantOption": [],
+            "columns": []
+        }
+    ],
+    "schemaChanges": [],
+    "withoutUsage": [],
+    "ownerRoles": [],
+    "ownedRelations": [],
+    "ownedSchemas": [],
+    "missingRoles": [],
+    "heldElsewhere": [],
+    "schemaHeldElsewhere": [],
+    "publicGrantsByOthers": [],
+    "grantsByOthers": [],
+    "absentTables": [],
+    "ungrantableSchemas": [],
+    "foreignOwned": [],
+    "foreignOwnedSchemas": [],
+    "publicMayCreateInPublic": false,
+    "blocked": false
+}

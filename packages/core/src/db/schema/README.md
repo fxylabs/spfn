@@ -137,6 +137,12 @@ a row could then record an update earlier than its own creation, and ordering ro
 cursor or anything else that needs true ordering needs a sequence column, not a
 timestamp.
 
+Because Drizzle adds `updated_at` to every update, a `timestamps()` table whose
+`appPrivileges` limits `update` to some columns lists `updatedAt` among them
+(`update: ['status', 'updatedAt']`): without it every Drizzle update of that table would be
+refused (42501), so `appPrivileges` refuses the declaration where it is written. See the db
+README, [Column lists](../README.md#column-lists).
+
 ### `foreignKey(name, reference, options?)` / `optionalForeignKey(...)`
 
 ```typescript

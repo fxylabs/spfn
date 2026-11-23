@@ -142,7 +142,7 @@ describe('readAppPrivilegesManifest (P4)', () =>
 
     it.each([
         ['text that is not JSON', '{ "version": 1,', /cannot be read as JSON/],
-        ['an unknown version', manifestWith({ version: 2 }), /has version 2; this @spfn\/core reads version 1/],
+        ['an unknown version', manifestWith({ version: 3 }), /has version 3; this @spfn\/core reads versions 1 and 2/],
         ['a misspelt privilege', manifestWith({ tables: [{ schema: 'app', table: 'audit', privileges: ['select', 'udpate'] }] }), /table entry 0 is malformed/],
         ['an entry without a schema', manifestWith({ tables: [{ table: 'audit', privileges: 'default' }] }), /table entry 0 is malformed/],
         ['tables as a map by name', manifestWith({ tables: { 'app.audit': 'default' } }), /"tables" is not a list/],

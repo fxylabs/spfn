@@ -11,6 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/core, spfn: `appPrivileges` declares column lists, and the grant step keeps them (#460).**
+  The grant step brings the app role to exactly what is declared, and a declaration was table-level
+  only, so the step revoked every column grant: a table where the app inserts rows and may update
+  only some columns could not be declared, and the step and a hand-run SQL file undid each other.
+  `appPrivileges(table, { select: true, insert: true, update: ['status', 'messageId'] })` now
+  declares it: a privilege is `true` (the whole table) or, for `select`, `insert`, `update` and
+  `references`, a list of the table's property names, type-checked against the table and mapped to
+  column names where the declaration is written; a list on `delete`, `truncate` or `trigger`, an
+  empty list or a property the table does not have is a type error and an `AppPrivilegesError` at
+  load, so `spfn db generate` stops before drizzle-kit. The step grants `UPDATE ("message_id",
+  "status")`, revokes a column grant not declared, and revokes a table-level grant of a privilege
+  declared on columns before granting the columns, in its one transaction; the read role gets the
+  `select` column list. `privileges.json` carries the lists as version 2 (`"columns"` per table),
+  written only when a table declares one: a project without one writes version 1, byte for byte as
+  before, and an older CLI refuses a version 2 file instead of granting table-wide. `spfn db status`
+  reports the new drift — human form and `--json`, additive: `drift[].missingColumns`,
+  `drift[].columnGrantOption`; `columns` now means "column grants beyond the declaration". New
+  exports from `@spfn/core/db`: `APP_COLUMN_PRIVILEGES`, the types `AppColumnPrivilege`,
+  `AppColumnPrivileges`, `AppPrivilegeDeclaration`, `ColumnGrant`; `AppTablePrivileges.columns?`,
+  `GranteeChange.missingColumns`/`columnGrantOption`, `AppPrivilegeDrift.missingColumns`/
+  `columnGrantOption`; `APP_PRIVILEGES_MANIFEST_VERSION` is now 2 (the newest format; 1 is still
+  read and written). A column added later is not covered by a list; a column renamed under the same
+  property follows it. A listed column the table does not have (its migration not run, or renamed
+  under a stale manifest) stops the step before any statement, naming the table and the column,
+  on any table, one the app role owns or inherits the owner of too; `db status` reports it in
+  `absentColumns` (`--json`, additive), never as a missing column grant (new export: the type
+  `AbsentColumns`; `CatalogRelation.columns`, `AppPrivilegesPlan.absentColumns`,
+  `AppPrivilegesCheck.absentColumns`). Lists are validated against what drizzle — every repository's access path —
+  sends, since PostgreSQL checks the privilege of each column a statement names: an `insert` list
+  that leaves out a column drizzle's `insert()` names (every one but a GENERATED ALWAYS one) and an
+  `update` list that leaves out a `$onUpdate` column (`timestamps()`' `updatedAt`) are an
+  `AppPrivilegesError` at load, not a 42501 on the app's first write; a `select` list works with
+  explicit column selections only (the core db README, "Column lists").
 - **@spfn/auth: a seat for the app inside a password change — `createAuthLifecycle({ passwordChange:
   { admit, changed } })` and `auth.password.changed` (#434).** Since the required password change is
   enforced, a flagged session reaches no app route, so an app could no longer wrap the change in its

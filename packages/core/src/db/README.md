@@ -59,8 +59,9 @@ Types: `Tenancy`, `TenancyOptions`, `TenancyGuardOptions`, `TenancyOnDelete`, `T
 **App privileges** (`privileges/` — see [App privileges](#app-privileges-appprivileges)):
 `appPrivileges`, `declaredAppPrivileges`, `isAppPrivilege`, `readAppPrivilegesManifest`, `readMigrationsAppPrivileges`,
 `renderAppPrivilegesManifest`, `writeAppPrivilegesManifest`, `AppPrivilegesError` (class), `AppPrivilegesManifestError` (class), `APP_PRIVILEGES`,
-`DEFAULT_APP_PRIVILEGES`, `APP_PRIVILEGES_MARKER`, `APP_PRIVILEGES_MANIFEST_FILE`, `APP_PRIVILEGES_MANIFEST_VERSION`
-Types: `AppPrivilege`, `AppPrivilegesManifest`, `AppTablePrivileges`, `MigrationsAppPrivileges`
+`APP_COLUMN_PRIVILEGES`, `DEFAULT_APP_PRIVILEGES`, `APP_PRIVILEGES_MARKER`, `APP_PRIVILEGES_MANIFEST_FILE`, `APP_PRIVILEGES_MANIFEST_VERSION`
+Types: `AppPrivilege`, `AppColumnPrivilege`, `AppColumnPrivileges`, `AppPrivilegeDeclaration`, `AppPrivilegesManifest`, `AppTablePrivileges`,
+`MigrationsAppPrivileges`, `ColumnGrant`
 
 **PostgreSQL error mapping** (`postgres-errors.ts`):
 `fromPostgresError`
@@ -828,7 +829,7 @@ the declaration — a second run issues none.
 | Object (in the managed schemas) | App role | Read role (`DATABASE_READ_URL`, when another role) | PUBLIC |
 |---|---|---|---|
 | the project's schemas, each function package's (`spfn_auth`, …) | `USAGE`, nothing else — `CREATE` revoked | `USAGE`, nothing else | `USAGE` untouched; `CREATE` revoked, except on `public` |
-| their tables, foreign tables included | the declared set, else `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT`, when the set has it | revoked |
+| their tables, foreign tables included | the declared set and column lists, else `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT`, when the set has it; the same `SELECT` column list, when `select` is declared on columns | revoked |
 | their views (`pgView`) | `SELECT`; a `security_invoker` view (PostgreSQL 15+) with no rule but its SELECT rule and no INSTEAD OF trigger: `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `SELECT` | revoked |
 | their materialized views (`pgMaterializedView`) | `SELECT` | `SELECT` | revoked |
 | a partition, at any level | nothing — access goes through its root table | — | revoked |
@@ -860,7 +861,8 @@ the declaration — a second run issues none.
   PUBLIC holds on one directly is revoked, and `db status` reports it as drift — since access goes
   through the root table, whose declaration and row-level security apply.
 - **Revoked:** on a managed table, every privilege the owner granted the app role beyond its set —
-  column grants included — the grant option of any it keeps (`REVOKE GRANT OPTION FOR`), and every
+  column grants it does not declare included — the grant option of any it keeps, table-level or on a
+  column (`REVOKE GRANT OPTION FOR`), and every
   grant to PUBLIC, whoever granted it. A privilege that reaches the app through a group role, or that
   another grantor gave it, is reported, never revoked: the step changes no role but the app role, the
   read role and PUBLIC. So a hand `GRANT TRUNCATE` is taken back, and a hand `REVOKE UPDATE` that the
@@ -973,7 +975,8 @@ changes nothing the app can do, so status does not report it. Per relation (tabl
 sequences) and grantee — the app role; PUBLIC, whose grants the app holds too; a role the app is a
 member of, likewise, named with its path — it lists what is missing, what is held beyond the
 declaration (a lost restriction), a declared privilege held `WITH GRANT OPTION` (the app can pass it
-on), and column grants; each managed schema the app role cannot use; per schema and grantee, what it
+on), column grants beyond the declaration, declared column grants missing, and declared column grants
+held `WITH GRANT OPTION`; each managed schema the app role cannot use; per schema and grantee, what it
 holds there beyond `USAGE`; and each grant to PUBLIC from
 another grantor than the owner, which the app holds and which blocks the step, with the `REVOKE`
 its grantor can run. What the step leaves the app role holding — as a member of a role the step does
@@ -984,7 +987,8 @@ the privileges unchecked, with the error). What the app role cannot see is the o
 does not know which role `DATABASE_OWNER_URL` connects as, so not whether that role may grant on
 each relation and schema, nor whether PostgreSQL would refuse a `REVOKE` (2BP01) — it predicts no
 refusal; `spfn db grant --dry-run` runs the statements and reports one. `--json` carries it as
-`privileges` (`drift`, `schemasWithoutUsage`, `schemaDrift`, `publicGrantsByOthers`, `heldElsewhere`,
+`privileges` (`drift` — per entry `missing`, `excess`, `grantOption`, `columns`, `missingColumns`,
+`columnGrantOption` — `schemasWithoutUsage`, `schemaDrift`, `publicGrantsByOthers`, `heldElsewhere`,
 `schemaHeldElsewhere`, `ownedTables`, `ownedSchemas`, `publicMayCreateInPublic`, `readRole`). When
 the app declares jobs (`"spfn": { "jobs": … }`), the queue schema is compared too, by the queue's
 rule (a function's `EXECUTE` is `kind: "function"` drift), and a `queue` section reports its
@@ -1124,17 +1128,94 @@ hand on a table that does not declare it) is taken back, and a restriction comes
 table is created again, since the step runs after every command that can create it.
 
 - **Values:** `select`, `insert`, `update`, `delete`, plus `truncate`, `references` and `trigger`
-  as explicit opt-ins (`APP_PRIVILEGES`). Table-level only; no column lists.
+  as explicit opt-ins (`APP_PRIVILEGES`), as a list (table-level), or as an object whose privileges
+  may be limited to columns — [Column lists](#column-lists) below.
 - **Default:** a table without a declaration has `DEFAULT_APP_PRIVILEGES` —
   `select`, `insert`, `update`, `delete`. `SELECT … FOR UPDATE` needs `update`.
 - **Refused where it is written:** an unknown privilege (`'udpate'`), an empty list, or a second,
   different declaration on one table throws `AppPrivilegesError` naming the table (its `schema` and `table`),
-  so the schema module fails to load. The same list declared twice is accepted.
+  so the schema module fails to load. The same list declared twice is accepted. The column-list
+  errors below are thrown the same way.
 - **One shape for every table:** it returns the table it is given, so it wraps `pgTable`,
   `schema.table` (`createSchema`), `tenancy.table` and a function package's table alike. The
   declaration is a `Symbol.for('spfn.app.privileges')` property on the table object
   (`APP_PRIVILEGES_MARKER`), like the tenancy markers, so the CLI reads it through any copy of
   `@spfn/core` the app's schema loads.
+
+#### Column lists
+
+A table whose app role may change some columns only declares them per privilege — the issue that
+asked for it (#460) is an outbox the app inserts into and may only mark:
+
+```typescript
+export const outbox = appPrivileges(schema.table('outbox', {
+    id: id(),
+    status: text('status').notNull(),
+    messageId: text('message_id'),
+    body: text('body').notNull(),
+}), { select: true, insert: true, update: ['status', 'messageId'] });
+// GRANT SELECT, INSERT ON … ; GRANT UPDATE ("message_id", "status") ON …
+```
+
+With `...timestamps()` in the table, the `update` list names `updatedAt` too: drizzle sets it on
+every update (below).
+
+- **Shape** (`AppPrivilegeDeclaration<typeof table>`): per privilege, `true` for the whole table, or
+  a list of the table's **property names** (`messageId`, not `message_id`); a privilege left out is
+  not granted. `select`, `insert`, `update` and `references` take a list (`APP_COLUMN_PRIVILEGES`);
+  `delete`, `truncate` and `trigger` act on whole rows or the table — PostgreSQL has no column form
+  of them — so they take `true` only. An object without a list is the same declaration as its list
+  (`{ select: true, insert: true }` is `['select', 'insert']`).
+- **Checked twice.** TypeScript refuses a list on `delete`, `truncate` or `trigger`, `false`, and a
+  property the table does not have, where it knows the table's columns. At run time — where the
+  schema module loads, so before `spfn db generate` runs drizzle-kit — `AppPrivilegesError` refuses
+  the same, an empty list — a list never silently means "no privilege" — and a list drizzle's
+  statements cannot keep to (below).
+- **Property → column** is mapped where the declaration is written, from drizzle's column names
+  (any `casing` included), and the manifest stores column names. A **renamed column follows its
+  property**: `messageId: text('msg_id')` writes `msg_id` on the next generate. A **renamed or
+  removed property** is a type error and fails the load. A **column the database does not have** —
+  the migration that adds it not run yet, or a column renamed under a manifest not regenerated — is
+  found before any statement on any table, one the app role owns or inherits the owner of too (the
+  plan's `absentColumns`, which block it, as `absentTables` are found): the step names the table
+  and the column and says to run the migration first, and changes nothing; `spfn db status` reports
+  it as that, never as a missing column grant.
+- **A column added later is not covered** — that is the point of a list. It gets no privilege of
+  that kind until its property is added to the list.
+- **What the step does.** "Exactly what is declared" holds per column: a declared column grant
+  missing is granted; one the owner gave that is not declared is revoked, and so is the grant option
+  of a declared one. A table-level grant of a privilege declared on columns (the hand `GRANT UPDATE`
+  the list replaces) is revoked: left in place it covers every column. PostgreSQL's table-level
+  `REVOKE` takes that privilege's column grants with it, so the step revokes first and grants the
+  columns after, in the same transaction — switching a declaration from `update: true` to a list
+  is one run. The comparison reads the column access lists (`pg_attribute.attacl`), never
+  `information_schema.column_privileges`, which lists a table-level grant on every column.
+- **Other roles and objects.** The read role gets the same `SELECT` column list when `select` is
+  declared on columns (and nothing of the other lists); PUBLIC nothing. A partition gets nothing, as
+  always; views, materialized views, `drizzle` and the queue schema take no column list. A
+  `tenancy.table` takes one like any table; its row-level security applies on top.
+- **Validated against what drizzle sends.** Every repository reaches the database through drizzle,
+  and PostgreSQL checks the privilege of every column a statement names. A list that drizzle's own
+  statements cannot keep to would pass `db generate`, `db grant` and `db status`, and refuse the
+  app's first write in production (42501); so where the column objects are — the declaration —
+  `AppPrivilegesError` refuses it, naming the columns and why:
+  - an **`insert` list** names every column but a GENERATED ALWAYS one (`generatedAlwaysAs`,
+    `generatedAlwaysAsIdentity`): drizzle's `insert()` names each other column, `DEFAULT` for one
+    not given — a `serial` or BY DEFAULT identity id and `timestamps()`' columns included. A list
+    that names them all differs from `insert: true` only in a column added later.
+    `insert().overridingSystemValue()` names a GENERATED ALWAYS identity too, so under a list that
+    leaves it out PostgreSQL refuses that call (42501);
+  - an **`update` list** names each column with `$onUpdate` — `timestamps()`' `updatedAt`:
+    drizzle's `update()`, and an upsert's `DO UPDATE`, set it on every update.
+
+  Two lists are accepted and work only one way, so they are documented, not refused. A **`select`
+  list** works with an explicit column selection only: a bare `select()`, a relational query
+  without `columns` and `returning()` without fields name every column, so `BaseRepository`'s
+  `_findOne`, `_findMany`, `_create`, `_updateOne`, `_deleteOne` and the like are refused, while
+  `select({ id: t.id, status: t.status })` and `returning({ id: t.id })` work; a `WHERE`, and an
+  upsert's conflict target, read their columns, which need `select` too. A **`references` list**
+  changes nothing drizzle sends: only a role creating a foreign key needs REFERENCES, and the
+  migrations' owner creates them.
 
 **The manifest.** `spfn db migrate` loads no app source, so the declarations travel as a generated
 file: `spfn db generate` writes `privileges.json` beside the migrations of the run, in the `out`
@@ -1164,6 +1245,23 @@ including one that does not exist (a wrong path would otherwise grant the defaul
 }
 ```
 
+A table with column lists carries them as `"columns"`, per privilege its column names, beside its
+table-level `"privileges"` (empty when it declares column lists only); such a file is version 2:
+
+```json
+{ "schema": "acme_ledger", "table": "outbox", "privileges": ["select", "insert"], "columns": { "update": ["message_id", "status"] } }
+```
+
+A manifest is version 2 only when a table declares a column list; without one it is version 1,
+byte for byte as before, so a project that declares none sees no change in the file. A reader of
+version 1 only (`@spfn/core` 0.4.0-beta.4 and earlier, so its CLI) refuses a version 2 file —
+`has version 2; this @spfn/core reads version 1` — and grants nothing, never the table-wide set; and
+its `db push`, loading entities declared with a column list, stops with a `TypeError` before any
+statement; and its `db generate`, run against this `@spfn/core`, writes a version 1 file whose
+column-list entries no version reads — every reader refuses it (`table entry … is malformed`), so it
+fails loudly and never grants table-wide: regenerate with this release's CLI. This release reads both
+versions.
+
 (The file itself puts each list item on its own line.) Every table of the schema is listed — a
 function package's tables are in the package's folder, not the project's — its schema and name as
 two fields (a quoted identifier may hold a dot, so `"a.b"."c"` and `"a"."b.c"` are two tables),
@@ -1183,13 +1281,15 @@ Run `spfn db generate` after every entity change and commit the file with the mi
 
 For tools (the CLI's grant step, `db status`): `declaredAppPrivileges(values)` returns the
 declarations of the tables among `values` (a schema module's exports) as `{ schema, table,
-privileges }` entries (`AppTablePrivileges`), sorted. `readMigrationsAppPrivileges(migrationsDir)`
+privileges, columns? }` entries (`AppTablePrivileges`; `columns` only on a table with column
+lists), sorted. `readMigrationsAppPrivileges(migrationsDir)`
 returns what a migrations folder declares: `{ kind: 'manifest', file, manifest }`, or
 `{ kind: 'none', default }` when the folder's listing holds no `privileges.json`.
 `readAppPrivilegesManifest(file)` reads and checks one file and throws
-`AppPrivilegesManifestError` naming the file on unreadable JSON, a version other than
-`APP_PRIVILEGES_MANIFEST_VERSION` (1), a table entry that is not a schema, a table and a privilege
-list or `"default"`, or one table listed twice; `readMigrationsAppPrivileges` throws the same for
+`AppPrivilegesManifestError` naming the file on unreadable JSON, a version other than 1 and
+`APP_PRIVILEGES_MANIFEST_VERSION` (2), a table entry that is not a schema, a table and a privilege
+list or `"default"` — in version 2, column lists that are not a non-empty, sorted list of names per
+privilege of `APP_COLUMN_PRIVILEGES` not also table-level — or one table listed twice; `readMigrationsAppPrivileges` throws the same for
 a file that is there, and for a folder it cannot list. `renderAppPrivilegesManifest` / `writeAppPrivilegesManifest` produce the
 file (`APP_PRIVILEGES_MANIFEST_FILE`).
 
@@ -1230,7 +1330,9 @@ do (`AppPrivilegesCheck`); the owner, whom the app cannot name, is taken to own 
 queue the owner installed is compared by the queue's rule, and one the app role owns is reported
 in `ownedSchemas`. `compareAppPrivileges(catalog, target, roles)` is its pure half, on a
 `PrivilegeCatalog` read as the app (no role taken for the owner, no relation foreign-owned). The plan carries the comparison its
-statements are written from: `changes` (`GranteeChange` per relation and grantee) and `withoutUsage`. `foreignOwnedObjects(db, schemas)` is the catalog read
+statements are written from: `changes` (`GranteeChange` per relation and grantee — `missing`,
+`excess`, `grantOption`, and per column, as `ColumnGrant`s, `columns` revoked, `missingColumns`
+granted, `columnGrantOption` revoked) and `withoutUsage`. `foreignOwnedObjects(db, schemas)` is the catalog read
 of what another role owns — schemas, relations and enum types — shared with `spfn db push`'s
 ownership remedy; `foreignOwnedObjects(db, schemas, queueSchema)` adds the functions of the queue
 schema (`FUNCTION`, its `object` with its argument types), and of no other: a project's trigger

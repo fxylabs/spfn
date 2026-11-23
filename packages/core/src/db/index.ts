@@ -107,6 +107,7 @@ export type { CountOptions, ReadOptions } from './query-utils';
 
 // App privileges: the per-table declaration, its manifest (privileges.json), and the step that applies them
 export {
+    APP_COLUMN_PRIVILEGES,
     APP_PRIVILEGES,
     APP_PRIVILEGES_MANIFEST_FILE,
     APP_PRIVILEGES_MANIFEST_VERSION,
@@ -136,7 +137,11 @@ export {
     writeAppPrivilegesManifest,
 } from './privileges';
 export type {
+    AbsentColumns,
+    AppColumnPrivilege,
+    AppColumnPrivileges,
     AppPrivilege,
+    AppPrivilegeDeclaration,
     AppPrivilegeDrift,
     AppPrivilegeHeldElsewhere,
     AppPrivilegesCheck,
@@ -151,6 +156,7 @@ export type {
     AppSchemaPrivilegeHeldElsewhere,
     AppTablePrivileges,
     CatalogColumnGrant,
+    ColumnGrant,
     CatalogDb,
     CatalogGrant,
     CatalogRelation,

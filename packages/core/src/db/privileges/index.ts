@@ -4,6 +4,7 @@
  */
 
 export {
+    APP_COLUMN_PRIVILEGES,
     APP_PRIVILEGES,
     APP_PRIVILEGES_MARKER,
     AppPrivilegesError,
@@ -12,7 +13,7 @@ export {
     declaredAppPrivileges,
     isAppPrivilege,
 } from './declaration';
-export type { AppPrivilege, AppTablePrivileges } from './declaration';
+export type { AppColumnPrivilege, AppColumnPrivileges, AppPrivilege, AppPrivilegeDeclaration, AppTablePrivileges } from './declaration';
 
 export {
     APP_PRIVILEGES_MANIFEST_FILE,
@@ -27,11 +28,13 @@ export type { AppPrivilegesManifest, MigrationsAppPrivileges } from './manifest'
 
 export { BOOKKEEPING_SCHEMA, appRelationPrivileges, planAppPrivileges, quoteIdentifier } from './plan';
 export type {
+    AbsentColumns,
     AppPrivilegesPlan,
     AppPrivilegesTarget,
     AppRelation,
     AppRoles,
     CatalogColumnGrant,
+    ColumnGrant,
     CatalogGrant,
     CatalogRelation,
     CatalogRole,

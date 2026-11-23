@@ -1,0 +1,505 @@
+{
+    "roles": [
+        {
+            "name": "app_user",
+            "inheritsOwner": false,
+            "memberOf": [
+                "app_read"
+            ]
+        },
+        {
+            "name": "app_read",
+            "inheritsOwner": false,
+            "memberOf": []
+        }
+    ],
+    "missingRoles": [],
+    "schemas": [
+        {
+            "name": "acme",
+            "role": "app_user",
+            "usage": true,
+            "mayGrant": true,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "create",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": false
+                }
+            ]
+        },
+        {
+            "name": "acme",
+            "role": "app_read",
+            "usage": true,
+            "mayGrant": true,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "create",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": false
+                }
+            ]
+        }
+    ],
+    "relations": [
+        {
+            "schema": "acme",
+            "name": "outbox",
+            "kind": "table",
+            "partition": false,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "trigger",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_read",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                }
+            ],
+            "columnGrants": [
+                {
+                    "column": "status",
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": false
+                },
+                {
+                    "column": "message_id",
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": false
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "outbox_id_seq",
+            "kind": "sequence",
+            "partition": false,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "usage",
+                    "grantable": false
+                }
+            ],
+            "columnGrants": []
+        },
+        {
+            "schema": "acme",
+            "name": "ledger",
+            "kind": "table",
+            "partition": false,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "trigger",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                }
+            ],
+            "columnGrants": [
+                {
+                    "column": "amount",
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                },
+                {
+                    "column": "amount",
+                    "grantee": "app_read",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": false
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "notes",
+            "kind": "table",
+            "partition": false,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "trigger",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": false
+                },
+                {
+                    "grantee": null,
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                }
+            ],
+            "columnGrants": [
+                {
+                    "column": "body",
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": false
+                }
+            ]
+        },
+        {
+            "schema": "acme",
+            "name": "notes_2026",
+            "kind": "table",
+            "partition": true,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "trigger",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                }
+            ],
+            "columnGrants": []
+        },
+        {
+            "schema": "acme",
+            "name": "notes_view",
+            "kind": "view",
+            "partition": false,
+            "owner": "app_owner",
+            "grants": [
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "update",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "delete",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "truncate",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "references",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_owner",
+                    "grantor": "app_owner",
+                    "privilege": "trigger",
+                    "grantable": true
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "select",
+                    "grantable": false
+                },
+                {
+                    "grantee": "app_user",
+                    "grantor": "app_owner",
+                    "privilege": "insert",
+                    "grantable": false
+                }
+            ],
+            "columnGrants": []
+        }
+    ],
+    "foreignOwned": [],
+    "publicMayCreateInPublic": false
+}

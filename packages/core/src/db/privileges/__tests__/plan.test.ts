@@ -94,10 +94,10 @@ const OWNER = 'app_owner';
 const APP = 'app_user';
 
 const table = (name: string, grants: CatalogGrant[] = [], columnGrants: CatalogRelation['columnGrants'] = [], schema = 'acme'): CatalogRelation =>
-    ({ schema, name, kind: 'table', partition: false, owner: OWNER, grants: [...ownerGrants('table'), ...grants], columnGrants });
+    ({ schema, name, kind: 'table', partition: false, owner: OWNER, grants: [...ownerGrants('table'), ...grants], columnGrants, columns: [] });
 
 const sequence = (name: string, grants: CatalogGrant[] = [], schema = 'acme'): CatalogRelation =>
-    ({ schema, name, kind: 'sequence', partition: false, owner: OWNER, grants: [...ownerGrants('sequence'), ...grants], columnGrants: [] });
+    ({ schema, name, kind: 'sequence', partition: false, owner: OWNER, grants: [...ownerGrants('sequence'), ...grants], columnGrants: [], columns: [] });
 
 /** The owner's own entries of a default access list: never a statement. */
 function ownerGrants(kind: 'table' | 'sequence', owner = OWNER): CatalogGrant[]
@@ -132,7 +132,7 @@ function catalog(relations: CatalogRelation[], overrides: Partial<PrivilegeCatal
 
 /** A drift entry of the app role's on `acme.<table>`, nothing changed but `changes`. */
 const drift = (table: string, changes: Partial<AppPrivilegeDrift> = {}): AppPrivilegeDrift =>
-    ({ schema: 'acme', table, kind: 'table', grantee: APP, through: null, missing: [], excess: [], grantOption: [], columns: [], ...changes });
+    ({ schema: 'acme', table, kind: 'table', grantee: APP, through: null, missing: [], excess: [], grantOption: [], columns: [], missingColumns: [], columnGrantOption: [], ...changes });
 
 const target = (tables: AppPrivilegesTarget['tables'] = [], schemas = ['acme', 'drizzle']): AppPrivilegesTarget =>
     ({ schemas, tables, defaults: DEFAULT_APP_PRIVILEGES });
@@ -651,7 +651,7 @@ describe('planAppPrivileges', () =>
         const queueTable = (name: string, partition = false) => ({ ...table(name, [], [], 'spfn_queue'), partition });
         const createQueue: CatalogRelation = {
             schema: 'spfn_queue', name: 'create_queue', kind: 'function', arguments: 'queue_name text, options jsonb', partition: false, owner: OWNER,
-            grants: [{ grantee: null, grantor: OWNER, privilege: 'execute' }, { grantee: OWNER, grantor: OWNER, privilege: 'execute' }], columnGrants: [],
+            grants: [{ grantee: null, grantor: OWNER, privilege: 'execute' }, { grantee: OWNER, grantor: OWNER, privilege: 'execute' }], columnGrants: [], columns: [],
         };
         const state = catalog([
             table('events', toApp('select')),

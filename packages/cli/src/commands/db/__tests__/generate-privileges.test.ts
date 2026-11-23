@@ -22,6 +22,8 @@
  * |    | `(billing)/[tenant]` folder, a nested `node_modules` and a dot-dir | `invoices`, not the node_modules or the dot-directory table  |
  * | R9 | `privileges.json` cannot be written (a directory holds its name:   | after "Migrations generated", the error names the manifest  |
  * |    | refused as root too)                                               | file, says the migrations were written, to rerun; exit 1    |
+ * | K6 | (#460) a column list on `delete`, an empty list, a property the    | exit 1 before drizzle-kit, the AppPrivilegesError printed;  |
+ * |    | table does not have (renamed)                                      | no manifest — never "no privilege" written for it           |
  *
  * drizzle-kit is replaced by a recorder: a changed declaration changes no DDL,
  * so drizzle-kit generates nothing then, and the manifest must be written anyway.
@@ -264,6 +266,23 @@ describe('db generate writes the privileges manifest', () =>
 
         await expect(dbGenerate()).rejects.toThrow('process.exit(1)');
 
+        expect(runDrizzleKit).not.toHaveBeenCalled();
+        expect(existsSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'))).toBe(false);
+    });
+
+    it.each([
+        ['a column list on delete', "{ select: true, delete: ['status'] } as never", 'delete takes no column list'],
+        ['an empty column list', '{ select: true, update: [] }', 'update lists no column'],
+        ['a property the table does not have', "{ update: ['messageId'] } as never", 'no column property "messageId"'],
+    ])('K6: %s: the run stops before drizzle-kit, names the table and the cause, and no manifest is written', async (_case, declaration, message) =>
+    {
+        entity('outbox.entity.ts', "import { pgTable, text } from 'drizzle-orm/pg-core';\n" + DECLARE
+            + `export const outbox = appPrivileges(pgTable('outbox', { status: text('status'), msgId: text('message_id') }), ${declaration});\n`);
+        generatedConfigUrl();
+
+        await expect(dbGenerate()).rejects.toThrow('process.exit(1)');
+
+        expect(printed.join('\n')).toContain(`appPrivileges(public.outbox): ${message}`);
         expect(runDrizzleKit).not.toHaveBeenCalled();
         expect(existsSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'))).toBe(false);
     });

@@ -73,7 +73,44 @@
  * - P25 (#171, i171af2) a queue schema that is also a managed one refused
  *   with no reason — the step blocked, nothing applied, and the person told
  *   neither which schema nor what to change;
- * - I1, checked in P3, P4, P10, P11, P14b, P16, P18-P21, P23, P24: status and `db grant
+ * - P26 (#460) a table declared `{ select: true, insert: true, update:
+ *   ['status', 'messageId'] }` granted UPDATE table-wide — the step reporting
+ *   success while the app rewrites any column — or its column grant revoked; a
+ *   hand column grant it does not declare kept; on a database already holding
+ *   exactly the declared grants (the issue's hand SQL), `db grant --dry-run`
+ *   planning a statement — the step and the SQL file undoing each other;
+ * - P27 (#460) a declaration switched from table-wide UPDATE to a column list
+ *   leaving the table-level UPDATE in place, which makes the list meaningless,
+ *   or revoking it after the column grant, which takes the column grant too;
+ * - P28 (#460) a version 2 manifest's column list not applied by `db migrate`;
+ *   a declared column grant missing, or held under a table-level
+ *   UPDATE, read by `db status` as clean, missing from `--json`, or reported
+ *   with advice `db grant` does not follow; the declared column grants under
+ *   that UPDATE called missing in the human line (rv462 N5), which they are
+ *   not while it is held;
+ * - P29 (#460 rv462 B1) a declaration `appPrivileges` accepts that drizzle's
+ *   own statements cannot keep to — the rule of what drizzle's `insert()`
+ *   and `update()` name wrong, a GENERATED ALWAYS column or a `$onUpdate` one
+ *   mistaken — so the app's drizzle insert or update is refused (42501) after
+ *   push, grant and status all passed;
+ * - P30 (rv462 N1) a declared column grant held WITH GRANT OPTION — the app
+ *   can pass the column on — read by `db status` as clean or missing from
+ *   `--json`'s `columnGrantOption`, or kept by `db grant`;
+ * - P31 (rv462 N4) a declared column the table does not have — a migration
+ *   not run, a column renamed under the manifest — found only by PostgreSQL
+ *   (42703) halfway through the step, or by `db status` read as a missing
+ *   column grant whose advice, `db grant`, fails; instead of the step
+ *   refusing before any statement, naming the table and the column; where it
+ *   is the only difference (rv462b Opus 2), status saying "holds what is
+ *   declared";
+ * - P32 (rv462b Opus 1) `push --dry-run` on an entity that adds a column and
+ *   lists it: the column, which the push itself adds, reported as a refusal
+ *   instead of as a new column;
+ * - P33 (rv462b Codex) a single role that owns its tables, its manifest
+ *   listing a column the table does not have: `db status` silent on it, and
+ *   `db grant --dry-run` with the owner URL the app's not saying the step
+ *   refuses, while `db grant` does;
+ * - I1, checked in P3, P4, P10, P11, P14b, P16, P18-P21, P23, P24, P26, P28, P30, P31, P33: status and `db grant
  *   --dry-run` disagreeing on any (relation or schema, grantee, privilege, kind) —
  *   status reporting what the step does not change, or missing what it does
  *   (a grant option, a column grant, a PUBLIC grant, a sequence or a
@@ -89,6 +126,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import postgres from 'postgres';
+import { drizzle } from 'drizzle-orm/postgres-js';
 
 import { appUrl, OWNER_URL, requireDatabase, twoRoleUnavailability } from './helpers/test-database.js';
 import { writeFunctionPackage } from './helpers/function-package.js';
@@ -106,6 +144,17 @@ const PACKAGE_SQL = 'CREATE SCHEMA spfn_i163fix;\n--> statement-breakpoint\nCREA
 const PROJECT_SQL = 'CREATE SCHEMA i405d_grant;\n--> statement-breakpoint\n'
     + 'CREATE TABLE i405d_grant.notes (id serial PRIMARY KEY, body text);\n--> statement-breakpoint\n'
     + 'CREATE TABLE i405d_grant.ledger (id serial PRIMARY KEY, amount integer);\n';
+
+const OUTBOX_SQL = 'CREATE SCHEMA i405d_grant;\n--> statement-breakpoint\n'
+    + 'CREATE TABLE i405d_grant.outbox (id serial PRIMARY KEY, status text, message_id text, body text);\n';
+
+/** The manifest `spfn db generate` writes for `outbox` declared `{ select: true, insert: true, update }`, `update` by column name. */
+const outboxManifest = (update = ['message_id', 'status']) => `${JSON.stringify({
+    $comment: 'Generated from the entities\' appPrivileges() declarations. Do not edit: regenerate.',
+    version: 2,
+    default: ['select', 'insert', 'update', 'delete'],
+    tables: [{ schema: 'i405d_grant', table: 'outbox', privileges: ['select', 'insert'], columns: { update } }],
+}, null, 4)}\n`;
 
 /** A manifest as `spfn db generate` writes it. */
 const manifest = (tables: { schema: string; table: string; privileges: string[] | 'default' }[]) => `${JSON.stringify({
@@ -205,6 +254,59 @@ describe('the app privileges step', () =>
             + "export const notes = grantSchema.table('notes', { id: serial('id').primaryKey(), body: text('body') });\n"
             + `export const ledger = appPrivileges(grantSchema.table('ledger', { id: serial('id').primaryKey(), amount: integer('amount') }), ${ledgerPrivileges});\n`);
     }
+
+    /**
+     * The entities push loads: `outbox`, the issue's table, with `columns`
+     * beside its own, declaring `outboxPrivileges`; a file of its own per declaration.
+     */
+    function writeOutbox(outboxPrivileges: string, columns = ''): void
+    {
+        const entities = join(root, 'src', 'server', 'entities');
+
+        entityFile = `./src/server/entities/outbox-${outboxPrivileges.replace(/\W+/g, '-')}.entity.ts`;
+        mkdirSync(entities, { recursive: true });
+        writeFileSync(join(root, entityFile),
+            "import { pgSchema, serial, text } from 'drizzle-orm/pg-core';\n"
+            + "import { appPrivileges } from '@spfn/core/db';\n"
+            + "export const grantSchema = pgSchema('i405d_grant');\n"
+            + "export const outbox = appPrivileges(grantSchema.table('outbox', { id: serial('id').primaryKey(), status: text('status'), "
+            + `messageId: text('message_id'), body: text('body')${columns} }), ${outboxPrivileges});\n`);
+    }
+
+    const COLUMN_UPDATE = "{ select: true, insert: true, update: ['status', 'messageId'] }";
+
+    /**
+     * The entities push loads: `stamped`, a `timestamps()` table with a GENERATED
+     * ALWAYS identity and a generated column, declaring `stampedPrivileges`.
+     */
+    function writeStamped(stampedPrivileges: string): void
+    {
+        const entities = join(root, 'src', 'server', 'entities');
+
+        entityFile = './src/server/entities/stamped.entity.ts';
+        mkdirSync(entities, { recursive: true });
+        writeFileSync(join(root, entityFile),
+            "import { sql } from 'drizzle-orm';\n"
+            + "import { integer, pgSchema, text } from 'drizzle-orm/pg-core';\n"
+            + "import { appPrivileges, timestamps } from '@spfn/core/db';\n"
+            + "export const grantSchema = pgSchema('i405d_grant');\n"
+            + "export const stamped = appPrivileges(grantSchema.table('stamped', { id: integer('id').primaryKey().generatedAlwaysAsIdentity(), "
+            + "status: text('status'), body: text('body'), shout: text('shout').generatedAlwaysAs(sql`upper(body)`), ...timestamps() }), "
+            + `${stampedPrivileges});\n`);
+    }
+
+    /** What the app role may do on `i405d_grant.outbox`, statement by statement. */
+    async function outboxWrites(): Promise<Record<string, string>>
+    {
+        return {
+            insert: await asApp("INSERT INTO i405d_grant.outbox (status, message_id, body) VALUES ('new', 'm1', 'b')"),
+            status: await asApp("UPDATE i405d_grant.outbox SET status = 'sent'"),
+            messageId: await asApp("UPDATE i405d_grant.outbox SET message_id = 'm2'"),
+            body: await asApp("UPDATE i405d_grant.outbox SET body = 'rewritten'"),
+        };
+    }
+
+    const DECLARED_WRITES = { insert: 'ok', status: 'ok', messageId: 'ok', body: '42501' };
 
     /** The function package, its migration creating `things`, its manifest declaring it read-only. */
     function writePackage(): void
@@ -425,7 +527,7 @@ describe('the app privileges step', () =>
         await dbStatus({ json: true });
 
         const line = output.find(entry => entry.startsWith(DB_STATUS_JSON_MARKER)) ?? '';
-        const unchanged = { kind: 'table', through: null, missing: [], excess: [], grantOption: [], columns: [] };
+        const unchanged = { kind: 'table', through: null, missing: [], excess: [], grantOption: [], columns: [], missingColumns: [], columnGrantOption: [] };
 
         expect(JSON.parse(line.slice(DB_STATUS_JSON_MARKER.length)).privileges).toEqual({
             checked: true,
@@ -441,6 +543,7 @@ describe('the app privileges step', () =>
             publicGrantsByOthers: [],
             heldElsewhere: [],
             schemaHeldElsewhere: [],
+            absentColumns: [],
             ownedSchemas: [],
             publicMayCreateInPublic: false,
             readRole: { checked: true },
@@ -472,7 +575,7 @@ describe('the app privileges step', () =>
         const line = output.find(entry => entry.startsWith(DB_STATUS_JSON_MARKER)) ?? '';
 
         expect(JSON.parse(line.slice(DB_STATUS_JSON_MARKER.length)).privileges.drift)
-            .toEqual([{ schema: 'i405d_grant', table: 'events_t1', kind: 'table', grantee: appRole, through: null, missing: [], excess: ['select'], grantOption: [], columns: [] }]);
+            .toEqual([{ schema: 'i405d_grant', table: 'events_t1', kind: 'table', grantee: appRole, through: null, missing: [], excess: ['select'], grantOption: [], columns: [], missingColumns: [], columnGrantOption: [] }]);
         await expectStatusAgreesWithDryRun();
 
         output.length = 0;
@@ -808,7 +911,7 @@ describe('the app privileges step', () =>
         expect(status.text).not.toContain('holds what is declared');
         expect(status.text).toContain('i405d_grant.notes: WITH GRANT OPTION on SELECT');
         expect(status.drift).toEqual([
-            { schema: 'i405d_grant', table: 'notes', kind: 'table', grantee: appRole, through: null, missing: [], excess: [], grantOption: ['select'], columns: [] },
+            { schema: 'i405d_grant', table: 'notes', kind: 'table', grantee: appRole, through: null, missing: [], excess: [], grantOption: ['select'], columns: [], missingColumns: [], columnGrantOption: [] },
         ]);
         await expectStatusAgreesWithDryRun();
     });
@@ -818,9 +921,9 @@ describe('the app privileges step', () =>
         const status = await statusAfter(`GRANT UPDATE (amount) ON i405d_grant.ledger TO "${appRole}"`);
 
         expect(status.text).not.toContain('holds what is declared');
-        expect(status.text).toContain('i405d_grant.ledger: column grants UPDATE (amount)');
+        expect(status.text).toContain('i405d_grant.ledger: column grants beyond the declaration UPDATE (amount)');
         expect(status.drift).toEqual([
-            { schema: 'i405d_grant', table: 'ledger', kind: 'table', grantee: appRole, through: null, missing: [], excess: [], grantOption: [], columns: ['update (amount)'] },
+            { schema: 'i405d_grant', table: 'ledger', kind: 'table', grantee: appRole, through: null, missing: [], excess: [], grantOption: [], columns: ['update (amount)'], missingColumns: [], columnGrantOption: [] },
         ]);
         await expectStatusAgreesWithDryRun();
     });
@@ -906,12 +1009,225 @@ describe('the app privileges step', () =>
         expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [], schemaDrift: [] });
         await expectStatusAgreesWithDryRun();
     });
+
+    it('P26 (#460) a column-limited UPDATE: the app inserts and updates the declared columns only; a hand column grant is revoked; the issue\'s hand SQL is a database with nothing to change', async () =>
+    {
+        writeOutbox(COLUMN_UPDATE);
+        await push();
+
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+        expect(await held('i405d_grant.outbox')).toEqual(['SELECT', 'INSERT']);
+
+        await owner.unsafe(`GRANT UPDATE (body) ON i405d_grant.outbox TO "${appRole}"`);
+        output.length = 0;
+        await dbGrant();
+
+        expect(output.join('\n')).toContain(`REVOKE UPDATE ("body") ON TABLE "i405d_grant"."outbox" FROM "${appRole}";`);
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+
+        await owner.unsafe(`REVOKE ALL ON i405d_grant.outbox FROM "${appRole}"`);
+        await owner.unsafe(`GRANT SELECT, INSERT ON i405d_grant.outbox TO "${appRole}"`);
+        await owner.unsafe(`GRANT UPDATE (status, message_id) ON i405d_grant.outbox TO "${appRole}"`);
+        output.length = 0;
+        await dbGrant({ dryRun: true });
+
+        expect(output.filter(line => /^\s*(GRANT|REVOKE) /.test(line))).toEqual([]);
+        expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [] });
+        await expectStatusAgreesWithDryRun();
+    });
+
+    it('P27 (#460) switching UPDATE from table-wide to a column list revokes the table-level grant and keeps the declared columns', async () =>
+    {
+        writeOutbox("['select', 'insert', 'update']");
+        await push();
+
+        expect(await outboxWrites()).toEqual({ ...DECLARED_WRITES, body: 'ok' });
+
+        writeOutbox(COLUMN_UPDATE);
+        output.length = 0;
+        await push();
+
+        expect(await held('i405d_grant.outbox')).toEqual(['SELECT', 'INSERT']);
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+    });
+
+    it('P28 (#460) db status reports a missing column grant, and a table-level UPDATE over a column list, as db grant changes them; migrate applies a version 2 manifest', async () =>
+    {
+        writeProjectMigrations(OUTBOX_SQL, []);
+        writeFileSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'), outboxManifest());
+        await dbMigrate();
+
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+
+        await owner.unsafe(`REVOKE UPDATE (status) ON i405d_grant.outbox FROM "${appRole}"`);
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).not.toContain('holds what is declared');
+        expect(output.join('\n')).toContain('as the owner, run: pnpm spfn db grant');
+        expect(output.join('\n')).toContain('i405d_grant.outbox: missing column grants UPDATE (status)');
+        expect((await statusPrivileges()).drift).toEqual([
+            { schema: 'i405d_grant', table: 'outbox', kind: 'table', grantee: appRole, through: null, missing: [], excess: [], grantOption: [], columns: [],
+                missingColumns: ['update (status)'], columnGrantOption: [] },
+        ]);
+        await expectStatusAgreesWithDryRun();
+
+        await owner.unsafe(`GRANT UPDATE ON i405d_grant.outbox TO "${appRole}"`);
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox: UPDATE table-wide where the declaration lists columns (message_id, status)');
+        expect(output.join('\n')).not.toContain('missing column grants');
+        expect((await statusPrivileges()).drift).toMatchObject([
+            { table: 'outbox', excess: ['update'], missingColumns: ['update (message_id)', 'update (status)'] },
+        ]);
+        await expectStatusAgreesWithDryRun();
+
+        process.env.DATABASE_OWNER_URL = OWNER_URL;
+        await dbGrant();
+
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+        expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [] });
+    });
+
+    it('P29 (rv462 B1) lists drizzle\'s statements keep to, on a timestamps() table: the app inserts and updates through drizzle, and nothing else', async () =>
+    {
+        writeStamped("{ select: true, insert: ['status', 'body', 'createdAt', 'updatedAt'], update: ['status', 'updatedAt'] }");
+        await push();
+
+        const { stamped } = await import(join(root, entityFile));
+        const appDb = drizzle({ client: app });
+        const sqlState = (query: Promise<unknown>) => query.then(() => 'ok', (error: { cause?: { code?: string } }) => error.cause?.code ?? String(error));
+
+        expect({
+            insert: await sqlState(appDb.insert(stamped).values({ status: 'new', body: 'b' })),
+            status: await sqlState(appDb.update(stamped).set({ status: 'sent' })),
+            body: await sqlState(appDb.update(stamped).set({ body: 'rewritten' })),
+        }).toEqual({ insert: 'ok', status: 'ok', body: '42501' });
+        expect(await statusPrivileges()).toMatchObject({ checked: true, drift: [] });
+    });
+
+    it('P30 (rv462 N1) a declared column grant held WITH GRANT OPTION: status reports it, db grant revokes the option and keeps the grant', async () =>
+    {
+        writeProjectMigrations(OUTBOX_SQL, []);
+        writeFileSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'), outboxManifest());
+        await dbMigrate();
+        await owner.unsafe(`GRANT UPDATE (status) ON i405d_grant.outbox TO "${appRole}" WITH GRANT OPTION`);
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox: WITH GRANT OPTION on column grants UPDATE (status)');
+        expect((await statusPrivileges()).drift).toMatchObject([{ table: 'outbox', grantee: appRole, columnGrantOption: ['update (status)'] }]);
+        await expectStatusAgreesWithDryRun();
+
+        await dbGrant();
+
+        const [status] = await owner`
+            SELECT has_column_privilege(${appRole}::name, 'i405d_grant.outbox'::regclass, 'status', 'UPDATE WITH GRANT OPTION') AS "grantOption"`;
+
+        expect(status.grantOption).toBe(false);
+        expect(await outboxWrites()).toEqual(DECLARED_WRITES);
+    });
+
+    it('P31 (rv462 N4) a declared column the table does not have: migrate and db grant refuse before any statement, naming it; status reports it as that', async () =>
+    {
+        writeProjectMigrations(OUTBOX_SQL, []);
+        writeFileSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'), outboxManifest(['message_id', 'sent_at', 'status']));
+
+        await expect(dbMigrate()).rejects.toThrow('exit 1');
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox has no column sent_at. Run the migration that adds them first');
+        expect(output.filter(line => /^\s*(GRANT|REVOKE) /.test(line))).toEqual([]);
+        expect(await held('i405d_grant.outbox')).toEqual([]);
+
+        await owner.unsafe('ALTER TABLE i405d_grant.outbox ADD COLUMN sent_at timestamptz');
+        await dbGrant();
+        await owner.unsafe('ALTER TABLE i405d_grant.outbox RENAME COLUMN status TO state');
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox has no column status, which its declaration lists — spfn db grant refuses');
+        expect(output.join('\n')).not.toContain('missing column grants');
+        expect(await statusPrivileges()).toMatchObject({
+            absentColumns: [{ schema: 'i405d_grant', table: 'outbox', columns: ['status'] }],
+            drift: [{ table: 'outbox', columns: ['update (state)'], missingColumns: [] }],
+        });
+        await expectStatusAgreesWithDryRun();
+        output.length = 0;
+
+        await expect(dbGrant()).rejects.toThrow('exit 1');
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox has no column status. Run the migration that adds them first');
+        expect(await asApp("UPDATE i405d_grant.outbox SET state = 'sent'")).toBe('ok');
+
+        await owner.unsafe('ALTER TABLE i405d_grant.outbox RENAME COLUMN state TO status');
+        await owner.unsafe('ALTER TABLE i405d_grant.outbox DROP COLUMN sent_at');
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox has no column sent_at, which its declaration lists');
+        expect(output.join('\n')).not.toContain('holds what is declared');
+        expect(await statusPrivileges()).toMatchObject({ absentColumns: [{ schema: 'i405d_grant', table: 'outbox', columns: ['sent_at'] }], drift: [] });
+        await expectStatusAgreesWithDryRun();
+    });
+
+    it('P32 (rv462b Opus 1) push --dry-run on an entity that adds a column to a list reports a new column, not a refusal', async () =>
+    {
+        writeOutbox(COLUMN_UPDATE);
+        await push();
+        writeOutbox("{ select: true, insert: true, update: ['status', 'messageId', 'sentAt'] }", ", sentAt: text('sent_at')");
+        output.length = 0;
+
+        await push(true);
+
+        expect(output.join('\n')).toContain('+ column grants on 1 new column(s)');
+        expect(output.join('\n')).not.toContain('❌');
+    });
+
+    it('P33 (rv462b Codex) a single role that owns its tables, a listed column absent: status reports it, db grant --dry-run and db grant refuse', async () =>
+    {
+        const [{ owner: ownerRole }] = await owner`SELECT current_user AS owner`;
+        const refusal = 'The declarations list columns the database does not have: i405d_grant.outbox has no column sent_at. Run the migration';
+
+        process.env.DATABASE_URL = OWNER_URL;
+        delete process.env.DATABASE_OWNER_URL;
+        writeProjectMigrations(OUTBOX_SQL, []);
+        writeFileSync(join(root, 'src', 'server', 'drizzle', 'privileges.json'), outboxManifest(['message_id', 'sent_at', 'status']));
+        await dbMigrate();
+        output.length = 0;
+        await dbStatus();
+
+        expect(output.join('\n')).toContain('i405d_grant.outbox has no column sent_at, which its declaration lists');
+        expect(await statusPrivileges()).toMatchObject({ absentColumns: [{ schema: 'i405d_grant', table: 'outbox', columns: ['sent_at'] }] });
+        await expectStatusAgreesWithDryRun(OWNER_URL, ownerRole);
+
+        process.env.DATABASE_OWNER_URL = OWNER_URL;
+        output.length = 0;
+        await dbGrant({ dryRun: true });
+
+        expect(output.join('\n')).toContain(`❌ ${refusal}`);
+
+        output.length = 0;
+        await expect(dbGrant()).rejects.toThrow('exit 1');
+
+        expect(output.join('\n')).toContain(refusal);
+    });
 });
 
 /** The fields of `db status --json`'s `privileges` that I1 compares. */
 interface StatusPrivileges
 {
-    drift: { schema: string; table: string; grantee: string | null; missing: string[]; excess: string[]; grantOption: string[]; columns: string[] }[];
+    drift: {
+        schema: string;
+        table: string;
+        grantee: string | null;
+        missing: string[];
+        excess: string[];
+        grantOption: string[];
+        columns: string[];
+        missingColumns: string[];
+        columnGrantOption: string[];
+    }[];
     schemasWithoutUsage: string[];
     schemaDrift: { schema: string; grantee: string | null; excess: string[]; grantOption: string[] }[];
     publicGrantsByOthers: { schema: string; table: string; privilege: string }[];
@@ -931,7 +1247,14 @@ function statusEntries(privileges: StatusPrivileges, appRole: string): string[]
         {
             const of = (kind: string, list: string[]) => entries(kind, `${entry.schema}.${entry.table}`, entry.grantee ?? 'PUBLIC', list);
 
-            return [...of('GRANT', entry.missing), ...of('REVOKE', entry.excess), ...of('REVOKE GRANT OPTION FOR', entry.grantOption), ...of('REVOKE', entry.columns)];
+            return [
+                ...of('GRANT', entry.missing),
+                ...of('REVOKE', entry.excess),
+                ...of('REVOKE GRANT OPTION FOR', entry.grantOption),
+                ...of('REVOKE', entry.columns),
+                ...of('GRANT', entry.missingColumns),
+                ...of('REVOKE GRANT OPTION FOR', entry.columnGrantOption),
+            ];
         }),
         ...privileges.schemasWithoutUsage.flatMap(schema => entries('GRANT', `schema ${schema}`, appRole, ['usage'])),
         ...privileges.schemaDrift.flatMap(entry => [

@@ -209,7 +209,7 @@ export async function grantAppPrivileges(db: PushConnection['db'], target: AppPr
 
     if (!options.dryRun && !run.applied)
     {
-        throw new AppGrantRefusal(notAppliedReason(run, roles));
+        throw new AppGrantRefusal(notAppliedReason(run, roles, options));
     }
 }
 
@@ -288,7 +288,8 @@ function printRoles(roles: GrantRoles): void
 
 /**
  * The statements, then what the plan reports; a summary line for a run that
- * applied it. An app role that is the owner, or inherits it, gets its note alone.
+ * applied it. An app role that is the owner, or inherits it, gets its note
+ * and, on a dry run, what stops the step.
  */
 function printRun(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOptions): void
 {
@@ -303,6 +304,8 @@ function printRun(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOp
 
     if (plan.ownerRoles.includes(app))
     {
+        printNotAppliedReason(run, roles, options);
+
         return;
     }
 
@@ -377,30 +380,55 @@ function printReports(run: AppPrivilegesRun, roles: GrantRoles, options: GrantSt
             : `   ${plan.absentTables.length} declared table(s) do not exist, ignored: ${plan.absentTables.map(entry => `${entry.schema}.${entry.table}`).join(', ')}`));
     }
 
+    if (options.schemaPending && plan.absentColumns.length > 0)
+    {
+        console.log(chalk.dim(`   + column grants on ${plan.absentColumns.flatMap(entry => entry.columns).length} new column(s)`));
+    }
+
     if (plan.publicMayCreateInPublic)
     {
         console.log(chalk.yellow('   ⚠️  PUBLIC may CREATE in schema public (PostgreSQL before 15): any role, the app\'s too, can create — and so own — '
             + 'tables there. Not revoked; as the database owner: REVOKE CREATE ON SCHEMA public FROM PUBLIC;'));
     }
 
-    if (options.dryRun && (plan.blocked || run.refused))
+    printNotAppliedReason(run, roles, options);
+}
+
+/** On a dry run, what stops the step. */
+function printNotAppliedReason(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOptions): void
+{
+    const reason = options.dryRun ? notAppliedReason(run, roles, options) : '';
+
+    if (reason !== '')
     {
-        console.log(chalk.red(`   ❌ ${notAppliedReason(run, roles)}`));
+        console.log(chalk.red(`   ❌ ${reason}`));
     }
 }
 
 /**
  * Why a run applied nothing: each role name that is no role, each relation
  * the owner cannot grant on, each schema it cannot open, each grant to PUBLIC
- * another role made, a queue schema that is also a managed one — or the
- * statement PostgreSQL refused.
+ * another role made, a declared column the database does not have — unless
+ * the schema changes that add it are pending — a queue schema that is also a
+ * managed one, or the statement PostgreSQL refused. Empty when nothing stops it.
  */
-function notAppliedReason(run: AppPrivilegesRun, roles: GrantRoles): string
+function notAppliedReason(run: AppPrivilegesRun, roles: GrantRoles, options: GrantStepOptions): string
 {
     const { plan } = run;
 
-    return [missingRolesReason(plan, roles), ownershipReason(plan), publicGrantsReason(plan), queueSchemaReason(plan), run.refused && refusalReason(run.refused)]
+    return [missingRolesReason(plan, roles), ownershipReason(plan), publicGrantsReason(plan), options.schemaPending ? '' : absentColumnsReason(plan),
+        queueSchemaReason(plan), run.refused && refusalReason(run.refused)]
         .filter(Boolean).join('\n   ');
+}
+
+/** Each table and the declared columns it does not have: the migration that adds them runs first, or the manifest is stale. */
+function absentColumnsReason(plan: AppPrivilegesRun['plan']): string
+{
+    const tables = plan.absentColumns.map(entry => `${entry.schema}.${entry.table} has no column ${entry.columns.join(', ')}`);
+
+    return tables.length === 0 ? '' : `The declarations list columns the database does not have: ${tables.join('; ')}. `
+        + 'Run the migration that adds them first (spfn db migrate, or spfn db push), then spfn db grant; for a renamed column, '
+        + 'regenerate the manifest (spfn db generate) and migrate.';
 }
 
 /** A queue schema that is also a managed one (`managedQueueSchemaReason`). */

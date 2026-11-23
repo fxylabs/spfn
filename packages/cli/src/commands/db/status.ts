@@ -83,8 +83,14 @@ export interface DbStatusReportV1
  * of (the read role), whose grants it holds too, with `through`; or `null` for
  * PUBLIC, likewise: `missing` (declared, not held), `excess` (held, not
  * declared; a lost restriction), `grantOption` (declared, and held `WITH GRANT
- * OPTION`, so the app can pass it on) and `columns` (column grants, never
- * declared: `update (amount)`). `schemasWithoutUsage` are the managed schemas
+ * OPTION`, so the app can pass it on), `columns` (column grants not
+ * declared: `update (amount)`), `missingColumns` (declared column grants `db
+ * grant` grants: `update (status)`) and `columnGrantOption` (declared column grants held
+ * `WITH GRANT OPTION`). A table declared with a column list where the app
+ * holds the privilege table-level has it in `excess` and the declared columns
+ * in `missingColumns`, held or not: `db grant` revokes the one, which takes
+ * them, and grants the others; the human form says "table-wide" there.
+ * `schemasWithoutUsage` are the managed schemas
  * the app role cannot use. `schemaDrift` is what `db grant` would revoke on a
  * managed schema, per schema and grantee as `drift`: `excess` (held beyond
  * USAGE: CREATE, with which the app creates — and owns — tables there) and
@@ -99,7 +105,12 @@ export interface DbStatusReportV1
  * declarations as a member of a role `db grant` does not plan for or from
  * another grantor than the owner, which `db grant` reports and does not change;
  * `schemaHeldElsewhere` the same on a schema beyond USAGE (`through` may also
- * be `granted to PUBLIC by <role>`). `ownedSchemas` names the managed schemas
+ * be `granted to PUBLIC by <role>`). `absentColumns` are the columns a
+ * table's column lists name that the table does not have — the migration that
+ * adds them not run, or a column renamed under the manifest — which `db grant`
+ * refuses, granting nothing, until they exist; they are in no `missingColumns`,
+ * and are looked for on every table, one the app owns too.
+ * `ownedSchemas` names the managed schemas
  * the app role owns or inherits the owner of, where `db grant` has no
  * statement for it and what it holds is not compared; with a read role, what
  * PUBLIC and the read role hold there is, as on any schema.
@@ -131,12 +142,15 @@ export type DbStatusPrivileges =
             excess: string[];
             grantOption: string[];
             columns: string[];
+            missingColumns: string[];
+            columnGrantOption: string[];
         }[];
         schemasWithoutUsage: string[];
         schemaDrift: { schema: string; grantee: string | null; through: string | null; excess: string[]; grantOption: string[] }[];
         publicGrantsByOthers: { schema: string; table: string; privilege: string; grantor: string; statement: string }[];
         heldElsewhere: { schema: string; table: string; privilege: string; through: string }[];
         schemaHeldElsewhere: { schema: string; privilege: string; through: string }[];
+        absentColumns: { schema: string; table: string; columns: string[] }[];
         ownedSchemas: string[];
         publicMayCreateInPublic: boolean;
         readRole: { checked: true } | { checked: false; detail: string };
@@ -202,12 +216,15 @@ function privilegesReport(privileges: AppPrivilegesStatus): DbStatusPrivileges
             excess: [...entry.excess],
             grantOption: [...entry.grantOption],
             columns: [...entry.columns],
+            missingColumns: [...entry.missingColumns],
+            columnGrantOption: [...entry.columnGrantOption],
         })),
         schemasWithoutUsage: [...privileges.schemasWithoutUsage],
         schemaDrift: privileges.schemaDrift.map(entry => ({ ...entry, excess: [...entry.excess], grantOption: [...entry.grantOption] })),
         publicGrantsByOthers: privileges.publicGrantsByOthers.map(entry => ({ ...entry })),
         heldElsewhere: privileges.heldElsewhere.map(entry => ({ ...entry })),
         schemaHeldElsewhere: privileges.schemaHeldElsewhere.map(entry => ({ ...entry })),
+        absentColumns: privileges.absentColumns.map(entry => ({ ...entry, columns: [...entry.columns] })),
         ownedSchemas: [...privileges.ownedSchemas],
         publicMayCreateInPublic: privileges.publicMayCreateInPublic,
         readRole: { ...privileges.readRole },
@@ -432,10 +449,11 @@ function printMigrationTargets(targets: ReturnType<typeof migrationTargets>): vo
 
 /**
  * The app role's privileges against the declarations: what `db grant` would
- * change, the grants to PUBLIC that block it, what it holds another way, the
- * tables and schemas it owns, a read role it could not look up, PUBLIC CREATE on public.
- * "Holds what is declared" only when there is none of the first three and the
- * read role was looked up.
+ * change, the declared columns the database lacks and the grants to PUBLIC
+ * that block it, what it holds another way, the tables and schemas it owns, a
+ * read role it could not look up, PUBLIC CREATE on public. "Holds what is
+ * declared" only when there is none of the first four and the read role was
+ * looked up.
  */
 function printPrivileges(privileges: AppPrivilegesStatus): void
 {
@@ -459,6 +477,9 @@ function printPrivileges(privileges: AppPrivilegesStatus): void
     }
 
     printGrantWork(privileges);
+    privileges.absentColumns.forEach(entry => console.log(chalk.yellow(`⚠️  ${entry.schema}.${entry.table} has no column ${entry.columns.join(', ')}, `
+        + 'which its declaration lists — spfn db grant refuses, granting nothing, until it exists: run the migration that adds it first '
+        + '(for a renamed column, regenerate the manifest with spfn db generate)')));
     privileges.publicGrantsByOthers.forEach(grant => console.log(chalk.yellow(`⚠️  PUBLIC holds ${privilegeText(grant.privilege)} on ${grant.schema}.${grant.table}, `
         + `granted by ${grant.grantor}, so the app role holds it too — spfn db grant is blocked until ${grant.grantor} runs: ${grant.statement};`)));
     privileges.heldElsewhere.forEach(held => console.log(chalk.yellow(`⚠️  The app role holds ${privilegeText(held.privilege)} on ${held.schema}.${held.table} `
@@ -491,7 +512,7 @@ function printReadRoleOrClean(privileges: Extract<AppPrivilegesStatus, { checked
     }
 
     if (privileges.drift.length + privileges.schemasWithoutUsage.length + privileges.schemaDrift.length + privileges.publicGrantsByOthers.length
-        + privileges.heldElsewhere.length + privileges.schemaHeldElsewhere.length === 0 && privileges.checkedTables > 0)
+        + privileges.heldElsewhere.length + privileges.schemaHeldElsewhere.length + privileges.absentColumns.length === 0 && privileges.checkedTables > 0)
     {
         console.log(chalk.green(`🔐 The app role holds what is declared on ${privileges.checkedTables} table(s)${privileges.ownedTables > 0 ? ' it does not own' : ''}`));
     }
@@ -518,15 +539,29 @@ function granteeText(entry: Pick<AppPrivilegeDrift, 'grantee' | 'through'>): str
     return entry.grantee === null ? ' (PUBLIC)' : entry.through === null ? '' : ` (${entry.through})`;
 }
 
+/**
+ * What differs, in words. A privilege held table-wide where its declaration
+ * lists columns is said so: its declared column grants are in
+ * `missingColumns` because the REVOKE `db grant` runs first takes them, held
+ * or not, so "missing" would misread what the app holds now.
+ */
 function driftText(entry: AppPrivilegeDrift): string
 {
     const list = (privileges: readonly string[]) => privileges.map(privilegeText).join(', ');
+    const columnsOf = (privilege: string) => entry.missingColumns.filter(grant => grant.startsWith(`${privilege} (`));
+    const tableWide = entry.excess.filter(privilege => columnsOf(privilege).length > 0);
+    const excess = entry.excess.filter(privilege => !tableWide.includes(privilege));
+    const missingColumns = entry.missingColumns.filter(grant => !tableWide.some(privilege => columnsOf(privilege).includes(grant)));
 
     return [
         entry.missing.length > 0 && `missing ${list(entry.missing)}`,
-        entry.excess.length > 0 && `beyond the declaration ${list(entry.excess)}`,
+        excess.length > 0 && `beyond the declaration ${list(excess)}`,
+        ...tableWide.map(privilege => `${privilegeText(privilege)} table-wide where the declaration lists columns `
+            + `(${columnsOf(privilege).map(grant => grant.slice(privilege.length + 2, -1)).join(', ')})`),
         entry.grantOption.length > 0 && `WITH GRANT OPTION on ${list(entry.grantOption)}`,
-        entry.columns.length > 0 && `column grants ${list(entry.columns)}`,
+        entry.columns.length > 0 && `column grants beyond the declaration ${list(entry.columns)}`,
+        missingColumns.length > 0 && `missing column grants ${list(missingColumns)}`,
+        entry.columnGrantOption.length > 0 && `WITH GRANT OPTION on column grants ${list(entry.columnGrantOption)}`,
     ].filter(Boolean).join('; ');
 }
 

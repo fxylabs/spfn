@@ -11,7 +11,7 @@
  * | Object | App role | Read role (another role than the app's) | PUBLIC |
  * |---|---|---|---|
  * | schema | USAGE, nothing else | USAGE, except `drizzle`; nothing else | USAGE untouched; nothing else, except on `public` |
- * | table, foreign table | its declared set, else the default | `select` when the set has it | nothing |
+ * | table, foreign table | its declared set and column lists, else the default | `select` when the set has it, else its `select` column list | nothing |
  * | view | `select`; the default when every write through it is checked as the app | `select` | nothing |
  * | materialized view | `select` | `select` | nothing |
  * | sequence | USAGE | nothing | nothing |
@@ -63,10 +63,18 @@
  * would get round both, so all of it is revoked.
  *
  * "Brought to" counts the grants the table's owner gave the role itself:
- * missing ones are granted, any other is revoked, column grants included (a
- * declaration is table-level, so no column grant is declared), and so is the
- * grant option of a privilege it keeps (`REVOKE GRANT OPTION FOR`): a
- * declared set never carries one. What the role holds another way — as a
+ * missing ones are granted, any other is revoked, and so is the grant option
+ * of a privilege it keeps (`REVOKE GRANT OPTION FOR`): a declared set never
+ * carries one. That holds per column too. A column list (`update: ['status']`)
+ * is compared with the column grants (`pg_attribute.attacl`) and never with
+ * `information_schema.column_privileges`, which lists a table-level grant on
+ * every column: a column grant not declared is revoked, a declared one
+ * missing is granted. A table-level grant of a privilege declared on columns
+ * would cover every column, so it is revoked, and since PostgreSQL's
+ * table-level REVOKE takes the column grants of that privilege with it, the
+ * declared ones are granted after it, in the same transaction. The read role
+ * gets the app's `select` column list where `select` is declared on columns;
+ * a partition, a view, `drizzle` and the queue schema get no column grant. What the role holds another way — as a
  * member of a role holding it, or from a grantor other than the owner, whose
  * grant the owner's REVOKE leaves in place — is reported, never revoked: the
  * step does not change other roles. A grant to another planned role (the app
@@ -122,11 +130,14 @@
  * the owner role brings it under the plan. A role name that is no
  * role (`missingRoles`), a relation another role owns, a schema the role
  * cannot use and the owner cannot grant, a schema the owner cannot revoke
- * on (`foreignOwnedSchemas`), or a queue schema that is also a managed one,
- * blocks the plan (`blocked`): the caller applies none of it.
+ * on (`foreignOwnedSchemas`), a column a table's column lists name that the
+ * table does not have (`absentColumns`: the migration that adds it has not
+ * run, or it was renamed under the manifest — looked for on every table, as
+ * `absentTables` are, whoever owns it), or a queue schema that is also
+ * a managed one, blocks the plan (`blocked`): the caller applies none of it.
  */
 
-import { APP_PRIVILEGES, DEFAULT_APP_PRIVILEGES, type AppPrivilege, type AppTablePrivileges } from './declaration';
+import { APP_PRIVILEGES, DEFAULT_APP_PRIVILEGES, type AppColumnPrivileges, type AppPrivilege, type AppTablePrivileges } from './declaration';
 
 /** The schema of the migration bookkeeping, which the app reads and never writes. */
 export const BOOKKEEPING_SCHEMA = 'drizzle';
@@ -168,6 +179,8 @@ export interface CatalogRelation
     readonly owner: string;
     readonly grants: readonly CatalogGrant[];
     readonly columnGrants: readonly CatalogColumnGrant[];
+    /** Its columns' names, dropped ones aside; none for a function */
+    readonly columns: readonly string[];
 }
 
 /** A managed schema that exists, as one of the planned roles sees it. */
@@ -298,8 +311,19 @@ export interface GranteeChange
     readonly excess: readonly string[];
     /** In its set, held `WITH GRANT OPTION`: the option is revoked */
     readonly grantOption: readonly string[];
-    /** Column grants `excess` does not take with the table-level REVOKE: revoked */
-    readonly columns: readonly { readonly privilege: string; readonly column: string }[];
+    /** Column grants not in its column lists that `excess` does not take with the table-level REVOKE: revoked */
+    readonly columns: readonly ColumnGrant[];
+    /** In its column lists, on a column the relation has, not held once `excess` is revoked: granted, after the table-level REVOKE */
+    readonly missingColumns: readonly ColumnGrant[];
+    /** In its column lists, held `WITH GRANT OPTION` and kept: the option is revoked */
+    readonly columnGrantOption: readonly ColumnGrant[];
+}
+
+/** A privilege on one column. */
+export interface ColumnGrant
+{
+    readonly privilege: string;
+    readonly column: string;
 }
 
 /**
@@ -329,6 +353,14 @@ export interface ForeignOwnedSchema
 {
     readonly schema: string;
     readonly owner: string;
+}
+
+/** The columns a table's column lists name that the table does not have. */
+export interface AbsentColumns
+{
+    readonly schema: string;
+    readonly table: string;
+    readonly columns: readonly string[];
 }
 
 /** A privilege beyond USAGE a planned role holds on a managed schema that the owner's REVOKE does not take back. */
@@ -388,6 +420,8 @@ export interface AppPrivilegesPlan
     readonly grantsByOthers: readonly RevokeGrantsByOthers[];
     /** Declared tables of a managed schema the catalog does not hold */
     readonly absentTables: readonly { readonly schema: string; readonly table: string }[];
+    /** Columns a table's column lists name that the table does not have — a migration not run, or a column renamed under the manifest: they block the plan, and are never granted nor counted as missing grants */
+    readonly absentColumns: readonly AbsentColumns[];
     /** Schemas a planned role cannot use and the owner cannot grant */
     readonly ungrantableSchemas: readonly { readonly schema: string; readonly role: string }[];
     /** The relations of `schemas` the owner cannot grant on: they block the plan */
@@ -395,7 +429,7 @@ export interface AppPrivilegesPlan
     /** Schemas with something to revoke that the owner cannot revoke on: they block the plan */
     readonly foreignOwnedSchemas: readonly ForeignOwnedSchema[];
     readonly publicMayCreateInPublic: boolean;
-    /** Whether a missing role, a foreign-owned relation or schema, an ungrantable schema, a grant to PUBLIC by another role or a queue schema that is also a managed one forbids applying it; a queue the owner cannot grant on does not */
+    /** Whether a missing role, a foreign-owned relation or schema, an ungrantable schema, a grant to PUBLIC by another role, an absent declared column or a queue schema that is also a managed one forbids applying it; a queue the owner cannot grant on does not */
     readonly blocked: boolean;
     /** The queue's part, when the target has one */
     readonly queue?: QueuePlan;
@@ -428,7 +462,9 @@ export function planAppPrivileges(fullCatalog: PrivilegeCatalog, target: AppPriv
     const ownerRoles = catalog.roles.filter(role => role.inheritsOwner).map(role => role.name);
     const planned = ownerRoles.includes(roles.app) || catalog.missingRoles.length > 0 ? [] : catalog.roles.filter(role => !role.inheritsOwner);
     const schemaPlans = planSchemas(catalog.schemas.filter(schema => planned.some(role => role.name === schema.role)), planned, roles, target.queue?.schema);
-    const relationPlans = planned.length === 0 ? [] : planRelations(catalog, planned, desiredPrivileges(target, roles));
+    const desired = desiredPrivileges(target, roles);
+    const relationPlans = planned.length === 0 ? [] : planRelations(catalog, planned, desired);
+    const absent = absentColumns(catalog, relation => desired(relation, roles.app));
     const foreignOwned = planned.length === 0 ? [] : catalog.foreignOwned;
     const ungrantableSchemas = schemaPlans.flatMap(plan => plan.ungrantable);
     const foreignOwnedSchemas = schemaPlans.flatMap(plan => plan.foreignOwned);
@@ -447,12 +483,13 @@ export function planAppPrivileges(fullCatalog: PrivilegeCatalog, target: AppPriv
         publicGrantsByOthers: relationPlans.flatMap(plan => plan.publicGrantsByOthers),
         grantsByOthers: [...schemaPlans, ...relationPlans].flatMap(plan => plan.grantsByOthers),
         absentTables: absentTables(catalog, target, queue),
+        absentColumns: absent,
         ungrantableSchemas,
         foreignOwned,
         foreignOwnedSchemas,
         publicMayCreateInPublic: catalog.publicMayCreateInPublic,
         blocked: catalog.missingRoles.length > 0 || foreignOwned.length > 0 || ungrantableSchemas.length > 0 || foreignOwnedSchemas.length > 0
-            || relationPlans.some(plan => plan.publicGrantsByOthers.length > 0) || queue?.managedSchema === true,
+            || relationPlans.some(plan => plan.publicGrantsByOthers.length > 0) || absent.length > 0 || queue?.managedSchema === true,
         ...(queue === undefined ? {} : { queue }),
     };
 }
@@ -517,37 +554,59 @@ function planRelations(
         .map(relation => planRelation(relation, planned, desired));
 }
 
+/** What a role is brought to on a relation: its table-level set and its column lists. */
+interface Wanted
+{
+    readonly privileges: readonly string[];
+    readonly columns: AppColumnPrivileges;
+}
+
 /** What `role` is brought to on `relation`; `null` for PUBLIC. */
-type DesiredPrivileges = (relation: CatalogRelation, role: string | null) => readonly string[];
+type DesiredPrivileges = (relation: CatalogRelation, role: string | null) => Wanted;
+
+const NO_COLUMNS: AppColumnPrivileges = Object.freeze({});
 
 /** The tables above, as a function of relation and role. */
 function desiredPrivileges(target: AppPrivilegesTarget, roles: AppRoles): DesiredPrivileges
 {
     const declared = new Map(target.tables.map(entry => [relationKey(entry.schema, entry.table), entry.privileges]));
+    const declaredColumns = new Map(target.tables.map(entry => [relationKey(entry.schema, entry.table), entry.columns ?? NO_COLUMNS]));
+    const tableLevel = (privileges: readonly string[]) => ({ privileges, columns: NO_COLUMNS });
 
     return (relation, role) =>
     {
         if (relation.schema === target.queue?.schema)
         {
-            return role === roles.app ? queuePrivileges(relation) : [];
+            return tableLevel(role === roles.app ? queuePrivileges(relation) : []);
         }
 
         const bookkeeping = relation.schema === BOOKKEEPING_SCHEMA;
 
         if (role === null || (relation.kind === 'sequence' && (bookkeeping || role !== roles.app)))
         {
-            return [];
+            return tableLevel([]);
         }
 
         if (relation.kind === 'sequence')
         {
-            return ['usage'];
+            return tableLevel(['usage']);
         }
 
         const tableSet = appRelationPrivileges(target, relation, declared);
+        const columns = tableColumns(relation, declaredColumns);
 
-        return role === roles.app ? tableSet : bookkeeping ? [] : tableSet.filter(privilege => privilege === 'select');
+        return role === roles.app ? { privileges: tableSet, columns }
+            : bookkeeping ? tableLevel([])
+                : { privileges: tableSet.filter(privilege => privilege === 'select'), columns: columns.select === undefined ? NO_COLUMNS : { select: columns.select } };
     };
+}
+
+/** A table's declared column lists: none on a partition, a view, a materialized view or in `drizzle`. */
+function tableColumns(relation: CatalogRelation, declared: ReadonlyMap<string, AppColumnPrivileges>): AppColumnPrivileges
+{
+    const listed = relation.kind === 'table' && !relation.partition && relation.schema !== BOOKKEEPING_SCHEMA;
+
+    return listed ? declared.get(relationKey(relation.schema, relation.name)) ?? NO_COLUMNS : NO_COLUMNS;
 }
 
 /**
@@ -580,8 +639,8 @@ function queuePrivileges(relation: CatalogRelation): readonly string[]
 export type AppRelation = Pick<CatalogRelation, 'schema' | 'name' | 'kind' | 'partition' | 'securityInvoker' | 'writeRule' | 'insteadOfTrigger'>;
 
 /**
- * The set the app role is brought to on a relation that is no sequence:
- * nothing on a partition; `select` in `drizzle`, on a materialized view and
+ * The table-level set the app role is brought to on a relation that is no
+ * sequence — its column lists aside: nothing on a partition; `select` in `drizzle`, on a materialized view and
  * on a view a write through which is not checked as the app; `target.defaults`
  * on one whose writes are; else the table's declaration in `target`, else
  * `target.defaults`. `declared` is `target.tables` by key, when the caller
@@ -807,15 +866,35 @@ function planRelation(relation: CatalogRelation, planned: readonly CatalogRole[]
 }
 
 /**
- * What `grantee` lacks of `wanted` from the owner, what else the owner gave
- * it, the grant option of what it keeps, and each column grant the
- * table-level REVOKE does not already take.
+ * Per relation of `catalog`, the columns the app's column lists (`wanted`)
+ * name that it does not have, whoever owns it — as `absentTables`, found
+ * apart from what is planned; the read role's lists are part of the app's.
  */
-function granteeChange(relation: CatalogRelation, grantee: string | null, wanted: readonly string[]): GranteeChange
+function absentColumns(catalog: PrivilegeCatalog, wanted: (relation: CatalogRelation) => Wanted): AbsentColumns[]
+{
+    return catalog.relations.flatMap(relation =>
+    {
+        const columns = [...new Set(wantedColumns(wanted(relation)).map(grant => grant.column))]
+            .filter(column => !relation.columns.includes(column))
+            .sort();
+
+        return columns.length === 0 ? [] : [{ schema: relation.schema, table: relation.name, columns }];
+    });
+}
+
+/**
+ * What `grantee` lacks of `wanted` from the owner, what else the owner gave
+ * it, the grant option of what it keeps; and per column the same, of the
+ * column grants the table-level REVOKE leaves: PostgreSQL's REVOKE of a
+ * table-level privilege takes that privilege's column grants with it.
+ */
+function granteeChange(relation: CatalogRelation, grantee: string | null, wanted: Wanted): GranteeChange
 {
     const fromOwner = (grant: CatalogGrant) => grant.grantee === grantee && grant.grantor === relation.owner;
     const held = new Set(relation.grants.filter(fromOwner).map(grant => grant.privilege));
-    const excess = [...held].filter(privilege => !wanted.includes(privilege));
+    const excess = [...held].filter(privilege => !wanted.privileges.includes(privilege));
+    const keptColumns = relation.columnGrants.filter(grant => fromOwner(grant) && !excess.includes(grant.privilege));
+    const declared = (grant: ColumnGrant) => wantsColumn(wanted, grant);
 
     return {
         schema: relation.schema,
@@ -823,19 +902,49 @@ function granteeChange(relation: CatalogRelation, grantee: string | null, wanted
         kind: relation.kind,
         ...(relation.arguments === undefined ? {} : { arguments: relation.arguments }),
         grantee,
-        missing: wanted.filter(privilege => !held.has(privilege)),
+        missing: wanted.privileges.filter(privilege => !held.has(privilege)),
         excess,
-        grantOption: relation.grants.filter(grant => fromOwner(grant) && grant.grantable === true && wanted.includes(grant.privilege)).map(grant => grant.privilege),
-        columns: relation.columnGrants.filter(grant => fromOwner(grant) && !excess.includes(grant.privilege)).map(({ privilege, column }) => ({ privilege, column })),
+        grantOption: relation.grants.filter(grant => fromOwner(grant) && grant.grantable === true && wanted.privileges.includes(grant.privilege)).map(grant => grant.privilege),
+        columns: keptColumns.filter(grant => !declared(grant)).map(columnGrant),
+        missingColumns: wantedColumns(wanted)
+            .filter(wantedGrant => relation.columns.includes(wantedGrant.column) && !keptColumns.some(grant => sameColumnGrant(grant, wantedGrant))),
+        columnGrantOption: keptColumns.filter(grant => declared(grant) && grant.grantable === true).map(columnGrant),
     };
+}
+
+/** Every column grant of `wanted`'s column lists. */
+function wantedColumns(wanted: Wanted): ColumnGrant[]
+{
+    return Object.entries(wanted.columns).flatMap(([privilege, columns]) => (columns ?? []).map(column => ({ privilege, column })));
+}
+
+/** Whether `grant` is in `wanted`'s column lists. */
+function wantsColumn(wanted: Wanted, grant: ColumnGrant): boolean
+{
+    return (wanted.columns as Record<string, readonly string[] | undefined>)[grant.privilege]?.includes(grant.column) === true;
+}
+
+function columnGrant({ privilege, column }: ColumnGrant): ColumnGrant
+{
+    return { privilege, column };
+}
+
+function sameColumnGrant(a: ColumnGrant, b: ColumnGrant): boolean
+{
+    return a.privilege === b.privilege && a.column === b.column;
 }
 
 function changesSomething(change: GranteeChange): boolean
 {
-    return change.missing.length + change.excess.length + change.grantOption.length + change.columns.length > 0;
+    return change.missing.length + change.excess.length + change.grantOption.length
+        + change.columns.length + change.missingColumns.length + change.columnGrantOption.length > 0;
 }
 
-/** GRANT what is missing, REVOKE the excess, then the grant options, then the column grants. */
+/**
+ * GRANT what is missing, REVOKE the excess, then the grant options; then the
+ * same on columns, the GRANTs last: a table-level REVOKE above takes the
+ * column grants of its privilege with it.
+ */
 function changeStatements(change: GranteeChange): PlannedStatement[]
 {
     const object = objectName(change);
@@ -847,7 +956,9 @@ function changeStatements(change: GranteeChange): PlannedStatement[]
         change.grantOption.length > 0
             ? { statement: `REVOKE GRANT OPTION FOR ${privilegeList(change.grantOption)} ON ${object} FROM ${role}`, revokes: change.grantOption }
             : undefined,
-        ...columnRevokes(change.columns).map(list => ({ statement: `REVOKE ${list.columns} ON ${object} FROM ${role}`, revokes: [list.privilege] })),
+        ...columnLists(change.columns).map(list => ({ statement: `REVOKE ${list.columns} ON ${object} FROM ${role}`, revokes: [list.privilege] })),
+        ...columnLists(change.columnGrantOption).map(list => ({ statement: `REVOKE GRANT OPTION FOR ${list.columns} ON ${object} FROM ${role}`, revokes: [list.privilege] })),
+        ...columnLists(change.missingColumns).map(list => ({ statement: `GRANT ${list.columns} ON ${object} TO ${role}`, revokes: [] })),
     ];
 
     return statements.filter((planned): planned is PlannedStatement => planned !== undefined);
@@ -907,7 +1018,7 @@ function granteeName(grantee: string | null): string
 }
 
 /** `UPDATE ("a", "b")` per privilege, in privilege order. */
-function columnRevokes(grants: GranteeChange['columns']): { privilege: string; columns: string }[]
+function columnLists(grants: readonly ColumnGrant[]): { privilege: string; columns: string }[]
 {
     const byPrivilege = new Map<string, string[]>();
 
@@ -924,16 +1035,19 @@ function columnRevokes(grants: GranteeChange['columns']): { privilege: string; c
  * What `role` holds on `relation` beyond `wanted` that the plan's `changes`
  * leave: through a role it is a member of — unless the plan revokes that
  * role's grant — or granted by another grantor; table-level or on a column,
- * a wanted privilege's grant option included.
+ * a wanted privilege's grant option included. A column grant is wanted when
+ * its privilege is wanted table-level or on its column.
  */
-function heldElsewhere(relation: CatalogRelation, role: CatalogRole, wanted: readonly string[], changes: readonly GranteeChange[]): PrivilegeHeldElsewhere[]
+function heldElsewhere(relation: CatalogRelation, role: CatalogRole, wanted: Wanted, changes: readonly GranteeChange[]): PrivilegeHeldElsewhere[]
 {
     const throughOf = (grant: CatalogGrant & { readonly column?: string }) => grant.grantee === role.name
         ? (grant.grantor === relation.owner ? undefined : `granted by ${grant.grantor}`)
         : (grant.grantee !== null && role.memberOf.includes(grant.grantee) && !revokedBy(changes, relation, grant) ? `member of ${grant.grantee}` : undefined);
-    const optionOnly = (grant: CatalogGrant) => wanted.includes(grant.privilege) && grant.grantable === true && grant.grantee === role.name;
-    const entries = [...relation.grants, ...relation.columnGrants]
-        .filter(grant => !wanted.includes(grant.privilege) || optionOnly(grant))
+    const isWanted = (grant: CatalogGrant & { readonly column?: string }) => wanted.privileges.includes(grant.privilege)
+        || (grant.column !== undefined && wantsColumn(wanted, { privilege: grant.privilege, column: grant.column }));
+    const optionOnly = (grant: CatalogGrant) => isWanted(grant) && grant.grantable === true && grant.grantee === role.name;
+    const entries = accessEntries(relation)
+        .filter(grant => !isWanted(grant) || optionOnly(grant))
         .flatMap(grant =>
         {
             const through = throughOf(grant);
