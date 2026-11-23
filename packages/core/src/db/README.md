@@ -1182,13 +1182,33 @@ whatever else the catalog holds is ignored; `applyAppPrivileges(db, target, role
 reads, plans and runs the statements in one transaction, none when blocked, and returns the run
 (`AppPrivilegesRun`: the plan, whether it was `applied`, and the statement PostgreSQL `refused`
 with 2BP01, after which the transaction rolled back); with `rollback` it always rolls back.
-`target` is `{ schemas, tables, defaults }` (`AppPrivilegesTarget`), `roles` is `{ app, read? }`.
+`target` is `{ schemas, tables, defaults, queue? }` (`AppPrivilegesTarget`), `roles` is `{ app, read? }`.
+`target.queue` — `{ schema }`, the pg-boss queue schema — is planned by a rule of its own, which
+no CLI command passes yet: the app role gets `USAGE` on the schema and nothing else there (its
+`CREATE`, the read role's and PUBLIC's are revoked, as on any managed schema), `SELECT`, `INSERT`, `UPDATE`,
+`DELETE` on every table there, **partitions included** (pg-boss names its `job_common` partition
+in its statements, and PostgreSQL checks a partition's own privileges when it is named), `SELECT`
+and `UPDATE` on `version`, and `EXECUTE` on every function, whose `EXECUTE` for PUBLIC is revoked;
+the read role and PUBLIC get nothing. It is a rule over what the catalog holds, not a list of
+pg-boss's tables. `readPrivilegeCatalog(db, schemas, roles, queueSchema?)` reads that schema's
+relations and its functions (functions nowhere else). When the queue schema, or any object in it,
+belongs to a role the owner cannot act for, nothing on the queue is planned and the plan reports
+it apart (`plan.queue`: `schemaOwnedElsewhere`, `foreignOwned`) without being `blocked`. A queue
+schema is pg-boss's alone: one that is also among `target.schemas` (`public`, `drizzle`, a project's
+or a package's schema) would hold the project's tables to the queue rule, so the plan is `blocked`
+with `plan.queue.managedSchema` and plans nothing at all for that schema; the CLI's grant step then
+names the schema and asks for one of the queue's own in `"spfn": { "jobs": { "schema": … } }`.
+Partitioned queues (`createQueue(name, { partition: true })`) attach a table to `job`, which only
+its owner may do: under split roles the app role cannot create one.
 `checkAppPrivileges(db, target, read?)`, on the app role's connection, reads the catalog for the app
 role and the read role and returns the plan as far as it concerns what the app role can do
 (`AppPrivilegesCheck`); `compareAppPrivileges(catalog, target, roles)` is its pure half, on a
 `PrivilegeCatalog` read as the app (no role taken for the owner, no relation foreign-owned). The plan carries the comparison its
 statements are written from: `changes` (`GranteeChange` per relation and grantee) and `withoutUsage`. `foreignOwnedObjects(db, schemas)` is the catalog read
-of what another role owns, shared with `spfn db push`'s ownership remedy.
+of what another role owns — schemas, relations and enum types — shared with `spfn db push`'s
+ownership remedy; `foreignOwnedObjects(db, schemas, queueSchema)` adds the functions of the queue
+schema (`FUNCTION`, its `object` with its argument types), and of no other: a project's trigger
+function is nothing push or the grant step alters.
 
 ---
 
@@ -1313,7 +1333,26 @@ These have their own READMEs — do not duplicate their APIs here, link to them:
   only READMEs) — which migrations each installed function
   package ships and which the database has applied: `discoverFunctionMigrations`,
   `collectMigrationStatus`, `pendingFunctionMigrations`, `pendingMigrationTargets`,
-  `countPendingMigrations`. Read-only — applying migrations is `spfn db migrate`. One
+  `countPendingMigrations`. Beside them, `readJobsDeclaration(cwd?)` reads the app's jobs
+  declaration from its `package.json` — `"spfn": { "jobs": true }` for the queue schema
+  `spfn_queue` (`DEFAULT_QUEUE_SCHEMA`), `"spfn": { "jobs": { "schema": "<name>" } }` for another
+  — and returns `{ schema }`, or undefined without the key; a file it cannot read or parse, a
+  value that is neither (an unknown key inside `spfn.jobs` included), or `public` or `drizzle` as
+  the schema throws `JobsDeclarationError` naming the file and the key. Whether another schema is
+  a package's the file cannot tell (a package's name does not say whether it creates one, and a
+  package installed through another is not listed), so the app privileges plan, which knows
+  every managed schema, refuses those (`plan.queue.managedSchema`). A misspelt `jobs`
+  (`"spfn": { "job": true }`, a top-level `"jobs"`) reads as no declaration: `spfn` and the file
+  hold other tools' keys, and no rule tells a typo from one of theirs. A key written twice reads
+  as `JSON.parse`, npm and pnpm read it, the last one winning. A schema name is exactly
+  `[a-z_][a-z0-9_]{0,49}` (`isQueueSchemaName`) — narrower than pg-boss's own check, which also
+  takes upper case: pg-boss puts the name in its SQL unquoted, so PostgreSQL folds `MyQueue` to
+  `myqueue`, while the catalog and a quoted identifier read it as written; with lower case only,
+  the name declared, the name pg-boss's SQL creates and the name the catalog is asked about are
+  one. Nor is it a name that SQL breaks on: a PostgreSQL keyword other than an unreserved one
+  (`select`, `left`, `between` — the reserved, type or function name and column name keywords
+  of PostgreSQL 16, each of which fails pg-boss's install there) or a `pg_` name, which
+  PostgreSQL keeps for system schemas. An app whose `.jobs()` names `MyQueue` declares `myqueue`. Read-only — applying migrations is `spfn db migrate`. One
   implementation behind `spfn db status`, the server's migration boot gate, the detailed
   health payload, the `spfn db push` preview and every function-package apply, so they
   cannot disagree about what "pending" means. A function package's legacy records in the

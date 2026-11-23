@@ -6,7 +6,8 @@ compensation — grouped in a `JobRouter` and registered through `defineServerCo
 
 ## Import paths
 
-One entry point. pg-boss is a peer dependency you install yourself.
+One entry point. `@spfn/core` depends on pg-boss pinned exactly (11.1.2), so the queue schema
+version is the one this core release states.
 
 ```typescript
 import {
@@ -15,10 +16,6 @@ import {
 } from '@spfn/core/job';
 import { defineEvent } from '@spfn/core/event';   // for .on(event) jobs
 import { Type } from '@sinclair/typebox';         // for .input()/.output() schemas
-```
-
-```bash
-pnpm add pg-boss        # required peer dependency
 ```
 
 In a normal SPFN app you do **not** call `initBoss` / `registerJobs` yourself — wiring a
@@ -66,6 +63,10 @@ From `@spfn/core/job`:
   pg-boss's `wip` events (`getWipData()` is not on the 11.1.2 instance). A `PgBoss` the app
   constructs itself keeps pg-boss's own workers, which a shutdown neither stops nor fails
 - Registration: `registerJobs(router)` — **takes a `JobRouter`, not an array**
+- Queue schema (see [Queue schema facts](#queue-schema-facts)): `QUEUE_SCHEMA_VERSION`,
+  `queueInstallSql(schema)`, `queueMigrationSql(schema, from)`, `QueueSchemaVersionError`,
+  `QueueSchemaNameError`, `readQueueSchemaState(db, schema)`, `QueueSchemaChangedError`, type
+  `QueueSchemaState`
 - Types: `JobDef`, `JobRouter`, `JobRouterEntry`, `JobOptions`, `JobQueuePolicy`,
   `JobSendOptions`, `JobHandler`, `CompensateHandler`, `InferJobInput`, `InferJobOutput`,
   `BossOptions`, `BossConfig` (deprecated alias of `BossOptions`)
@@ -495,6 +496,53 @@ knows the routers registered in this process and would unschedule everything els
 
 `sslmode=require`/`prefer` in the URL is rewritten to `ssl: { rejectUnauthorized: false }`
 so self-signed certs work.
+
+### Queue schema facts
+
+What a tool needs to know about pg-boss's schema without starting pg-boss. Nothing in core
+calls these yet; `initBoss` still starts pg-boss with its defaults.
+
+- `QUEUE_SCHEMA_VERSION` — the schema version the pinned pg-boss creates and runs on, read from
+  its `version.json` (26 for 11.1.2).
+- `queueInstallSql(schema)` — pg-boss's construction plan (`getConstructionPlans`): one
+  multi-statement string, `BEGIN; …; COMMIT;` under pg-boss's advisory lock, starting with
+  `CREATE SCHEMA IF NOT EXISTS`. Run it whole in one simple-protocol call (node-postgres
+  `query(text)` without parameters).
+- `queueMigrationSql(schema, from)` — pg-boss's migration plan from version `from`
+  (`getMigrationPlans`). A `from` that is not older than `QUEUE_SCHEMA_VERSION`, or older than the
+  first version pg-boss migrates from (25 for 11.1.2), throws `QueueSchemaVersionError` naming both
+  versions — pg-boss itself would return a plan written for another version.
+- Both, and `readQueueSchemaState`, throw `QueueSchemaNameError` on a schema name pg-boss's
+  unquoted SQL breaks on, or that it and the catalog would read differently (`isQueueSchemaName`
+  in `@spfn/core/db`): upper case, a PostgreSQL keyword other than an unreserved one, `pg_…` —
+  the reader before it reads the catalog, which would answer about another schema, or call
+  absent a schema pg-boss cannot be installed in.
+- `readQueueSchemaState(db, schema)` — on any drizzle connection, what the catalog says to the
+  connected role: whether the schema `exists`, whether the role `ownsSchema` (is or inherits its
+  owner), has `usage` on it, and `mayCreateOnDatabase`; `notPgBoss`, whether the schema is known
+  not to be pg-boss's, so pg-boss may be neither installed nor migrated there; and `version`, the
+  installed schema version. A schema is pg-boss's when it holds every table and type pg-boss's
+  construction plan creates and no migration of its does, and nothing that plan or a migration
+  does not create — a function by its name and argument types — names read from the pinned pg-boss's own SQL (`getConstructionPlans`, its
+  migration store), so a pg-boss bump brings its objects along — besides the partitions pg-boss
+  attaches to `job` for a partitioned queue. Anything else holding objects is not pg-boss's: some
+  of its tables, a project's own `version` table, a project table beside a pg-boss install, a view
+  named `version`; so is a pg-boss schema whose `version` table, where the role may read it, does
+  not hold exactly one integer. `version` is `null` when nothing is
+  installed and pg-boss may be: no schema, or one holding no object at all (default privileges
+  set on it are no object) — absent when the schema is not pg-boss's or the role may not read it (no `USAGE` on the schema,
+  or no `SELECT` on `version`), never anything but an integer. The state is the one a single
+  statement saw, under one snapshot, on whatever connection it is given (a pool's statements are
+  no transaction): an install, a migration or a replacement another connection commits meanwhile
+  reads as before it or after it, never half of each. PostgreSQL refuses a SELECT on
+  `<schema>.version` where the role may not read it — 42501 even on pg-boss's own check,
+  `to_regclass('<schema>.version')`, in a schema without `USAGE` — so the catalog is read first,
+  and only where it shows a pg-boss schema whose `version` the role may read does a second
+  statement read the catalog again together with the version; that one's state is returned. The
+  schema or its `version` table dropped or replaced, or the role's privilege revoked, between
+  the two throws `QueueSchemaChangedError` — read again for the schema as it is now; so does a
+  schema renamed and another created under its name inside the second statement, between
+  PostgreSQL resolving the table and taking its snapshot.
 
 ---
 

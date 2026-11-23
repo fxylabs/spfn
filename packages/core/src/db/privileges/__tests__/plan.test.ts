@@ -70,7 +70,18 @@
  *   what the app holds there from another grantor reported as held elsewhere
  *   — `db status` warning that it holds, beyond USAGE, a privilege on a
  *   schema it owns — or what the read role holds there left out with it, or
- *   listed by `db status` as the app's.
+ *   listed by `db status` as the app's;
+ * - G29 (#171) the queue schema held to the partition rule — `job_common`,
+ *   which pg-boss names in its statements, left with nothing, so every job is
+ *   refused — or the queue rule leaking out of it: a project partition
+ *   granted. Its functions left callable by PUBLIC only, or the read role
+ *   given the job payloads.
+ * - G30 (rv432 B1) a queue schema that is also a managed one — `public`,
+ *   `drizzle` — holding the project's tables to the queue rule: an
+ *   append-only table given UPDATE and DELETE, the read role's SELECT revoked,
+ *   the app given writes on the migration bookkeeping; or the plan applied.
+ *   (rv432b 2) The other managed schemas' statements, USAGE and absent
+ *   tables dropped along with it, so `db status` misreports them.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -632,5 +643,74 @@ describe('planAppPrivileges', () =>
         expect(planAppPrivileges(state, target([], ['acme']), roles).schemaHeldElsewhere)
             .toEqual([{ role: READ, schema: 'acme', privilege: 'create', through: 'granted by delegate' }]);
         expect(compareAppPrivileges(state, target([], ['acme']), roles).schemaHeldElsewhere).toEqual([]);
+    });
+
+    it('G29 the queue schema: every table, the partition job_common included, gets the default set, version select and update, functions EXECUTE; nothing for the read role, PUBLIC or a project partition', () =>
+    {
+        const READ = 'app_read';
+        const queueTable = (name: string, partition = false) => ({ ...table(name, [], [], 'spfn_queue'), partition });
+        const createQueue: CatalogRelation = {
+            schema: 'spfn_queue', name: 'create_queue', kind: 'function', arguments: 'queue_name text, options jsonb', partition: false, owner: OWNER,
+            grants: [{ grantee: null, grantor: OWNER, privilege: 'execute' }, { grantee: OWNER, grantor: OWNER, privilege: 'execute' }], columnGrants: [],
+        };
+        const state = catalog([
+            table('events', toApp('select')),
+            { ...table('events_t1'), partition: true },
+            queueTable('job'),
+            queueTable('job_common', true),
+            queueTable('version'),
+            createQueue,
+        ], {
+            roles: [{ name: APP, inheritsOwner: false, memberOf: [] }, { name: READ, inheritsOwner: false, memberOf: [] }],
+            schemas: ['acme', 'spfn_queue'].flatMap(name => [APP, READ].map(role => schemaRow(name, role, { usage: name === 'acme' }))),
+        });
+        const plan = planAppPrivileges(state, { ...target([{ schema: 'acme', table: 'events', privileges: ['select'] }]), queue: { schema: 'spfn_queue' } }, { app: APP, read: READ });
+
+        expect(plan.statements).toEqual([
+            'GRANT USAGE ON SCHEMA "spfn_queue" TO "app_user"',
+            'GRANT SELECT ON TABLE "acme"."events" TO "app_read"',
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "spfn_queue"."job" TO "app_user"',
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "spfn_queue"."job_common" TO "app_user"',
+            'GRANT SELECT, UPDATE ON TABLE "spfn_queue"."version" TO "app_user"',
+            'GRANT EXECUTE ON FUNCTION "spfn_queue"."create_queue"(queue_name text, options jsonb) TO "app_user"',
+            'REVOKE EXECUTE ON FUNCTION "spfn_queue"."create_queue"(queue_name text, options jsonb) FROM PUBLIC',
+        ]);
+        expect(plan.blocked).toBe(false);
+    });
+
+    it('G30 a queue schema that is also a managed one blocks the plan, with nothing planned there: public\'s tables and drizzle\'s bookkeeping as they were, the other schemas planned as without it', () =>
+    {
+        const READ = 'app_read';
+        const state = catalog([
+            table('ledger', [...toApp('select', 'insert'), { grantee: READ, grantor: OWNER, privilege: 'select' }], [], 'public'),
+            table('__drizzle_migrations', toApp('select'), [], 'drizzle'),
+            table('notes'),
+        ], {
+            roles: [{ name: APP, inheritsOwner: false, memberOf: [] }, { name: READ, inheritsOwner: false, memberOf: [] }],
+            schemas: ['public', 'drizzle', 'acme'].flatMap(name => [APP, READ].map(role => schemaRow(name, role, { usage: name !== 'acme' }))),
+        });
+        const managed = target([
+            { schema: 'public', table: 'ledger', privileges: ['select', 'insert'] },
+            { schema: 'acme', table: 'archive', privileges: ['select'] },
+        ], ['public', 'drizzle', 'acme']);
+        const roles = { app: APP, read: READ };
+        const unqueued = planAppPrivileges(state, managed, roles);
+
+        expect(unqueued).toMatchObject({
+            statements: [
+                'GRANT USAGE ON SCHEMA "acme" TO "app_user"',
+                'GRANT USAGE ON SCHEMA "acme" TO "app_read"',
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "acme"."notes" TO "app_user"',
+                'GRANT SELECT ON TABLE "acme"."notes" TO "app_read"',
+            ],
+            absentTables: [{ schema: 'acme', table: 'archive' }],
+            blocked: false,
+        });
+
+        for (const schema of ['public', 'drizzle'])
+        {
+            expect(planAppPrivileges(state, { ...managed, queue: { schema } }, roles))
+                .toEqual({ ...unqueued, blocked: true, queue: { schema, managedSchema: true, schemaOwnedElsewhere: false, foreignOwned: [] } });
+        }
     });
 });

@@ -36,22 +36,29 @@ export interface GrantDb extends CatalogDb
 }
 
 /**
- * What the catalog holds for `roles` on `schemas`, read on the owner's
- * connection. Reads only, so it runs on a dry run's read-only connection. A
- * role name that is no role is listed in `missingRoles` and read no further:
+ * What the catalog holds for `roles` on `schemas` and the queue schema
+ * `queueSchema` — whose functions are read too — on the owner's connection.
+ * Reads only, so it runs on a dry run's read-only connection. A role name
+ * that is no role is listed in `missingRoles` and read no further:
  * PostgreSQL's role functions raise 42704 on it.
  */
-export async function readPrivilegeCatalog(db: CatalogDb, schemas: readonly string[], roles: AppRoles): Promise<PrivilegeCatalog>
+export async function readPrivilegeCatalog(
+    db: CatalogDb,
+    schemas: readonly string[],
+    roles: AppRoles,
+    queueSchema?: string,
+): Promise<PrivilegeCatalog>
 {
     const named = [roles.app, ...(roles.read === undefined || roles.read === roles.app ? [] : [roles.read])];
     const roleNames = await existingRoles(db, named);
+    const all = queueSchema === undefined ? schemas : [...schemas, queueSchema];
 
     return {
         roles: await readRoles(db, roleNames),
         missingRoles: named.filter(name => !roleNames.includes(name)),
-        schemas: await readSchemas(db, schemas, roleNames),
-        relations: await readRelations(db, schemas),
-        foreignOwned: await readForeignOwned(db, schemas),
+        schemas: await readSchemas(db, all, roleNames),
+        relations: [...await readRelations(db, all), ...(queueSchema === undefined ? [] : await readFunctions(db, queueSchema))],
+        foreignOwned: await readForeignOwned(db, all, queueSchema),
         publicMayCreateInPublic: await publicMayCreateInPublic(db),
     };
 }
@@ -112,7 +119,7 @@ export async function applyAppPrivileges(
 {
     const transaction = db.transaction(async tx =>
     {
-        const plan = planAppPrivileges(await readPrivilegeCatalog(tx, target.schemas, roles), target, roles);
+        const plan = planAppPrivileges(await readPrivilegeCatalog(tx, target.schemas, roles, target.queue?.schema), target, roles);
         const refused = plan.blocked ? undefined : await runStatements(tx, plan);
 
         if (plan.blocked || refused !== undefined || options.rollback === true)
@@ -225,13 +232,14 @@ export const WRITE_RULE = sql`c.relkind = 'v' AND EXISTS (
 export const INSTEAD_OF_TRIGGER = sql`c.relkind = 'v' AND EXISTS (
     SELECT FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND (t.tgtype::integer & 64) <> 0)`;
 
-/** What the plan calls each kind of relation `foreignOwnedObjects` names: a foreign table is a table. */
+/** What the plan calls each kind of object `foreignOwnedObjects` names: a foreign table is a table. */
 const RELATION_KINDS = new Map<string, RelationKind>([
     ['TABLE', 'table'],
     ['FOREIGN TABLE', 'table'],
     ['VIEW', 'view'],
     ['MATERIALIZED VIEW', 'materialized view'],
     ['SEQUENCE', 'sequence'],
+    ['FUNCTION', 'function'],
 ]);
 
 /**
@@ -280,12 +288,54 @@ export async function readRelations(db: CatalogDb, schemas: readonly string[]): 
     return rows as unknown as CatalogRelation[];
 }
 
-/** The relations of `schemas` the owner cannot grant on: `foreignOwnedObjects`, the push remedy's query. */
-async function readForeignOwned(db: CatalogDb, schemas: readonly string[]): Promise<ForeignOwnedRelation[]>
+/**
+ * Every plain function of the queue schema `schema` — not an extension's
+ * member — with its argument types and its access list (the owner's default
+ * one, which grants PUBLIC EXECUTE, when it has none). A grantee of 0 is
+ * PUBLIC.
+ */
+async function readFunctions(db: CatalogDb, schema: string): Promise<CatalogRelation[]>
 {
-    const objects = await foreignOwnedObjects(db, [...schemas]);
+    const rows = catalogRows(await db.execute(sql`
+        SELECT n.nspname::text AS schema, p.proname::text AS name, 'function' AS kind, false AS partition,
+            pg_catalog.pg_get_function_identity_arguments(p.oid) AS arguments, pg_catalog.pg_get_userbyid(p.proowner)::text AS owner,
+            (
+                SELECT coalesce(json_agg(json_build_object(
+                    'grantee', CASE a.grantee WHEN 0 THEN NULL ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END,
+                    'grantor', pg_catalog.pg_get_userbyid(a.grantor)::text,
+                    'privilege', lower(a.privilege_type),
+                    'grantable', a.is_grantable)), '[]'::json)
+                FROM pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+            ) AS grants,
+            '[]'::json AS "columnGrants"
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = ${schema} AND p.prokind = 'f'
+            AND NOT EXISTS (
+                SELECT FROM pg_catalog.pg_depend d
+                WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+            )
+        ORDER BY p.proname, arguments`));
+
+    return rows as unknown as CatalogRelation[];
+}
+
+/**
+ * The relations of `schemas`, and the functions of the queue schema
+ * `queueSchema`, the owner cannot grant on: `foreignOwnedObjects`, the push
+ * remedy's query.
+ */
+async function readForeignOwned(db: CatalogDb, schemas: readonly string[], queueSchema: string | undefined): Promise<ForeignOwnedRelation[]>
+{
+    const objects = await foreignOwnedObjects(db, [...schemas], queueSchema);
 
     return objects
         .filter(object => RELATION_KINDS.has(object.kind))
-        .map(object => ({ schema: object.schema ?? '', name: object.name, kind: RELATION_KINDS.get(object.kind)!, owner: object.owner }));
+        .map(object => ({
+            schema: object.schema ?? '',
+            name: object.name,
+            kind: RELATION_KINDS.get(object.kind)!,
+            ...(object.arguments === null ? {} : { arguments: object.arguments }),
+            owner: object.owner,
+        }));
 }

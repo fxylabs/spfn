@@ -223,8 +223,8 @@ function distinctRelations(owned: readonly OwnedRelation[]): OwnedRelation[]
     return [...new Map(owned.map(relation => [`${relation.schema}.${relation.name}`, relation])).values()];
 }
 
-/** How many of `relations` are no sequence. */
+/** How many of `relations` are no sequence nor function. */
 function tableCount(relations: readonly { readonly kind: RelationKind }[]): number
 {
-    return relations.filter(relation => relation.kind !== 'sequence').length;
+    return relations.filter(relation => relation.kind !== 'sequence' && relation.kind !== 'function').length;
 }

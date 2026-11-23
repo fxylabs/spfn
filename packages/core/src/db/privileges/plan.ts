@@ -19,6 +19,33 @@
  * | `drizzle` sequence | nothing | nothing | nothing |
  * | partition | nothing | nothing | nothing |
  *
+ * The pg-boss queue schema (`target.queue`) is a part of its own:
+ *
+ * | Object | App role | Read role | PUBLIC |
+ * |---|---|---|---|
+ * | schema | USAGE, nothing else | nothing | USAGE untouched; nothing else |
+ * | table, partitions included | `DEFAULT_APP_PRIVILEGES` | nothing | nothing |
+ * | `version` | `select`, `update` | nothing | nothing |
+ * | function | EXECUTE | nothing | nothing (PostgreSQL's default EXECUTE revoked) |
+ *
+ * pg-boss names its partition `job_common` in its statements, and PostgreSQL
+ * checks a partition's own privileges when it is named, so the queue's
+ * partitions are granted. The rule is over what the catalog holds, not a list
+ * of pg-boss's tables, so a table a pg-boss release adds is granted too. Job
+ * payloads are the app's alone: the read role gets nothing there. Functions
+ * are read in the queue schema only. A queue the owner cannot grant on — the
+ * schema, or any object in it, owned by a role the owner cannot act for, as
+ * when the app role installed it — is left out whole and reported apart
+ * (`queue.foreignOwned`, `queue.schemaOwnedElsewhere`); it does not block the
+ * plan. A queue schema is pg-boss's and nothing else's: one that is also a
+ * managed schema (`public`, `drizzle`, a project's or a package's) would hold
+ * the project's tables to the queue rule, so it is a misconfiguration
+ * (`queue.managedSchema`) that blocks the plan, and nothing at all is planned
+ * for that schema. Otherwise the queue schema itself is compared as any
+ * managed schema below, except that the read role is granted no USAGE there:
+ * CREATE is revoked from the app role, the read role and PUBLIC, so
+ * pg-boss's objects are the owner's alone.
+ *
  * drizzle declares views (`pgView`, `pgMaterializedView`) and push creates
  * them; `appPrivileges` takes a table only. A view runs with its owner's
  * rights on the tables under it, so a write granted on it is a write on them,
@@ -94,12 +121,12 @@
  * disagree with the step in one setup or the other. `ALTER TABLE … OWNER TO`
  * the owner role brings it under the plan. A role name that is no
  * role (`missingRoles`), a relation another role owns, a schema the role
- * cannot use and the owner cannot grant, or a schema the owner cannot revoke
- * on (`foreignOwnedSchemas`), blocks the plan (`blocked`): the caller applies
- * none of it.
+ * cannot use and the owner cannot grant, a schema the owner cannot revoke
+ * on (`foreignOwnedSchemas`), or a queue schema that is also a managed one,
+ * blocks the plan (`blocked`): the caller applies none of it.
  */
 
-import { APP_PRIVILEGES, type AppPrivilege, type AppTablePrivileges } from './declaration';
+import { APP_PRIVILEGES, DEFAULT_APP_PRIVILEGES, type AppPrivilege, type AppTablePrivileges } from './declaration';
 
 /** The schema of the migration bookkeeping, which the app reads and never writes. */
 export const BOOKKEEPING_SCHEMA = 'drizzle';
@@ -119,15 +146,17 @@ export interface CatalogColumnGrant extends CatalogGrant
     readonly column: string;
 }
 
-/** What a relation of a managed schema is to the plan: a foreign table is a table. */
-export type RelationKind = 'table' | 'view' | 'materialized view' | 'sequence';
+/** What a relation of a managed schema is to the plan: a foreign table is a table; a function is the queue schema's only. */
+export type RelationKind = 'table' | 'view' | 'materialized view' | 'sequence' | 'function';
 
-/** A table (plain, partitioned or foreign), view, materialized view or sequence of a managed schema. */
+/** A table (plain, partitioned or foreign), view, materialized view or sequence of a managed schema, or a function of the queue schema. */
 export interface CatalogRelation
 {
     readonly schema: string;
     readonly name: string;
     readonly kind: RelationKind;
+    /** A function's argument types, as `GRANT … ON FUNCTION` names it; absent for a relation */
+    readonly arguments?: string;
     /** Whether it is a partition of another table, at any level (`relispartition`) */
     readonly partition: boolean;
     /** Whether a view's SELECT rule checks the rights of its user, not its owner, on the tables under it (`security_invoker`); absent, it does not */
@@ -165,12 +194,14 @@ export interface CatalogRole
     readonly memberOf: readonly string[];
 }
 
-/** A relation of a managed schema that the connected role cannot grant on. */
+/** A relation of a managed schema, or a function of the queue schema, that the connected role cannot grant on. */
 export interface ForeignOwnedRelation
 {
     readonly schema: string;
     readonly name: string;
     readonly kind: RelationKind;
+    /** A function's argument types; absent for a relation */
+    readonly arguments?: string;
     readonly owner: string;
 }
 
@@ -195,6 +226,8 @@ export interface AppPrivilegesTarget
     /** The declared tables; a table of a managed schema without an entry has `defaults` */
     readonly tables: readonly AppTablePrivileges[];
     readonly defaults: readonly AppPrivilege[];
+    /** The pg-boss queue schema, when the app declares jobs: planned by the queue's own rule, not as one of `schemas` */
+    readonly queue?: { readonly schema: string };
 }
 
 /** The roles to plan for: the app's, and the read role when it is another one. */
@@ -255,6 +288,8 @@ export interface GranteeChange
     readonly schema: string;
     readonly name: string;
     readonly kind: RelationKind;
+    /** A function's argument types; absent for a relation */
+    readonly arguments?: string;
     /** null for PUBLIC */
     readonly grantee: string | null;
     /** In its set, not held: granted */
@@ -355,12 +390,30 @@ export interface AppPrivilegesPlan
     readonly absentTables: readonly { readonly schema: string; readonly table: string }[];
     /** Schemas a planned role cannot use and the owner cannot grant */
     readonly ungrantableSchemas: readonly { readonly schema: string; readonly role: string }[];
+    /** The relations of `schemas` the owner cannot grant on: they block the plan */
     readonly foreignOwned: readonly ForeignOwnedRelation[];
     /** Schemas with something to revoke that the owner cannot revoke on: they block the plan */
     readonly foreignOwnedSchemas: readonly ForeignOwnedSchema[];
     readonly publicMayCreateInPublic: boolean;
-    /** Whether a missing role, a foreign-owned relation or schema, an ungrantable schema or a grant to PUBLIC by another role forbids applying it */
+    /** Whether a missing role, a foreign-owned relation or schema, an ungrantable schema, a grant to PUBLIC by another role or a queue schema that is also a managed one forbids applying it; a queue the owner cannot grant on does not */
     readonly blocked: boolean;
+    /** The queue's part, when the target has one */
+    readonly queue?: QueuePlan;
+}
+
+/**
+ * Whether the owner may grant on the queue schema. When it may not, nothing
+ * on the queue is planned, and the rest of the plan stands.
+ */
+export interface QueuePlan
+{
+    readonly schema: string;
+    /** Whether the schema is also one of `target.schemas`: the plan is blocked, and nothing is planned for it */
+    readonly managedSchema: boolean;
+    /** Whether the schema is owned by a role the owner cannot act for */
+    readonly schemaOwnedElsewhere: boolean;
+    /** The queue's relations and functions owned by a role the owner cannot act for */
+    readonly foreignOwned: readonly ForeignOwnedRelation[];
 }
 
 /**
@@ -370,10 +423,11 @@ export interface AppPrivilegesPlan
  */
 export function planAppPrivileges(fullCatalog: PrivilegeCatalog, target: AppPrivilegesTarget, roles: AppRoles): AppPrivilegesPlan
 {
-    const catalog = managedCatalog(fullCatalog, target.schemas);
+    const queue = target.queue === undefined ? undefined : queuePlan(fullCatalog, target.queue.schema, target.schemas);
+    const catalog = managedCatalog(fullCatalog, target.schemas, queue);
     const ownerRoles = catalog.roles.filter(role => role.inheritsOwner).map(role => role.name);
     const planned = ownerRoles.includes(roles.app) || catalog.missingRoles.length > 0 ? [] : catalog.roles.filter(role => !role.inheritsOwner);
-    const schemaPlans = planSchemas(catalog.schemas.filter(schema => planned.some(role => role.name === schema.role)), planned, roles);
+    const schemaPlans = planSchemas(catalog.schemas.filter(schema => planned.some(role => role.name === schema.role)), planned, roles, target.queue?.schema);
     const relationPlans = planned.length === 0 ? [] : planRelations(catalog, planned, desiredPrivileges(target, roles));
     const foreignOwned = planned.length === 0 ? [] : catalog.foreignOwned;
     const ungrantableSchemas = schemaPlans.flatMap(plan => plan.ungrantable);
@@ -392,25 +446,61 @@ export function planAppPrivileges(fullCatalog: PrivilegeCatalog, target: AppPriv
         schemaHeldElsewhere: schemaPlans.flatMap(plan => plan.heldElsewhere),
         publicGrantsByOthers: relationPlans.flatMap(plan => plan.publicGrantsByOthers),
         grantsByOthers: [...schemaPlans, ...relationPlans].flatMap(plan => plan.grantsByOthers),
-        absentTables: absentTables(catalog, target),
+        absentTables: absentTables(catalog, target, queue),
         ungrantableSchemas,
         foreignOwned,
         foreignOwnedSchemas,
         publicMayCreateInPublic: catalog.publicMayCreateInPublic,
         blocked: catalog.missingRoles.length > 0 || foreignOwned.length > 0 || ungrantableSchemas.length > 0 || foreignOwnedSchemas.length > 0
-            || relationPlans.some(plan => plan.publicGrantsByOthers.length > 0),
+            || relationPlans.some(plan => plan.publicGrantsByOthers.length > 0) || queue?.managedSchema === true,
+        ...(queue === undefined ? {} : { queue }),
     };
 }
 
-/** `catalog` less its schemas, relations and foreign-owned relations outside `schemas`. */
-function managedCatalog(catalog: PrivilegeCatalog, schemas: readonly string[]): PrivilegeCatalog
+/** Whether the queue schema `schema` is one of the managed `schemas`, and whether the owner may grant on it in `catalog`. */
+function queuePlan(catalog: PrivilegeCatalog, schema: string, schemas: readonly string[]): QueuePlan
 {
     return {
-        ...catalog,
-        schemas: catalog.schemas.filter(schema => schemas.includes(schema.name)),
-        relations: catalog.relations.filter(relation => schemas.includes(relation.schema)),
-        foreignOwned: catalog.foreignOwned.filter(relation => schemas.includes(relation.schema)),
+        schema,
+        managedSchema: schemas.includes(schema),
+        schemaOwnedElsewhere: catalog.schemas.some(entry => entry.name === schema && !entry.mayGrant),
+        foreignOwned: catalog.foreignOwned.filter(relation => relation.schema === schema),
     };
+}
+
+/**
+ * `catalog` less its schemas, relations and foreign-owned relations outside
+ * the planned schemas (`plannedSchemas`); functions are the queue schema's
+ * only.
+ */
+function managedCatalog(catalog: PrivilegeCatalog, schemas: readonly string[], queue: QueuePlan | undefined): PrivilegeCatalog
+{
+    const managed = plannedSchemas(schemas, queue);
+    const inScope = (relation: { schema: string; kind: RelationKind }) => managed.includes(relation.schema)
+        && (relation.kind !== 'function' || relation.schema === queue?.schema);
+
+    return {
+        ...catalog,
+        schemas: catalog.schemas.filter(schema => managed.includes(schema.name)),
+        relations: catalog.relations.filter(inScope),
+        foreignOwned: catalog.foreignOwned.filter(inScope),
+    };
+}
+
+/**
+ * The managed `schemas` and the queue schema when the owner can grant on all
+ * of it; a queue schema that is also a managed one is left out of both.
+ */
+function plannedSchemas(schemas: readonly string[], queue: QueuePlan | undefined): readonly string[]
+{
+    if (queue?.managedSchema === true)
+    {
+        return schemas.filter(schema => schema !== queue.schema);
+    }
+
+    const grantable = queue !== undefined && !queue.schemaOwnedElsewhere && queue.foreignOwned.length === 0;
+
+    return grantable ? [...schemas, queue.schema] : schemas;
 }
 
 /** Each relation's plan, the foreign-owned left out: nothing may be granted on them. */
@@ -420,23 +510,28 @@ function planRelations(
     desired: DesiredPrivileges,
 ): RelationPlan[]
 {
-    const foreign = new Set(catalog.foreignOwned.map(relation => relationKey(relation.schema, relation.name)));
+    const foreign = new Set(catalog.foreignOwned.map(objectKey));
 
     return catalog.relations
-        .filter(relation => !foreign.has(relationKey(relation.schema, relation.name)))
+        .filter(relation => !foreign.has(objectKey(relation)))
         .map(relation => planRelation(relation, planned, desired));
 }
 
 /** What `role` is brought to on `relation`; `null` for PUBLIC. */
 type DesiredPrivileges = (relation: CatalogRelation, role: string | null) => readonly string[];
 
-/** The table above, as a function of relation and role. */
+/** The tables above, as a function of relation and role. */
 function desiredPrivileges(target: AppPrivilegesTarget, roles: AppRoles): DesiredPrivileges
 {
     const declared = new Map(target.tables.map(entry => [relationKey(entry.schema, entry.table), entry.privileges]));
 
     return (relation, role) =>
     {
+        if (relation.schema === target.queue?.schema)
+        {
+            return role === roles.app ? queuePrivileges(relation) : [];
+        }
+
         const bookkeeping = relation.schema === BOOKKEEPING_SCHEMA;
 
         if (role === null || (relation.kind === 'sequence' && (bookkeeping || role !== roles.app)))
@@ -453,6 +548,32 @@ function desiredPrivileges(target: AppPrivilegesTarget, roles: AppRoles): Desire
 
         return role === roles.app ? tableSet : bookkeeping ? [] : tableSet.filter(privilege => privilege === 'select');
     };
+}
+
+/**
+ * The app role's set on an object of the queue schema: EXECUTE on a function,
+ * `select` and `update` on `version`, the default set on every other table,
+ * partitions included; a sequence or view there (pg-boss creates none) is
+ * held to the rule of every schema.
+ */
+function queuePrivileges(relation: CatalogRelation): readonly string[]
+{
+    if (relation.kind === 'function')
+    {
+        return ['execute'];
+    }
+
+    if (relation.kind === 'sequence')
+    {
+        return ['usage'];
+    }
+
+    if (relation.kind !== 'table')
+    {
+        return ['select'];
+    }
+
+    return relation.name === 'version' ? ['select', 'update'] : DEFAULT_APP_PRIVILEGES;
 }
 
 /** A relation as the app role's set on it depends on it. */
@@ -501,21 +622,21 @@ function writesCheckedAsUser(relation: AppRelation): boolean
 const SHARED_SCHEMA = 'public';
 
 /** Each managed schema's plan, from its rows: one per planned role. */
-function planSchemas(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles): SchemaPlan[]
+function planSchemas(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles, queueSchema: string | undefined): SchemaPlan[]
 {
-    return [...new Set(rows.map(row => row.name))].map(name => planSchema(rows.filter(row => row.name === name), planned, roles));
+    return [...new Set(rows.map(row => row.name))].map(name => planSchema(rows.filter(row => row.name === name), planned, roles, queueSchema));
 }
 
 /**
  * USAGE for each planned role that cannot use the schema — the read role
- * needs none on `drizzle` — and a REVOKE of what the schema's owner gave a
- * planned role, or PUBLIC, beyond it. A planned role that owns the schema or
+ * needs none on `drizzle` nor on the queue schema `queueSchema` — and a
+ * REVOKE of what the schema's owner gave a planned role, or PUBLIC, beyond it. A planned role that owns the schema or
  * inherits its owner gets no statement there and is listed as `owned`; the
  * other planned roles, and PUBLIC, whose grants reach them, are planned as on
  * any schema; when every planned role owns it, nothing is planned there.
  * `rows` share the schema's name, owner, access list and `mayGrant`.
  */
-function planSchema(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles): SchemaPlan
+function planSchema(rows: readonly CatalogSchema[], planned: readonly CatalogRole[], roles: AppRoles, queueSchema: string | undefined): SchemaPlan
 {
     const [schema] = rows;
     const owners = planned.filter(role => role.name === schema.owner || role.memberOf.includes(schema.owner));
@@ -527,7 +648,8 @@ function planSchema(rows: readonly CatalogSchema[], planned: readonly CatalogRol
         return { ...NO_SCHEMA_PLAN, owned };
     }
 
-    const lacking = others.filter(row => !row.usage && (row.role === roles.app || row.name !== BOOKKEEPING_SCHEMA))
+    const lacking = others
+        .filter(row => !row.usage && (row.role === roles.app || (row.name !== BOOKKEEPING_SCHEMA && row.name !== queueSchema)))
         .map(row => ({ schema: row.name, role: row.role }));
     const changes = [...others.map(row => row.role), ...(schema.name === SHARED_SCHEMA ? [] : [null])]
         .map(grantee => schemaChange(schema, grantee))
@@ -699,6 +821,7 @@ function granteeChange(relation: CatalogRelation, grantee: string | null, wanted
         schema: relation.schema,
         name: relation.name,
         kind: relation.kind,
+        ...(relation.arguments === undefined ? {} : { arguments: relation.arguments }),
         grantee,
         missing: wanted.filter(privilege => !held.has(privilege)),
         excess,
@@ -765,10 +888,17 @@ function accessEntries(relation: CatalogRelation): (CatalogGrant & { readonly co
     return [...relation.grants, ...relation.columnGrants];
 }
 
-/** `TABLE "schema"."name"`, or `SEQUENCE …`, as a GRANT names it. */
-function objectName(relation: Pick<CatalogRelation, 'schema' | 'name' | 'kind'>): string
+/** `TABLE "schema"."name"`, `SEQUENCE …`, or `FUNCTION "schema"."name"(argument types)`, as a GRANT names it. */
+function objectName(relation: Pick<CatalogRelation, 'schema' | 'name' | 'kind' | 'arguments'>): string
 {
-    return `${relation.kind === 'sequence' ? 'SEQUENCE' : 'TABLE'} ${quoteIdentifier(relation.schema)}.${quoteIdentifier(relation.name)}`;
+    const name = `${quoteIdentifier(relation.schema)}.${quoteIdentifier(relation.name)}`;
+
+    if (relation.kind === 'function')
+    {
+        return `FUNCTION ${name}(${relation.arguments ?? ''})`;
+    }
+
+    return `${relation.kind === 'sequence' ? 'SEQUENCE' : 'TABLE'} ${name}`;
 }
 
 function granteeName(grantee: string | null): string
@@ -830,13 +960,14 @@ function sameEntry(a: Pick<PrivilegeHeldElsewhere, 'privilege' | 'through'>, b: 
     return a.privilege === b.privilege && a.through === b.through;
 }
 
-/** The declared tables of a managed schema, `drizzle` aside, that the catalog does not hold. */
-function absentTables(catalog: PrivilegeCatalog, target: AppPrivilegesTarget): { schema: string; table: string }[]
+/** The declared tables of a planned managed schema, `drizzle` aside, that the catalog does not hold. */
+function absentTables(catalog: PrivilegeCatalog, target: AppPrivilegesTarget, queue: QueuePlan | undefined): { schema: string; table: string }[]
 {
     const present = new Set(catalog.relations.filter(relation => relation.kind === 'table').map(relation => relationKey(relation.schema, relation.name)));
+    const schemas = plannedSchemas(target.schemas, queue);
 
     return target.tables
-        .filter(entry => target.schemas.includes(entry.schema) && entry.schema !== BOOKKEEPING_SCHEMA)
+        .filter(entry => schemas.includes(entry.schema) && entry.schema !== BOOKKEEPING_SCHEMA)
         .filter(entry => !present.has(relationKey(entry.schema, entry.table)))
         .map(({ schema, table }) => ({ schema, table }));
 }
@@ -858,6 +989,12 @@ function privilegeList(privileges: readonly string[]): string
 function relationKey(schema: string, name: string): string
 {
     return JSON.stringify([schema, name]);
+}
+
+/** A relation's key, or a function's with its argument types: overloads are objects apart. */
+function objectKey(object: { schema: string; name: string; arguments?: string }): string
+{
+    return JSON.stringify([object.schema, object.name, object.arguments ?? null]);
 }
 
 /** `name` as a PostgreSQL identifier: double-quoted, a `"` inside doubled. */

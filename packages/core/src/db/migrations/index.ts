@@ -17,6 +17,9 @@ export type {
     FunctionMigrationInfo,
 } from './discovery';
 
+export { DEFAULT_QUEUE_SCHEMA, isQueueSchemaName, JobsDeclarationError, readJobsDeclaration } from './jobs-declaration';
+export type { JobsDeclaration } from './jobs-declaration';
+
 export {
     collectMigrationStatus,
     countPendingMigrations,

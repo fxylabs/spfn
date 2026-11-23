@@ -60,6 +60,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlaps it left whole, every candidate found before any is chosen so a dropped filename hides no shorter
   one, the longest filename taken first (`scrubProviderError` and `scrubSendResult` take the send's attachments as an optional second
   argument; `null` means none). `SendResult` and `ScheduleResult` gain `errorCode` (`SendErrorCode`).
+- **@spfn/core: the queue schema's facts — nothing calls them yet (#171, PR 1 of 3).** pg-boss is
+  pinned exactly (`11.1.2`, the version already resolved). `@spfn/core/job` exports
+  `QUEUE_SCHEMA_VERSION` (from pg-boss's `version.json`), `queueInstallSql(schema)` and
+  `queueMigrationSql(schema, from)` — pg-boss's own construction and migration plans; a `from`
+  pg-boss cannot migrate throws `QueueSchemaVersionError` naming both versions, where pg-boss
+  itself returns a plan for a version older than its first migration — and
+  `readQueueSchemaState(db, schema)`: whether the schema exists, whether the connected role owns
+  it, may use it and may create on the database, and its installed version where the role may
+  read it — a state one statement saw, `QueueSchemaChangedError` where the schema is dropped,
+  replaced or its privilege revoked while it is read, never a raw privilege error — and `notPgBoss` for a schema of that name that is not
+  pg-boss's (objects but no `version` table, a `version` table without an integer `version` column,
+  or not one integer in it); an existing schema holding no object reads as nothing installed. `@spfn/core/db` exports `readJobsDeclaration(cwd?)`, the
+  reader of `"spfn": { "jobs": true | { "schema": "<name>" } }` in the app's `package.json`
+  (`JobsDeclarationError` naming the file and the key for a malformed value, an unknown key in
+  `spfn.jobs`, `public` or `drizzle` as the schema, or a name pg-boss's unquoted SQL breaks on or
+  folds: upper case, a PostgreSQL keyword other than an unreserved one, `pg_…`), and the app
+  privileges target takes the queue as a part of its own (`target.queue`): every table there,
+  partitions included, gets the default set, `version` `SELECT` and `UPDATE`, every function
+  `EXECUTE` with PUBLIC's revoked, the schema `USAGE` and nothing else (`CREATE` revoked as on any
+  managed schema); the read role nothing. A queue owned by a role
+  the owner cannot act for is reported apart (`plan.queue`) and does not block the plan; a queue
+  schema that is also one of `target.schemas` blocks it (`plan.queue.managedSchema`), with nothing
+  planned for that schema. `foreignOwnedObjects(db, schemas, queueSchema?)` lists the queue
+  schema's functions, and no other schema's: `spfn db push`'s ownership remedy is unchanged.
+  Plans without a queue target are unchanged.
 
 - **spfn: the app role is granted exactly what is declared — `spfn db grant [--dry-run]`, and a
   privileges step at the end of `db push`, `db migrate` and `spfn add` (#405).** As the owner

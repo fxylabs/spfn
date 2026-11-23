@@ -105,3 +105,15 @@ export {
 
 // Registration
 export { registerJobs } from './register-jobs';
+
+// Queue schema: its version, install and migration SQL, and catalog state
+export {
+    QUEUE_SCHEMA_VERSION,
+    QueueSchemaChangedError,
+    QueueSchemaNameError,
+    QueueSchemaVersionError,
+    queueInstallSql,
+    queueMigrationSql,
+    readQueueSchemaState,
+    type QueueSchemaState,
+} from './queue-schema';

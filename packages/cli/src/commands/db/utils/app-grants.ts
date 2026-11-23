@@ -402,14 +402,23 @@ function printReports(run: AppPrivilegesRun, roles: GrantRoles, options: GrantSt
 /**
  * Why a run applied nothing: each role name that is no role, each relation
  * the owner cannot grant on, each schema it cannot open, each grant to PUBLIC
- * another role made — or the statement PostgreSQL refused.
+ * another role made, a queue schema that is also a managed one — or the
+ * statement PostgreSQL refused.
  */
 function notAppliedReason(run: AppPrivilegesRun, roles: GrantRoles): string
 {
     const { plan } = run;
 
-    return [missingRolesReason(plan, roles), ownershipReason(plan), publicGrantsReason(plan), run.refused && refusalReason(run.refused)]
+    return [missingRolesReason(plan, roles), ownershipReason(plan), publicGrantsReason(plan), queueSchemaReason(plan), run.refused && refusalReason(run.refused)]
         .filter(Boolean).join('\n   ');
+}
+
+/** A queue schema that is also a managed one, with the declaration that names it: a misconfiguration only the project can correct. */
+function queueSchemaReason(plan: AppPrivilegesRun['plan']): string
+{
+    return plan.queue?.managedSchema !== true ? '' : `The jobs declaration names ${plan.queue.schema} as the queue schema, which is also a schema `
+        + 'the step manages: pg-boss\'s queue rule would hold its tables. Give the queue a schema of its own in the project\'s package.json '
+        + '("spfn": { "jobs": { "schema": "<name>" } }), then run spfn db grant.';
 }
 
 /** Each role name that is no role, with the setting that names it: a misconfiguration, never a skipped step. */

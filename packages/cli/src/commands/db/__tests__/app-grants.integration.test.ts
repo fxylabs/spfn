@@ -70,6 +70,9 @@
  *   on `drizzle` WITH GRANT OPTION: `db status` reading them as clean, `db
  *   grant` keeping them — the app still creates, and so owns, tables there —
  *   or a second run issuing statements again;
+ * - P25 (#171, i171af2) a queue schema that is also a managed one refused
+ *   with no reason — the step blocked, nothing applied, and the person told
+ *   neither which schema nor what to change;
  * - I1, checked in P3, P4, P10, P11, P14b, P16, P18-P21, P23, P24: status and `db grant
  *   --dry-run` disagreeing on any (relation or schema, grantee, privilege, kind) —
  *   status reporting what the step does not change, or missing what it does
@@ -95,6 +98,8 @@ const { dbMigrate } = await import('../migrate.js');
 const { dbGrant } = await import('../grant.js');
 const { addCommand } = await import('../../add.js');
 const { dbStatus, DB_STATUS_JSON_MARKER } = await import('../status.js');
+const { grantAppPrivileges } = await import('../utils/app-grants.js');
+const { createPushConnection } = await import('../utils/drizzle.js');
 
 const SCHEMAS = ['i405d_grant', 'spfn_i163fix', 'drizzle'];
 const PACKAGE_SQL = 'CREATE SCHEMA spfn_i163fix;\n--> statement-breakpoint\nCREATE TABLE spfn_i163fix.things (id serial PRIMARY KEY);\n';
@@ -623,6 +628,23 @@ describe('the app privileges step', () =>
         finally
         {
             delete process.env.DATABASE_APP_ROLE;
+        }
+    });
+
+    it('P25 a queue schema that is also a managed one: the step refuses, naming the schema and the declaration to change', async () =>
+    {
+        const connection = await createPushConnection(OWNER_URL);
+
+        try
+        {
+            await expect(grantAppPrivileges(connection.db, { schemas: ['i405d_grant'], tables: [], defaults: [], queue: { schema: 'i405d_grant' } },
+                { app: { name: appRole, source: 'current_user of DATABASE_URL' } }))
+                .rejects.toThrow('The jobs declaration names i405d_grant as the queue schema, which is also a schema the step manages: '
+                    + 'pg-boss\'s queue rule would hold its tables. Give the queue a schema of its own in the project\'s package.json');
+        }
+        finally
+        {
+            await connection.close();
         }
     });
 

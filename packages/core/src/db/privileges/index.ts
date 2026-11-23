@@ -45,6 +45,7 @@ export type {
     OwnedSchema,
     PrivilegeHeldElsewhere,
     PublicGrantByOther,
+    QueuePlan,
     RelationKind,
     RevokeGrantsByOthers,
     SchemaChange,
@@ -54,7 +55,7 @@ export type {
 export { applyAppPrivileges, readPrivilegeCatalog } from './catalog';
 export type { AppPrivilegesRun, GrantDb, RefusedRevoke } from './catalog';
 
-export { foreignOwnedObjects } from './ownership';
+export { catalogRows, foreignOwnedObjects } from './ownership';
 export type { CatalogDb, ForeignOwnedObject } from './ownership';
 
 export { checkAppPrivileges, compareAppPrivileges } from './check';
