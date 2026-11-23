@@ -7,6 +7,7 @@ import { env } from '@spfn/core/config';
 import { CacheTokenStore, SSETokenManager } from '../event/sse/token-manager';
 import type { SSETokenStore } from '../event/sse/token-manager';
 import { getMigrationSnapshot } from './migration-gate';
+import { queueStartAtBoot, type QueueStartRecord } from '../job/queue-start';
 import { CORE_HEALTH_PATH } from './namespace';
 import { getShutdownManager } from './shutdown-manager';
 import { serverLogger } from './logger';
@@ -60,6 +61,8 @@ interface HealthCheckResponse
         redis: ServiceStatus;
     };
     migrations?: MigrationHealth;
+    /** The pg-boss queue schema as `initBoss` read it at boot; absent when jobs did not start */
+    queue?: QueueStartRecord;
 }
 
 interface StartupConfig
@@ -226,6 +229,13 @@ export function createHealthCheckHandler(
             response.status = hasErrors ? 'degraded' : 'ok';
 
             response.migrations = await readMigrationHealth();
+
+            const queue = queueStartAtBoot();
+
+            if (queue)
+            {
+                response.queue = queue;
+            }
         }
 
         const statusCode = response.status === 'ok' ? 200 : 503;

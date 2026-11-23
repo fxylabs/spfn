@@ -8,8 +8,10 @@
  */
 
 import chalk from 'chalk';
+import { sql } from 'drizzle-orm';
 
 import {
+    catalogRows,
     checkAppPrivileges,
     collectMigrationStatus,
     formatPendingMigrations,
@@ -19,11 +21,14 @@ import {
     pendingMigrationsSummary,
     RUN_MIGRATIONS_HINT,
     discoverFunctionMigrations,
+    readJobsDeclaration,
     type AppPrivilegesCheck,
+    type JobsDeclaration,
     type MigrationStatus,
     type MigrationTargetStatus,
 } from '@spfn/core/db';
 import { env } from '@spfn/core/config';
+import { ownsQueue, QUEUE_SCHEMA_VERSION, queueStart, readQueueSchemaState, type QueueSchemaStep, type QueueStart } from '@spfn/core/job';
 import { loadEnv } from '@spfn/core/server';
 import { databaseUrlFor } from './database-connection.js';
 import { describeFailure } from './database-failure.js';
@@ -98,27 +103,34 @@ export type AppPrivilegesStatus = ({ checked: true; source: string; readRole: Re
  * when that role is the read role, held elsewhere otherwise — so that is left
  * out, and `readRole` says why.
  */
-export async function getAppPrivilegesStatus(cwd: string = process.cwd(), databaseUrl?: string): Promise<AppPrivilegesStatus>
+export async function getAppPrivilegesStatus(cwd: string = process.cwd(), databaseUrl?: string, queueSchema?: string): Promise<AppPrivilegesStatus>
 {
     const url = databaseUrl ?? databaseUrlFor('db status');
 
-    return readAppPrivileges(cwd, url).then(
+    return readAppPrivileges(cwd, url, queueSchema).then(
         check => ({ checked: true as const, ...check }),
         (error: unknown) => ({ checked: false as const, detail: describeFailure(error, url) }),
     );
 }
 
-/** The check, which of the project's declarations it compared with (`projectGrantTarget`), and whether the read role was looked up. */
-async function readAppPrivileges(cwd: string, url: string | undefined): Promise<AppPrivilegesCheck & { source: string; readRole: ReadRoleCheck }>
+/**
+ * The check, which of the project's declarations it compared with
+ * (`projectGrantTarget`), and whether the read role was looked up. The queue
+ * schema `queueSchema`, when the app declares one, is the target's queue
+ * part, compared by the queue's rule as the step plans it; and, as for
+ * `db grant`, a project declaring it that names no schema source has no table
+ * of its own, rather than tables that cannot be seen.
+ */
+async function readAppPrivileges(cwd: string, url: string | undefined, queueSchema: string | undefined): Promise<AppPrivilegesCheck & { source: string; readRole: ReadRoleCheck }>
 {
-    const { target, source } = await projectGrantTarget(discoverFunctionMigrations(cwd), url ?? '', cwd);
+    const { target, source } = await projectGrantTarget(discoverFunctionMigrations(cwd), url ?? '', cwd, { jobs: queueSchema !== undefined });
     const { drizzle } = await import('drizzle-orm/postgres-js');
     const connection = await statusConnection(url ?? '');
 
     try
     {
         const read = await lookUpReadRole();
-        const check = await checkAppPrivileges(drizzle({ client: connection }), target, read.name);
+        const check = await checkAppPrivileges(drizzle({ client: connection }), queueSchema === undefined ? target : { ...target, queue: { schema: queueSchema } }, read.name);
 
         return {
             ...check,
@@ -126,6 +138,122 @@ async function readAppPrivileges(cwd: string, url: string | undefined): Promise<
             schemaHeldElsewhere: read.readRole.checked ? check.schemaHeldElsewhere : check.schemaHeldElsewhere.filter(held => !held.through.startsWith('member of ')),
             source,
             readRole: read.readRole,
+        };
+    }
+    finally
+    {
+        await connection.end();
+    }
+}
+
+/**
+ * The app's jobs declaration (`readJobsDeclaration`), none, or why it cannot
+ * be read, in the error's words.
+ */
+export function readJobsDeclarationOf(cwd: string = process.cwd()): JobsDeclaration | undefined | { error: string }
+{
+    try
+    {
+        return readJobsDeclaration(cwd);
+    }
+    catch (error)
+    {
+        return { error: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+/**
+ * The queue schema as `db status` reports it, read as the app role: its
+ * version against the one this build's pg-boss runs on
+ * (`QUEUE_SCHEMA_VERSION`), its owner, what the app role may do there, and
+ * how the server would start on it — the boot rule itself (`queueStart`), so
+ * `refused` here is exactly a boot refusal, with its text.
+ */
+export type QueueStatus =
+    | { checked: false; schema?: string; detail: string }
+    | {
+        checked: true;
+        schema: string;
+        required: number;
+        /** The installed version; null when nothing is installed; absent when the app role may not read it or the schema is not pg-boss's */
+        installed?: number | null;
+        /** The schema's owner; null when there is no schema */
+        owner: string | null;
+        /**
+         * Every role that owns the schema or an object in it, quoted as
+         * identifiers, the schema's owner first (`QueueSchemaState.owners`);
+         * empty when there is no schema. More than one, outside the app
+         * role's own, is a queue no owner command resolves.
+         */
+        owners: readonly string[];
+        /** The role `db status` connects as: the app role */
+        appRole: string;
+        database: string;
+        /** Whether the app role is, or inherits, the owner of the schema and of every object in it (`ownsQueue`) */
+        appOwnsQueue: boolean;
+        appMayCreateOnDatabase: boolean;
+        notPgBoss: boolean;
+        start: QueueStart['kind'];
+        /** The boot refusal's text, where `start` is `refused` */
+        refusal?: string;
+        /** The owner's step that resolves the refusal (`JobQueueSchemaError.step`); null where no command does */
+        refusalStep?: QueueSchemaStep | null;
+    };
+
+/**
+ * The declared queue schema's status (`QueueStatus`); undefined when the app
+ * declares no jobs. Never throws: a declaration that cannot be read, or a
+ * failed read, is `checked: false` with the reason.
+ */
+export async function getQueueStatus(
+    declaration: ReturnType<typeof readJobsDeclarationOf>,
+    databaseUrl?: string,
+): Promise<QueueStatus | undefined>
+{
+    if (declaration === undefined)
+    {
+        return undefined;
+    }
+
+    if ('error' in declaration)
+    {
+        return { checked: false, detail: `the jobs declaration cannot be read: ${declaration.error}` };
+    }
+
+    const url = databaseUrl ?? databaseUrlFor('db status');
+
+    return readQueueStatus(declaration.schema, url ?? '').catch((error: unknown) =>
+        ({ checked: false as const, schema: declaration.schema, detail: describeFailure(error, url) }));
+}
+
+/** `QueueStatus` of `schema`, on a status connection to `url`. */
+async function readQueueStatus(schema: string, url: string): Promise<QueueStatus>
+{
+    const { drizzle } = await import('drizzle-orm/postgres-js');
+    const connection = await statusConnection(url);
+
+    try
+    {
+        const db = drizzle({ client: connection });
+        const state = await readQueueSchemaState(db, schema);
+        const [row] = catalogRows(await db.execute(sql`SELECT current_user::text AS role, current_database()::text AS database,
+            (SELECT pg_catalog.pg_get_userbyid(n.nspowner)::text FROM pg_catalog.pg_namespace n WHERE n.nspname = ${schema}) AS owner`));
+        const start = queueStart(state, String(row.role), true);
+
+        return {
+            checked: true,
+            schema,
+            required: QUEUE_SCHEMA_VERSION,
+            ...(state.version === undefined ? {} : { installed: state.version }),
+            owner: row.owner === null ? null : String(row.owner),
+            owners: state.owners,
+            appRole: String(row.role),
+            database: String(row.database),
+            appOwnsQueue: ownsQueue(state),
+            appMayCreateOnDatabase: state.mayCreateOnDatabase,
+            notPgBoss: state.notPgBoss,
+            start: start.kind,
+            ...(start.kind === 'refused' ? { refusal: start.error.message, refusalStep: start.error.step } : {}),
         };
     }
     finally

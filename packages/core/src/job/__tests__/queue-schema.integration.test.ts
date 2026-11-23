@@ -226,14 +226,14 @@ describe('the queue schema against two roles', () =>
     {
         const facts = { ownsSchema: false, mayCreateOnDatabase: false, notPgBoss: false };
 
-        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: false, usage: false, version: null });
+        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: false, ownsObjects: true, ownedBy: [], owners: [], bootstrapOwned: [], usage: false, version: null });
 
         await owner.unsafe(`${queueInstallSql(QUEUE)}; GRANT SELECT ON ${QUEUE}.version TO ${appRole}`);
-        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: true, usage: false });
+        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: true, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: false });
 
         await owner.unsafe(`UPDATE ${QUEUE}.version SET version = ${QUEUE_SCHEMA_VERSION - 1}`);
         await grantQueue(QUEUE);
-        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: true, usage: true, version: QUEUE_SCHEMA_VERSION - 1 });
+        expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({ ...facts, schema: QUEUE, exists: true, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, version: QUEUE_SCHEMA_VERSION - 1 });
     });
 
     it('Q4 a queue function the app role owns is in foreignOwnedObjects, and only there; the grant step reports the queue apart without blocking', async () =>
@@ -255,7 +255,7 @@ describe('the queue schema against two roles', () =>
 
     it('Q5 a pg-boss schema whose version table does not hold exactly one integer is read as not pg-boss\'s, with no version', async () =>
     {
-        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false, notPgBoss: true };
+        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false, notPgBoss: true };
         const install = (change: string) => owner.unsafe(`
             DROP SCHEMA IF EXISTS ${QUEUE} CASCADE; ${queueInstallSql(QUEUE)}; ${change};
             GRANT USAGE ON SCHEMA ${QUEUE} TO ${appRole}; GRANT SELECT ON ${QUEUE}.version TO ${appRole}`);
@@ -278,7 +278,7 @@ describe('the queue schema against two roles', () =>
 
     it('Q6 a schema of the queue\'s name holding objects but no version table is read as not pg-boss\'s, not as nothing installed', async () =>
     {
-        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false, notPgBoss: true };
+        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false, notPgBoss: true };
 
         await owner.unsafe(`CREATE SCHEMA ${QUEUE}; GRANT USAGE ON SCHEMA ${QUEUE} TO ${appRole}; CREATE TABLE ${QUEUE}.ledger (id integer)`);
         expect(await readQueueSchemaState(appDb, QUEUE)).toEqual(notPgBoss);
@@ -289,7 +289,7 @@ describe('the queue schema against two roles', () =>
 
     it('Q7 a project\'s own version(version integer) table, alone or beside its tables, and a pg-boss install beside a project table, are not pg-boss\'s', async () =>
     {
-        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false, notPgBoss: true };
+        const notPgBoss = { schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false, notPgBoss: true };
 
         await owner.unsafe(`CREATE SCHEMA ${QUEUE}; GRANT USAGE ON SCHEMA ${QUEUE} TO ${appRole};
             CREATE TABLE ${QUEUE}.version (version integer); INSERT INTO ${QUEUE}.version VALUES (${QUEUE_SCHEMA_VERSION});
@@ -311,14 +311,14 @@ describe('the queue schema against two roles', () =>
 
         expect(await owner`SELECT count(*)::int AS partitions FROM pg_class WHERE relnamespace = ${QUEUE}::regnamespace AND relname ~ '^j[0-9a-f]{56}$'`).toEqual([{ partitions: 1 }]);
         expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({
-            schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false, notPgBoss: false, version: QUEUE_SCHEMA_VERSION,
+            schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false, notPgBoss: false, version: QUEUE_SCHEMA_VERSION,
         });
     });
 
     it('Q9 an install another connection commits after the reader\'s first statement reads as before it: no schema, nothing installed', async () =>
     {
         expect(await readQueueSchemaState(afterFirstStatement(() => owner.unsafe(grantedInstall)), QUEUE)).toEqual({
-            schema: QUEUE, exists: false, ownsSchema: false, usage: false, mayCreateOnDatabase: false, notPgBoss: false, version: null,
+            schema: QUEUE, exists: false, ownsSchema: false, ownsObjects: true, ownedBy: [], owners: [], bootstrapOwned: [], usage: false, mayCreateOnDatabase: false, notPgBoss: false, version: null,
         });
     });
 
@@ -328,13 +328,13 @@ describe('the queue schema against two roles', () =>
             GRANT USAGE ON SCHEMA ${QUEUE} TO ${appRole}; GRANT SELECT ON ${QUEUE}.version TO ${appRole}`);
 
         expect(await readQueueSchemaState(appDb, QUEUE)).toEqual({
-            schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false, notPgBoss: true,
+            schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false, notPgBoss: true,
         });
     });
 
     it('Q11 a pg-boss install replaced by a project\'s schema with a version table after the reader\'s first statement reads as one or the other', async () =>
     {
-        const facts = { schema: QUEUE, exists: true, ownsSchema: false, usage: true, mayCreateOnDatabase: false };
+        const facts = { schema: QUEUE, exists: true, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [ownerRole], bootstrapOwned: [], usage: true, mayCreateOnDatabase: false };
         await owner.unsafe(grantedInstall);
 
         const state = await readQueueSchemaState(afterFirstStatement(() => owner.unsafe(`DROP SCHEMA ${QUEUE} CASCADE; CREATE SCHEMA ${QUEUE};
@@ -347,7 +347,7 @@ describe('the queue schema against two roles', () =>
     it('Q12 a pg-boss install dropped and re-installed by another role at an older version after the reader\'s first statement reads as one or the other', () =>
         withAppCreatingSchemas(async () =>
         {
-            const facts = { schema: QUEUE, exists: true, usage: true, mayCreateOnDatabase: true, notPgBoss: false };
+            const facts = { schema: QUEUE, exists: true, usage: true, mayCreateOnDatabase: true, notPgBoss: false, bootstrapOwned: [] };
             await owner.unsafe(queueInstallSql(QUEUE));
 
             const state = await readQueueSchemaState(afterFirstStatement(async () =>
@@ -357,8 +357,8 @@ describe('the queue schema against two roles', () =>
             }, ownerDb), QUEUE);
 
             expect([
-                { ...facts, ownsSchema: true, version: QUEUE_SCHEMA_VERSION },
-                { ...facts, ownsSchema: false, version: QUEUE_SCHEMA_VERSION - 1 },
+                { ...facts, ownsSchema: true, ownsObjects: true, ownedBy: [ownerRole], owners: [ownerRole], version: QUEUE_SCHEMA_VERSION },
+                { ...facts, ownsSchema: false, ownsObjects: false, ownedBy: [], owners: [appRole], version: QUEUE_SCHEMA_VERSION - 1 },
             ]).toContainEqual(state);
         }));
 

@@ -24,16 +24,22 @@ const BOOTSTRAP_SUPERUSER_OID = 10;
 /** The first oid after initdb's (FirstNormalObjectId): every lower one is the system's. */
 const FIRST_NORMAL_OBJECT_ID = 16384;
 
-export interface ForeignOwnedObject
+/** An object as `ALTER … OWNER TO` names it, and its owner. */
+export interface OwnedObject
 {
-    connectedRole: string;
+    /** Its owner, quoted as an identifier */
     owner: string;
-    /** Whether the owner is the bootstrap superuser, whose objects REASSIGN OWNED cannot move */
-    bootstrap: boolean;
     /** What `ALTER … OWNER TO` names the object as: `SCHEMA`, `TABLE`, `SEQUENCE`, `VIEW`, `FUNCTION`, … */
     kind: string;
     /** The object's name, quoted as an identifier, schema-qualified for a relation, type or function, a function's with its argument types */
     object: string;
+}
+
+export interface ForeignOwnedObject extends OwnedObject
+{
+    connectedRole: string;
+    /** Whether the owner is the bootstrap superuser, whose objects REASSIGN OWNED cannot move */
+    bootstrap: boolean;
     /** A relation's, type's or function's schema, unquoted; null for a schema */
     schema: string | null;
     /** The schema's, relation's, type's or function's own name, unquoted */
@@ -101,6 +107,55 @@ export async function foreignOwnedObjects(db: CatalogDb, schemas: string[], queu
         ORDER BY owner, object`);
 
     return catalogRows(result) as unknown as ForeignOwnedObject[];
+}
+
+/**
+ * The statement that moves what `owners` (quoted, not the bootstrap superuser)
+ * own to `target`, with who may run it; undefined when there are none.
+ */
+export function reassignOwnedLine(owners: readonly string[], target: string): string | undefined
+{
+    return owners.length === 0 ? undefined
+        : `Move what ${owners.join(', ')} own${owners.length === 1 ? 's' : ''} to ${target} once, as a superuser or a role that is a member of both: `
+            + `REASSIGN OWNED BY ${owners.join(', ')} TO ${target};`;
+}
+
+/**
+ * One ALTER … OWNER TO `target` for each of `objects`, which the bootstrap
+ * superuser owns: PostgreSQL refuses REASSIGN OWNED BY that role. Undefined
+ * when there are none.
+ */
+export function alterOwnerLines(objects: readonly OwnedObject[], target: string): string | undefined
+{
+    return objects.length === 0 ? undefined
+        : [
+            `PostgreSQL refuses REASSIGN OWNED BY ${objects[0].owner}, the bootstrap superuser; as a superuser, give each of its objects to ${target}:`,
+            ...objects.map(entry => `   ALTER ${entry.kind} ${entry.object} OWNER TO ${target};`),
+        ].join('\n');
+}
+
+/**
+ * The ownership remedy for the pg-boss queue schema, which pg-boss installs
+ * and migrates only as the one role that owns the schema and every object in
+ * it: move what `owners` (quoted: every role that owns part of the queue
+ * and is to give it up) own to `target` — the bootstrap superuser's
+ * `bootstrapObjects` one by one, since PostgreSQL refuses REASSIGN OWNED BY
+ * that role — then run `spfn db grant`, which installs or migrates the queue
+ * as the owner and grants the app role on it. The owner step (the CLI's queue
+ * step) and the server's boot rule both end with it, so the two never name
+ * different moves.
+ */
+export function queueOwnershipTransfer(owners: readonly string[], target: string, bootstrapObjects: readonly OwnedObject[] = []): string
+{
+    const reassigned = owners.filter(owner => !bootstrapObjects.some(entry => entry.owner === owner));
+
+    return [
+        reassignOwnedLine(reassigned, target),
+        reassigned.length === 0 ? undefined : `   (REASSIGN OWNED moves everything ${reassigned.join(', ')} own${reassigned.length === 1 ? 's' : ''} in this database.)`,
+        alterOwnerLines(bootstrapObjects, target),
+        'Then run spfn db grant at once, best while jobs are paused: until it runs, the app role is refused on the queue\'s tables '
+            + '(@spfn/core db README, "Database roles").',
+    ].filter(Boolean).join('\n');
 }
 
 /** A query's rows, from node-postgres's `{ rows }` or postgres.js's array. */

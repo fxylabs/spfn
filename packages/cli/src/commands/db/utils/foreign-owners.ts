@@ -21,7 +21,7 @@
  * which the app privileges step asks too.
  */
 
-import { foreignOwnedObjects, type ForeignOwnedObject } from '@spfn/core/db';
+import { alterOwnerLines, foreignOwnedObjects, queueOwnershipTransfer, reassignOwnedLine, type ForeignOwnedObject } from '@spfn/core/db';
 
 import type { PushConnection } from './drizzle.js';
 
@@ -110,8 +110,8 @@ export async function ownershipRemedy(
 
     return [
         `💡 spfn db push connects as ${connectedRole} (DATABASE_OWNER_URL), and objects it manages belong to another role: ${listing(objects)}.`,
-        reassignOwned(objects.filter(entry => !entry.bootstrap), connectedRole),
-        alterOwners(objects.filter(entry => entry.bootstrap), connectedRole),
+        reassignOwnedLine(ownersOf(objects.filter(entry => !entry.bootstrap)), connectedRole),
+        alterOwnerLines(objects.filter(entry => entry.bootstrap), connectedRole),
         'Then run spfn db push again (@spfn/core db README, "Database roles").',
     ].filter(Boolean).join('\n');
 }
@@ -120,28 +120,25 @@ export async function ownershipRemedy(
  * The remedy for a queue schema whose schema or objects (`objects`, not
  * empty) belong to a role the owner cannot act for — as when the app role
  * installed it at its start, or owns the schema while the owner owns the
- * objects in it: what the owner step leaves alone, then REASSIGN OWNED or one
- * ALTER … OWNER TO per bootstrap superuser's object, as for push, which leave
- * the owner holding the schema and every object in it, and `spfn db grant`
- * straight after, since the app holds nothing on what moves until it runs.
+ * objects in it: what the owner step leaves alone, then `@spfn/core/db`'s
+ * `queueOwnershipTransfer` — REASSIGN OWNED or one ALTER … OWNER TO per
+ * bootstrap superuser's object, as for push, which leave the owner holding the
+ * schema and every object in it, and `spfn db grant` straight after, since the
+ * app holds nothing on what moves until it runs — the transfer the server's
+ * boot names for the same state.
  * It says nothing of who migrates the queue meanwhile: the app role can only
  * where it owns the schema and every object, which `objects` does not show.
  */
 export function queueOwnershipRemedy(schema: string, objects: ForeignOwnedObject[]): string
 {
     const { connectedRole } = objects[0];
-    const owners = [...new Set(objects.filter(entry => !entry.bootstrap).map(entry => entry.owner))];
 
     return [
         `⚠️  In queue schema ${schema} (jobs), another role than ${connectedRole}, the owner this step connects as, owns: ${listing(objects)}. `
             + 'pg-boss installs and migrates the queue only as the one role that owns the schema and every object in it, so nothing is '
             + 'installed, migrated or granted on the queue; the rest of the step goes on.',
-        reassignOwned(objects.filter(entry => !entry.bootstrap), connectedRole),
-        owners.length === 0 ? undefined : `   (REASSIGN OWNED moves everything ${owners.join(', ')} own${owners.length === 1 ? 's' : ''} in this database.)`,
-        alterOwners(objects.filter(entry => entry.bootstrap), connectedRole),
-        'Then run spfn db grant at once, best while jobs are paused: until it runs, the app role is refused on the queue\'s tables '
-            + '(@spfn/core db README, "Database roles").',
-    ].filter(Boolean).join('\n');
+        queueOwnershipTransfer(ownersOf(objects), connectedRole, objects.filter(entry => entry.bootstrap)),
+    ].join('\n');
 }
 
 /** The first few objects with their owners, and how many more there are. */
@@ -154,26 +151,8 @@ function listing(objects: ForeignOwnedObject[]): string
     return `${listed.join(', ')}${more}`;
 }
 
-/** REASSIGN OWNED for every owner of `objects`; undefined when there are none. */
-function reassignOwned(objects: ForeignOwnedObject[], connectedRole: string): string | undefined
+/** The owners of `objects`, each once. */
+function ownersOf(objects: ForeignOwnedObject[]): string[]
 {
-    const owners = [...new Set(objects.map(entry => entry.owner))];
-
-    return owners.length === 0 ? undefined
-        : `Move what ${owners.join(', ')} own${owners.length === 1 ? 's' : ''} to ${connectedRole} once, as a superuser or a role that is a member of both: `
-            + `REASSIGN OWNED BY ${owners.join(', ')} TO ${connectedRole};`;
-}
-
-/**
- * One ALTER … OWNER TO for each of `objects`, which the bootstrap superuser
- * owns: PostgreSQL refuses REASSIGN OWNED BY that role. Undefined when there
- * are none.
- */
-function alterOwners(objects: ForeignOwnedObject[], connectedRole: string): string | undefined
-{
-    return objects.length === 0 ? undefined
-        : [
-            `PostgreSQL refuses REASSIGN OWNED BY ${objects[0].owner}, the bootstrap superuser; as a superuser, give each of its objects to ${connectedRole}:`,
-            ...objects.map(entry => `   ALTER ${entry.kind} ${entry.object} OWNER TO ${connectedRole};`),
-        ].join('\n');
+    return [...new Set(objects.map(entry => entry.owner))];
 }

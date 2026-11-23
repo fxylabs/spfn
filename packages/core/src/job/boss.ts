@@ -5,9 +5,11 @@
  */
 
 import PgBoss from 'pg-boss';
+import { DEFAULT_QUEUE_SCHEMA } from '@spfn/core/db';
 import { logger } from '@spfn/core/logger';
 import { MIN_GRACEFUL_WAIT, recordWorkers, stopInstance, stopWorkers } from './boss-workers';
 import type { RunningJob } from './boss-workers';
+import { decideQueueStart, type QueueStart } from './queue-start';
 
 const jobLogger = logger.child('@spfn/core:job');
 
@@ -158,8 +160,25 @@ export type BossConfig = BossOptions;
  *
  * Must be called before registerJobs(). Typically handled by defineServerConfig().
  *
+ * Before pg-boss starts, the queue schema is read as the connected role and
+ * the boot rule (queue-start.ts) decides whether pg-boss may install or
+ * migrate it as that role (`migrate: true`), starts on it as it is
+ * (`migrate: false`), or does not start: the app role changes the queue's
+ * structure only where it owns the schema and every object in it or, with
+ * nothing installed, may create it. pg-boss's structure step — its install,
+ * migration or version check — runs first, on an instance of its own that
+ * starts nothing else (`settleQueueSchema`), and the running instance starts
+ * after it, on the schema as that step left it. The schema can change between
+ * the read and pg-boss's first statement: when the structure step then fails,
+ * its instance is stopped and the schema read again, and an answer that
+ * differs is acted on once; an unchanged one rethrows pg-boss's error.
+ *
  * @param options - pg-boss configuration options
  * @returns The pg-boss instance
+ * @throws JobQueueSchemaError when the boot rule refuses the queue schema:
+ *     not installed, older than pg-boss's or unreadable to a role that may
+ *     not change it, or not pg-boss's
+ * @throws QueueSchemaNameError when `schema` is no queue schema name
  *
  * @example
  * ```typescript
@@ -181,8 +200,115 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
 
     jobLogger.info('Initializing pg-boss...');
 
+    const read = startable(await decideQueueStart(options.connectionString, options.schema));
+
     setBossConfig(options);
 
+    const start = await settleQueueSchema(options, read).catch((error: unknown) => settleChangedQueue(options, read, error));
+    const boss = await startBoss(options, start);
+
+    setBossInstance(boss);
+
+    jobLogger.info('pg-boss started successfully');
+
+    return boss;
+}
+
+type StartableQueue = Exclude<QueueStart, { kind: 'refused' }>;
+
+/** `start`, unless the boot rule refused the queue schema: then its `JobQueueSchemaError` is thrown. */
+function startable(start: QueueStart): StartableQueue
+{
+    if (start.kind === 'refused')
+    {
+        throw start.error;
+    }
+
+    return start;
+}
+
+/**
+ * pg-boss's structure step failed on the queue schema the boot rule answered
+ * `acted` for, and its instance is stopped. The schema may have changed
+ * between that read and pg-boss's first statement — pg-boss offers no hook to
+ * make them one step — so it is read again: where the rule now answers
+ * otherwise, that answer is acted on, once — refused, or the step run the way
+ * it says. Otherwise `error` is pg-boss's own and is rethrown unchanged, as it
+ * is where the schema cannot be read again.
+ */
+async function settleChangedQueue(options: BossOptions, acted: StartableQueue, error: unknown): Promise<StartableQueue>
+{
+    const now = await decideQueueStart(options.connectionString, options.schema).catch((rereadError: unknown) =>
+    {
+        jobLogger.warn('pg-boss failed to start, and the queue schema could not be read again', { error: rereadError });
+
+        return acted;
+    });
+
+    if (now.kind === acted.kind)
+    {
+        throw error;
+    }
+
+    jobLogger.warn(`pg-boss failed to start on the queue schema as read (${acted.kind}); read again, it is ${now.kind}: acting on that`, { error });
+
+    return settleQueueSchema(options, startable(now));
+}
+
+/**
+ * pg-boss's structure step on the queue schema as `start` says — its install
+ * or migration, or its version check — on an instance that supervises and
+ * schedules nothing, so that it may be stopped whatever happens: pg-boss's
+ * `stop()` does nothing on an instance whose `start()` failed, and a failed
+ * start of an instance that supervises or schedules can leave its timers
+ * running. Its start opens its pool, runs the step, and then starts its
+ * manager, which cannot fail; so a failed start has opened its pool alone,
+ * which is closed, and a started one is stopped. Resolves `start`.
+ */
+async function settleQueueSchema(options: BossOptions, start: StartableQueue): Promise<StartableQueue>
+{
+    const boss = new PgBoss({ ...pgBossOptions(options, start), supervise: false, schedule: false });
+
+    boss.on('error', (error) =>
+    {
+        jobLogger.error('pg-boss error:', { error });
+    });
+
+    await boss.start().catch((error: unknown) => closePool(boss).then(() => Promise.reject(error)));
+    await boss.stop({ graceful: false });
+
+    return start;
+}
+
+/** Close the pool of `boss`, whose `start()` failed: the pool pg-boss opened for it, the only thing that start leaves. */
+async function closePool(boss: PgBoss): Promise<void>
+{
+    await (boss.getDb() as PgBoss.Db & { close(): Promise<void> }).close();
+}
+
+/**
+ * The running pg-boss instance, on a queue schema its structure step has
+ * settled (`settleQueueSchema`): unmigrated (`migrate: false`) unless the
+ * schema is newer than pg-boss's, where only `migrate: true` lets pg-boss
+ * start, and sends nothing.
+ */
+async function startBoss(options: BossOptions, start: StartableQueue): Promise<PgBoss>
+{
+    const boss = new PgBoss({ ...pgBossOptions(options, start), migrate: start.kind === 'newer' });
+    recordWorkers(boss);
+
+    boss.on('error', (error) =>
+    {
+        jobLogger.error('pg-boss error:', { error });
+    });
+
+    await boss.start();
+
+    return boss;
+}
+
+function pgBossOptions(options: BossOptions, start: StartableQueue): PgBoss.ConstructorOptions
+{
     const needsSSL = requiresSSLWithoutVerification(options.connectionString);
 
     const pgBossOptions: PgBoss.ConstructorOptions = {
@@ -191,8 +317,9 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
         connectionString: needsSSL
             ? stripSslModeFromUrl(options.connectionString)
             : options.connectionString,
-        schema: options.schema ?? 'spfn_queue',
+        schema: options.schema ?? DEFAULT_QUEUE_SCHEMA,
         maintenanceIntervalSeconds: options.maintenanceIntervalSeconds ?? 120,
+        migrate: start.kind !== 'current',
     };
 
     if (needsSSL)
@@ -206,22 +333,7 @@ export async function initBoss(options: BossOptions): Promise<PgBoss>
         pgBossOptions.monitorIntervalSeconds = options.monitorIntervalSeconds;
     }
 
-    const boss = new PgBoss(pgBossOptions);
-    recordWorkers(boss);
-
-    // Event handlers
-    boss.on('error', (error) =>
-    {
-        jobLogger.error('pg-boss error:', { error });
-    });
-
-    await boss.start();
-
-    setBossInstance(boss);
-
-    jobLogger.info('pg-boss started successfully');
-
-    return boss;
+    return pgBossOptions;
 }
 
 /**

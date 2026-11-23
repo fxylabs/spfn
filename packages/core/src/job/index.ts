@@ -108,6 +108,7 @@ export { registerJobs } from './register-jobs';
 
 // Queue schema: its version, install and migration SQL, and catalog state
 export {
+    JobQueueSchemaError,
     QUEUE_SCHEMA_VERSION,
     QueueSchemaChangedError,
     QueueSchemaNameError,
@@ -116,5 +117,13 @@ export {
     queueMigrationSql,
     readQueueSchemaState,
     type QueueSchemaState,
+    type QueueSchemaStep,
 } from './queue-schema';
 export { isQueueSchemaRace } from './queue-schema-race';
+
+// Boot rule: how pg-boss starts on the queue schema, or why it does not
+export {
+    ownsQueue,
+    queueStart,
+    type QueueStart,
+} from './queue-start';

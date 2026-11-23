@@ -55,8 +55,8 @@ export type {
 export { applyAppPrivileges, readPrivilegeCatalog } from './catalog';
 export type { AppPrivilegesRun, GrantDb, RefusedRevoke } from './catalog';
 
-export { catalogRows, foreignOwnedObjects } from './ownership';
-export type { CatalogDb, ForeignOwnedObject } from './ownership';
+export { alterOwnerLines, catalogRows, foreignOwnedObjects, queueOwnershipTransfer, reassignOwnedLine } from './ownership';
+export type { CatalogDb, ForeignOwnedObject, OwnedObject } from './ownership';
 
 export { checkAppPrivileges, compareAppPrivileges } from './check';
 export type {

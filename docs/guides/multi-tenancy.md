@@ -84,13 +84,18 @@ If the app uses jobs (`@spfn/core/job`), declare them in its `package.json`:
 
 (`{ "jobs": { "schema": "<name>" } }` when `.jobs()` names another schema than `spfn_queue`.) The
 same owner commands then install and migrate pg-boss's queue schema as the owner and grant the app
-role what pg-boss needs there — row access, never ownership — so the app role needs no `CREATE`
-on the database (see [The queue schema](../../packages/cli/README.md#the-queue-schema-jobs) in the
-CLI README). Without the declaration, pg-boss creates the schema as the app role at its first
-start, and the app role needs `GRANT CREATE ON DATABASE acme TO app_user;` once. A queue the app
-role installed that way stays its own: the commands warn with the `REASSIGN OWNED` remedy and leave
-it alone; move it to the owner and run `spfn db grant`, then
-`REVOKE CREATE ON DATABASE acme FROM app_user;`.
+role what pg-boss needs there — row access, never ownership (see [The queue
+schema](../../packages/cli/README.md#the-queue-schema-jobs) in the CLI README). Do not grant the
+app role `CREATE` on the database: the server starts pg-boss without changing the queue's
+structure, and refuses to start — before it listens, with a `JobQueueSchemaError` naming
+`spfn db migrate` or `spfn db grant` — when the queue is not installed, is older than its pg-boss,
+or cannot be read by the app role (the
+[boot rule](../../packages/core/src/job/README.md#who-installs-the-queue-schema--the-boot-rule)).
+If you granted `CREATE` on the database earlier, revoke it once the owner installed the queue
+(`REVOKE CREATE ON DATABASE acme FROM app_user;`); a queue the app role installed itself keeps
+working — the owner's commands warn with the `REASSIGN OWNED` remedy and leave it alone; move it
+to the owner and run `spfn db grant`. Partitioned queues (`createQueue(name, { partition: true })`)
+are not supported with two roles.
 
 In a database whose tables already exist, move ownership off the app role if it created them (the
 same README section), then run `spfn db grant`.

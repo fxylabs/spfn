@@ -948,16 +948,18 @@ the declaration — a second run issues none.
   (`"spfn": { "jobs": true }`, or `{ "schema": "<name>" }`, `readJobsDeclaration` below) has the
   schema installed and migrated by the owner — `db push`, `db migrate` and `db grant` run
   pg-boss's own plans as the owner before this step (`spfn add` does nothing to the queue) — and
-  granted by the row above. Revoke the
-  app role's `CREATE` on the database once the owner has installed the queue
-  (`REVOKE CREATE ON DATABASE acme FROM app_user;`). A queue the app role installed — every jobs
-  deployment from before — belongs to it: the commands install, migrate and grant nothing there,
-  print the `REASSIGN OWNED` remedy, and exit 0, the rest of the step applied; move it to the owner
-  and run `spfn db grant` at once, best while jobs are paused (the CLI README, [The queue
-  schema](../../../cli/README.md#the-queue-schema-jobs)). Without the declaration nothing changes:
-  pg-boss creates and owns the schema as the app role at its first start, so the app role needs
-  `CREATE` on the database once (`GRANT CREATE ON DATABASE acme TO app_user;`), and the step leaves
-  the schema alone.
+  granted by the row above. The server's boot rule (the job README, "Who installs the queue
+  schema") lets pg-boss install or migrate it as the app role only where the app role owns it, or
+  where nothing is installed and it may `CREATE` on the database; on a queue the owner installed it
+  starts pg-boss without a structure statement, and it refuses to start (`JobQueueSchemaError`,
+  naming `spfn db migrate`/`push` or `spfn db grant`) on one it would have to install or migrate as
+  a role that may not. Revoke the app role's `CREATE` on the database once the owner has installed
+  the queue (`REVOKE CREATE ON DATABASE acme FROM app_user;`). A queue the app role installed —
+  every jobs deployment from before — belongs to it and keeps working (it migrates it at boot): the
+  commands install, migrate and grant nothing there, print the `REASSIGN OWNED` remedy, and exit 0,
+  the rest of the step applied; move it to the owner and run `spfn db grant` at once, best while
+  jobs are paused (the CLI README, [The queue schema](../../../cli/README.md#the-queue-schema-jobs)).
+  Partitioned queues are not supported under the role split (below).
 
 `spfn db status` (as the app) is a view of the step's plan: it reads the catalog the step reads —
 every access list entry with its grant option, every column grant — for the roles the step plans
@@ -983,7 +985,14 @@ does not know which role `DATABASE_OWNER_URL` connects as, so not whether that r
 each relation and schema, nor whether PostgreSQL would refuse a `REVOKE` (2BP01) — it predicts no
 refusal; `spfn db grant --dry-run` runs the statements and reports one. `--json` carries it as
 `privileges` (`drift`, `schemasWithoutUsage`, `schemaDrift`, `publicGrantsByOthers`, `heldElsewhere`,
-`schemaHeldElsewhere`, `ownedTables`, `ownedSchemas`, `publicMayCreateInPublic`, `readRole`); a read role it cannot look up through
+`schemaHeldElsewhere`, `ownedTables`, `ownedSchemas`, `publicMayCreateInPublic`, `readRole`). When
+the app declares jobs (`"spfn": { "jobs": … }`), the queue schema is compared too, by the queue's
+rule (a function's `EXECUTE` is `kind: "function"` drift), and a `queue` section reports its
+installed version against the one this build's pg-boss runs on, its owner, and how the server would
+start on it — the boot rule itself. A queue the boot refuses until the owner's step runs (not
+installed, older, unreadable) is work to do, as pending migrations are, and status exits 0; it
+exits 1 only where no command resolves the refusal (a schema not pg-boss's, a version pg-boss
+cannot migrate from); a read role it cannot look up through
 `DATABASE_READ_URL` is reported as not checked, with the reason, beside the app role's and PUBLIC's
 part. `drift` has one entry per relation and grantee, so one
 table can appear more than once (for the app role and for PUBLIC, say): key it by schema, table and
@@ -1197,7 +1206,8 @@ reads, plans and runs the statements in one transaction, none when blocked, and 
 with 2BP01, after which the transaction rolled back); with `rollback` it always rolls back.
 `target` is `{ schemas, tables, defaults, queue? }` (`AppPrivilegesTarget`), `roles` is `{ app, read? }`.
 `target.queue` — `{ schema }`, the pg-boss queue schema — is planned by a rule of its own, which
-the CLI passes when `package.json` declares jobs: the app role gets `USAGE` on the schema and nothing else there (its
+the CLI passes when `package.json` declares jobs (`db grant` and its steps, and `spfn db status`
+to compare it): the app role gets `USAGE` on the schema and nothing else there (its
 `CREATE`, the read role's and PUBLIC's are revoked, as on any managed schema), `SELECT`, `INSERT`, `UPDATE`,
 `DELETE` on every table there, **partitions included** (pg-boss names its `job_common` partition
 in its statements, and PostgreSQL checks a partition's own privileges when it is named), `SELECT`
@@ -1214,8 +1224,11 @@ names the schema and asks for one of the queue's own in `"spfn": { "jobs": { "sc
 Partitioned queues (`createQueue(name, { partition: true })`) attach a table to `job`, which only
 its owner may do: under split roles the app role cannot create one.
 `checkAppPrivileges(db, target, read?)`, on the app role's connection, reads the catalog for the app
-role and the read role and returns the plan as far as it concerns what the app role can do
-(`AppPrivilegesCheck`); `compareAppPrivileges(catalog, target, roles)` is its pure half, on a
+role and the read role — the managed schemas and the queue schema with its functions, as the step
+reads them (`readManagedObjects`) — and returns the plan as far as it concerns what the app role can
+do (`AppPrivilegesCheck`); the owner, whom the app cannot name, is taken to own every schema, so a
+queue the owner installed is compared by the queue's rule, and one the app role owns is reported
+in `ownedSchemas`. `compareAppPrivileges(catalog, target, roles)` is its pure half, on a
 `PrivilegeCatalog` read as the app (no role taken for the owner, no relation foreign-owned). The plan carries the comparison its
 statements are written from: `changes` (`GranteeChange` per relation and grantee) and `withoutUsage`. `foreignOwnedObjects(db, schemas)` is the catalog read
 of what another role owns — schemas, relations and enum types — shared with `spfn db push`'s

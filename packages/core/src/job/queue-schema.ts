@@ -13,7 +13,7 @@
 import { createRequire } from 'node:module';
 import PgBoss from 'pg-boss';
 import { sql, type SQL } from 'drizzle-orm';
-import { catalogRows, isQueueSchemaName, quoteIdentifier, type CatalogDb } from '@spfn/core/db';
+import { catalogRows, isQueueSchemaName, quoteIdentifier, type CatalogDb, type OwnedObject } from '@spfn/core/db';
 import { describeError } from '@spfn/core/logger';
 
 /** A pg-boss migration: the schema version it leaves, the one it starts from, and its SQL each way. */
@@ -28,7 +28,7 @@ interface PgBossMigration
 const pgBossFile = createRequire(import.meta.url);
 
 /** The pg-boss release core pins. */
-const PG_BOSS_RELEASE: string = pgBossFile('pg-boss/package.json').version;
+export const PG_BOSS_RELEASE: string = pgBossFile('pg-boss/package.json').version;
 
 /** The queue schema version the pinned pg-boss creates and runs on, from its `version.json`. */
 export const QUEUE_SCHEMA_VERSION: number = pgBossFile('pg-boss/version.json').schema;
@@ -50,12 +50,46 @@ function pgBossMigrations(schema: string): PgBossMigration[]
     return store.getAll(schema);
 }
 
-/** A queue schema at a version the pinned pg-boss cannot migrate to `QUEUE_SCHEMA_VERSION`. */
-export class QueueSchemaVersionError extends Error
+/**
+ * The owner's step that resolves a queue schema refusal: `owner` installs or
+ * migrates the queue (`spfn db migrate`, `spfn db push`), `grant` grants the
+ * app role its part (`spfn db grant`).
+ */
+export type QueueSchemaStep = 'owner' | 'grant';
+
+/**
+ * The queue schema refused at boot (`initBoss`): pg-boss would have to
+ * install or migrate it as a role that may not, or cannot read it, or it is
+ * not pg-boss's, or at a version pg-boss cannot migrate from. The message
+ * names the schema, the versions where they matter, and what to do.
+ */
+export class JobQueueSchemaError extends Error
 {
-    constructor(readonly schema: string, readonly installed: number, readonly required: number, reason: string)
+    /** The queue schema version this build's pg-boss runs on */
+    readonly required: number = QUEUE_SCHEMA_VERSION;
+
+    /**
+     * @param schema - the queue schema
+     * @param installed - its version; null when nothing is installed, absent when not read
+     * @param step - the owner's step that resolves it; null where no spfn command does
+     */
+    constructor(readonly schema: string, readonly installed: number | null | undefined, readonly step: QueueSchemaStep | null, message: string)
     {
-        super(`Queue schema ${schema} is at pg-boss schema version ${installed}; pg-boss ${PG_BOSS_RELEASE} needs ${required}: ${reason}`);
+        super(message);
+        this.name = 'JobQueueSchemaError';
+    }
+}
+
+/**
+ * A queue schema at a version the pinned pg-boss cannot migrate to
+ * `QUEUE_SCHEMA_VERSION`: the owner step's `queueMigrationSql` and the boot
+ * (`initBoss`) refuse it alike.
+ */
+export class QueueSchemaVersionError extends JobQueueSchemaError
+{
+    constructor(schema: string, override readonly installed: number, override readonly required: number, reason: string)
+    {
+        super(schema, installed, null, `Queue schema ${schema} is at pg-boss schema version ${installed}; pg-boss ${PG_BOSS_RELEASE} needs ${required}: ${reason}`);
         this.name = 'QueueSchemaVersionError';
     }
 }
@@ -84,19 +118,40 @@ export function queueInstallSql(schema: string): string
  */
 export function queueMigrationSql(schema: string, from: number): string
 {
+    const unmigratable = queueMigrationRefusal(schema, from);
+
+    if (unmigratable !== undefined)
+    {
+        throw unmigratable;
+    }
+
+    return PgBoss.getMigrationPlans(schema, String(from));
+}
+
+/**
+ * Why the pinned pg-boss cannot migrate the queue schema `schema` from
+ * version `from` to `QUEUE_SCHEMA_VERSION`; undefined when it can. Below its
+ * oldest migration start the answer names the version to migrate to first,
+ * with an earlier pg-boss release.
+ *
+ * @throws QueueSchemaNameError when `schema` is no queue schema name
+ */
+export function queueMigrationRefusal(schema: string, from: number): QueueSchemaVersionError | undefined
+{
     const oldest = Math.min(...migrationStarts(queueSchemaName(schema)));
 
     if (from >= QUEUE_SCHEMA_VERSION)
     {
-        throw new QueueSchemaVersionError(schema, from, QUEUE_SCHEMA_VERSION, 'there is nothing to migrate');
+        return new QueueSchemaVersionError(schema, from, QUEUE_SCHEMA_VERSION, 'there is nothing to migrate');
     }
 
     if (!Number.isInteger(from) || from < oldest)
     {
-        throw new QueueSchemaVersionError(schema, from, QUEUE_SCHEMA_VERSION, `it migrates from version ${oldest} on`);
+        return new QueueSchemaVersionError(schema, from, QUEUE_SCHEMA_VERSION, `it migrates from version ${oldest} on. `
+            + `Migrate it to version ${oldest} first, with the pg-boss release that runs on that schema version.`);
     }
 
-    return PgBoss.getMigrationPlans(schema, String(from));
+    return undefined;
 }
 
 /** A queue schema name pg-boss's unquoted SQL breaks on, or that it and the catalog would read as two schemas (`isQueueSchemaName`). */
@@ -127,6 +182,34 @@ export interface QueueSchemaState
     readonly exists: boolean;
     /** Whether the connected role is its owner or inherits its owner's privileges */
     readonly ownsSchema: boolean;
+    /**
+     * Whether the connected role is, or inherits, the owner of every object
+     * the schema holds (`SchemaObject`); true when it holds none. PostgreSQL
+     * lets only an object's owner alter, replace or drop it, whoever owns
+     * the schema.
+     */
+    readonly ownsObjects: boolean;
+    /**
+     * The roles through which the connected role owns the schema or objects
+     * in it — itself, or a role it inherits — each once, quoted as
+     * identifiers; empty where it owns nothing there. What the ownership
+     * remedy moves (`queueOwnershipTransfer`).
+     */
+    readonly ownedBy: readonly string[];
+    /**
+     * Every role that owns the schema or an object in it — those of
+     * `ownedBy` among them — each once, quoted as identifiers, the schema's
+     * owner first; empty where there is no schema. pg-boss installs and
+     * migrates the queue only as a role that owns, or inherits the owner of,
+     * all of it.
+     */
+    readonly owners: readonly string[];
+    /**
+     * The schema and the objects in it the bootstrap superuser owns, as
+     * `ALTER … OWNER TO` names them: PostgreSQL refuses REASSIGN OWNED BY
+     * that role, so the ownership transfer moves each one by one.
+     */
+    readonly bootstrapOwned: readonly OwnedObject[];
     /** Whether the connected role may use the schema */
     readonly usage: boolean;
     /** Whether the connected role may create schemas in the database */
@@ -155,6 +238,10 @@ interface QueueSchemaFacts
 {
     readonly exists: boolean;
     readonly ownsSchema: boolean;
+    /** The schema's owner, quoted as an identifier; null when there is no schema */
+    readonly schemaOwner: string | null;
+    /** Whether the schema's owner is the bootstrap superuser */
+    readonly schemaOwnerBootstrap: boolean;
     readonly usage: boolean;
     readonly mayCreateOnDatabase: boolean;
     readonly mayReadVersion: boolean;
@@ -181,12 +268,18 @@ interface VersionRead
  * by its catalog. A
  * partition attached to the schema's `job` table is one pg-boss's
  * `create_queue` makes for a partitioned queue, under a name it derives from
- * the queue's (`j<sha224>`).
+ * the queue's (`j<sha224>`). `owned` is whether the connected role is, or
+ * inherits, its owner; false for a kind whose owner is not read.
  */
 interface SchemaObject
 {
     readonly object: string;
     readonly jobPartition: boolean;
+    readonly owned: boolean;
+    /** Its owner, quoted as an identifier; null for a kind whose owner is not read */
+    readonly owner: string | null;
+    /** The object as `ALTER … OWNER TO` names it, where the bootstrap superuser owns it; null otherwise */
+    readonly bootstrapOwned: OwnedObject | null;
 }
 
 /** pg-boss's objects in a queue schema, from its own SQL (`pgBossObjects`). */
@@ -307,6 +400,13 @@ function queueSchemaState(schema: string, { objects, versionRead, ...facts }: Qu
         schema,
         exists: facts.exists,
         ownsSchema: facts.ownsSchema,
+        ownsObjects: objects.every(object => object.owned),
+        ownedBy: [...new Set([...facts.ownsSchema && facts.schemaOwner !== null ? [facts.schemaOwner] : [],
+            ...objects.flatMap(object => object.owned && object.owner !== null ? [object.owner] : [])])],
+        owners: [...new Set([...facts.schemaOwner === null ? [] : [facts.schemaOwner],
+            ...objects.flatMap(object => object.owner === null ? [] : [object.owner]).sort()])],
+        bootstrapOwned: [...facts.schemaOwnerBootstrap && facts.schemaOwner !== null ? [{ owner: facts.schemaOwner, kind: 'SCHEMA', object: schema }] : [],
+            ...objects.flatMap(object => object.bootstrapOwned === null ? [] : [object.bootstrapOwned])],
         usage: facts.usage,
         mayCreateOnDatabase: facts.mayCreateOnDatabase,
     };
@@ -342,6 +442,9 @@ function holdsPgBossAlone(objects: readonly SchemaObject[], schema: string): boo
         && pgBoss.required.every(required => objects.some(({ object }) => object === required));
 }
 
+/** The bootstrap superuser's oid (BOOTSTRAP_SUPERUSERID): fixed, whatever the role is named. */
+const BOOTSTRAP_SUPERUSER_OID = 10;
+
 /** The objects of the namespace `n` of the enclosing query, as a JSON array of `SchemaObject`. */
 const SCHEMA_OBJECTS = sql`
     SELECT json_agg(json_build_object(
@@ -354,7 +457,16 @@ const SCHEMA_OBJECTS = sql`
         'jobPartition', coalesce(c.relispartition AND EXISTS (
             SELECT FROM pg_catalog.pg_inherits i JOIN pg_catalog.pg_class job ON job.oid = i.inhparent
             WHERE i.inhrelid = c.oid AND job.relnamespace = n.oid AND job.relname = 'job'
-        ), false)))
+        ), false),
+        'owned', coalesce(pg_catalog.pg_has_role(coalesce(c.relowner, t.typowner, p.proowner), 'USAGE'), false),
+        'owner', quote_ident(pg_catalog.pg_get_userbyid(coalesce(c.relowner, t.typowner, p.proowner))),
+        'bootstrapOwned', CASE WHEN coalesce(c.relowner, t.typowner, p.proowner) = ${sql.raw(String(BOOTSTRAP_SUPERUSER_OID))} THEN json_build_object(
+            'owner', quote_ident(pg_catalog.pg_get_userbyid(${sql.raw(String(BOOTSTRAP_SUPERUSER_OID))})),
+            'kind', CASE WHEN p.oid IS NOT NULL THEN 'FUNCTION' WHEN t.oid IS NOT NULL THEN 'TYPE'
+                WHEN c.relkind = 'S' THEN 'SEQUENCE' WHEN c.relkind = 'v' THEN 'VIEW' WHEN c.relkind = 'm' THEN 'MATERIALIZED VIEW'
+                WHEN c.relkind = 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+            'object', quote_ident(n.nspname) || '.' || quote_ident(coalesce(c.relname, t.typname, p.proname))
+                || coalesce('(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')', '')) END))
     FROM pg_catalog.pg_depend d
     LEFT JOIN pg_catalog.pg_class c ON d.classid = 'pg_catalog.pg_class'::regclass AND c.oid = d.objid
     LEFT JOIN pg_catalog.pg_type t ON d.classid = 'pg_catalog.pg_type'::regclass AND t.oid = d.objid
@@ -371,6 +483,8 @@ async function readQueueSchemaFacts(db: CatalogDb, schema: string, versionRead: 
     const [facts] = catalogRows(await db.execute(sql`
         SELECT n.oid IS NOT NULL AS exists,
             coalesce(pg_catalog.pg_has_role(n.nspowner, 'USAGE'), false) AS "ownsSchema",
+            quote_ident(pg_catalog.pg_get_userbyid(n.nspowner)) AS "schemaOwner",
+            coalesce(n.nspowner = ${sql.raw(String(BOOTSTRAP_SUPERUSER_OID))}, false) AS "schemaOwnerBootstrap",
             coalesce(pg_catalog.has_schema_privilege(n.oid, 'USAGE'), false) AS usage,
             pg_catalog.has_database_privilege(current_database(), 'CREATE') AS "mayCreateOnDatabase",
             coalesce(pg_catalog.has_table_privilege(v.oid, 'SELECT'), false) AS "mayReadVersion",

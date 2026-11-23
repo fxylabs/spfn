@@ -219,7 +219,8 @@ Its startup sequence:
    anything listens
 3. `validateServerConfig()` — throws on bad port/timeout/shutdown/healthCheck.path
 4. `lifecycle.beforeInfrastructure` → init DB (unless disabled) → init Redis (unless
-   disabled) → `lifecycle.afterInfrastructure` → init pg-boss + register jobs (if `.jobs()`)
+   disabled) → `lifecycle.afterInfrastructure` → init pg-boss (the queue schema's boot rule may
+   refuse here, `JobQueueSchemaError`) + register jobs (if `.jobs()`)
    → init workflow engine (if `.workflows()`)
 5. **Migration boot gate** — refuses to go further when a function package (or
    `src/server/drizzle`) has migrations the database has not applied (see below)
@@ -693,7 +694,8 @@ turns off both. During shutdown it returns 503 `{ status: 'shutting_down' }` imm
 - **Detailed** (`detailed: true`, the dev default): adds
   `services.{database,redis}.status` — `connected` / `error` / `not_initialized` /
   `disabled` / `unknown`. Any DB `error`/`not_initialized` or Redis `error` ⇒
-  `status: 'degraded'` and HTTP **503**. Also adds `migrations` (below).
+  `status: 'degraded'` and HTTP **503**. Also adds `migrations` and, when jobs started,
+  `queue` (below).
 
 A component turned off with `.infrastructure({ database: false })` reports `disabled`
 and never degrades health — otherwise a server that legitimately has no database would
@@ -733,6 +735,19 @@ defineServerConfig()
 - Migration state does **not** change the overall `status`. Reporting drift must not, by
   itself, pull a running deployment out of rotation — a probe that wants that asserts
   `migrations.pending === 0`.
+
+### `queue` in the detailed payload
+
+```json
+"queue": { "schema": "spfn_queue", "installed": 26, "required": 26, "start": "current", "checkedAt": "2026-11-23T09:00:00.000Z" }
+```
+
+The pg-boss queue schema as `initBoss` read it at boot, and how pg-boss started on it (`start`:
+`install`, `migrate`, `current`, `newer` — the job README, "Who installs the queue schema").
+`installed` is `null` when nothing was installed and absent when the app role could not read
+it. It is the boot's reading, not re-read: after the owner migrates the queue under a running
+server, a newer instance reports the new version and this one keeps its own. Absent when the
+server runs no jobs; it does not change the overall `status`.
 
 ---
 

@@ -56,10 +56,29 @@ export async function readPrivilegeCatalog(
     return {
         roles: await readRoles(db, roleNames),
         missingRoles: named.filter(name => !roleNames.includes(name)),
-        schemas: await readSchemas(db, all, roleNames),
-        relations: [...await readRelations(db, all), ...(queueSchema === undefined ? [] : await readFunctions(db, queueSchema))],
+        ...await readManagedObjects(db, schemas, roleNames, queueSchema),
         foreignOwned: await readForeignOwned(db, all, queueSchema),
         publicMayCreateInPublic: await publicMayCreateInPublic(db),
+    };
+}
+
+/**
+ * The schemas `schemas` and the queue schema `queueSchema` as `roleNames`
+ * see them, and their relations — with the queue schema's functions: what
+ * the plan compares, read the same way for the step and for `db status`.
+ */
+export async function readManagedObjects(
+    db: CatalogDb,
+    schemas: readonly string[],
+    roleNames: string[],
+    queueSchema?: string,
+): Promise<Pick<PrivilegeCatalog, 'schemas' | 'relations'>>
+{
+    const all = queueSchema === undefined ? schemas : [...schemas, queueSchema];
+
+    return {
+        schemas: await readSchemas(db, all, roleNames),
+        relations: [...await readRelations(db, all), ...(queueSchema === undefined ? [] : await readFunctions(db, queueSchema))],
     };
 }
 

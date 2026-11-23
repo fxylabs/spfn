@@ -6,11 +6,13 @@ import {
     bookkeepingMismatchOf,
     getAppPrivilegesStatus,
     getMigrationStatus,
+    getQueueStatus,
     migrationTargets,
     permissionDeniedOf,
+    readJobsDeclarationOf,
     STATUS_GRANT_REMEDY,
 } from '../../utils/migration-status.js';
-import type { AppPrivilegesStatus, MigrationStatus } from '../../utils/migration-status.js';
+import type { AppPrivilegesStatus, MigrationStatus, QueueStatus } from '../../utils/migration-status.js';
 
 /**
  * The machine-readable form of `spfn db status`.
@@ -58,12 +60,25 @@ export interface DbStatusReportV1
      * status was read.
      */
     privileges?: DbStatusPrivileges;
+    /**
+     * The pg-boss queue schema the app declares (`"spfn": { "jobs": … }` in
+     * package.json), read as the app role: its version against the one this
+     * build's pg-boss runs on, its owner and every role that owns part of
+     * it (`owners`), what the app role may do there, and
+     * how the server would start on it (`start`, the boot rule; `refusal` is
+     * the boot refusal's text, `refusalStep` the owner's step that resolves
+     * it — `owner`, `grant`, or null where none does). Present whenever the status was read and the
+     * app declares jobs. Its privileges are compared in `privileges`, by the
+     * queue's rule.
+     */
+    queue?: QueueStatus;
 }
 
 /**
  * `checked: false` with `detail` when the manifests or the catalog could not
  * be read. Otherwise `drift` is what `spfn db grant` would change, per
- * relation (table, view, materialized view or sequence) and grantee — so one
+ * relation (table, view, materialized view or sequence; in the queue schema,
+ * `kind` `function` too, by the queue's rule) and grantee — so one
  * relation can appear once per grantee — the app role; a role it is a member
  * of (the read role), whose grants it holds too, with `through`; or `null` for
  * PUBLIC, likewise: `missing` (declared, not held), `excess` (held, not
@@ -145,7 +160,7 @@ export type DbStatusUnreadableReason = 'not-configured' | 'unreachable' | 'bookk
  * caller counting work to do should not have to walk two levels to do it; the
  * per-target detail stays in `targets` for anything that wants it.
  */
-export function migrationStatusReport(status: MigrationStatus, privileges?: AppPrivilegesStatus): DbStatusReportV1
+export function migrationStatusReport(status: MigrationStatus, privileges?: AppPrivilegesStatus, queue?: QueueStatus): DbStatusReportV1
 {
     const targets = migrationTargets(status).map(target => ({
         name: target.name,
@@ -164,6 +179,7 @@ export function migrationStatusReport(status: MigrationStatus, privileges?: AppP
         pending,
         pendingCount: targets.reduce((sum, target) => sum + target.pending, 0),
         ...(privileges === undefined ? {} : { privileges: privilegesReport(privileges) }),
+        ...(queue === undefined ? {} : { queue: { ...queue } }),
     };
 }
 
@@ -265,26 +281,123 @@ export async function dbStatus(options: { json?: boolean } = {}): Promise<void>
         process.exit(1);
     }
 
-    const privileges = await getAppPrivilegesStatus(process.cwd());
+    const jobs = readJobsDeclarationOf(process.cwd());
+    const privileges = await getAppPrivilegesStatus(process.cwd(), undefined, jobs === undefined || 'error' in jobs ? undefined : jobs.schema);
+    const queue = await getQueueStatus(jobs);
 
     if (json)
     {
-        printReport(migrationStatusReport(status, privileges));
+        printReport(migrationStatusReport(status, privileges, queue));
 
         return;
     }
 
-    const targets = migrationTargets(status);
+    printHumanStatus(migrationTargets(status), privileges, queue);
+}
 
+/**
+ * The human report: the migrations, the app role's privileges — the queue
+ * schema's among them — and the queue schema. A queue the server refuses
+ * until the owner's step runs (not installed, older, unreadable) is work to
+ * do, as pending migrations are, and exits 0: the next `spfn db migrate` or
+ * `spfn db grant` resolves it. Exits 1 where no command does — a schema not
+ * pg-boss's, a version pg-boss cannot migrate from — for the shell to notice
+ * before a deploy does.
+ */
+function printHumanStatus(targets: ReturnType<typeof migrationTargets>, privileges: AppPrivilegesStatus, queue: QueueStatus | undefined): void
+{
     if (targets.length === 0)
     {
         console.log(chalk.dim('No migrations found (no @spfn packages with migrations, no src/server/drizzle).'));
+    }
+    else
+    {
+        printMigrationTargets(targets);
+    }
+
+    if (targets.length > 0 || queue !== undefined)
+    {
+        printPrivileges(privileges);
+    }
+
+    if (queue !== undefined)
+    {
+        printQueue(queue);
+    }
+
+    if (queue?.checked === true && queue.start === 'refused' && queue.refusalStep === null)
+    {
+        process.exit(1);
+    }
+}
+
+/**
+ * The queue schema: its version against pg-boss's, its owner, and how the
+ * server would start on it; a refusal with the boot's own text. With the
+ * queue owner-installed, an app role that may still create schemas is said:
+ * where the queue is gone it would install — and own — it again.
+ */
+function printQueue(queue: QueueStatus): void
+{
+    if (!queue.checked)
+    {
+        console.log(chalk.yellow(`⚠️  Could not check the queue schema${queue.schema === undefined ? '' : ` ${queue.schema}`}: ${queue.detail}\n`));
 
         return;
     }
 
-    printMigrationTargets(targets);
-    printPrivileges(privileges);
+    console.log(`${chalk.blue('🧵 Queue schema')} ${queue.schema}: ${queueVersionText(queue)}${queue.owner === null ? '' : `; owner ${queue.owner}`}`);
+
+    if (queue.start === 'refused' && queue.refusalStep === null)
+    {
+        console.log(chalk.red(`❌ The server refuses to start: ${queue.refusal}`));
+    }
+    else if (queue.start === 'refused')
+    {
+        console.log(chalk.yellow(`⏳ The server refuses to start until the owner's step runs: ${queue.refusal}`));
+    }
+    else
+    {
+        console.log(chalk.dim(`   The server starts on it: ${QUEUE_START_TEXT[queue.start]}`));
+    }
+
+    if (queue.appMayCreateOnDatabase && !queue.appOwnsQueue && queue.owner !== null)
+    {
+        console.log(chalk.yellow('⚠️  The app role may CREATE on the database: where the queue schema is missing it installs — and owns — it itself. '
+            + `As the database owner: REVOKE CREATE ON DATABASE ${queue.database} FROM ${queue.appRole};`));
+    }
+
+    console.log();
+}
+
+/** How the server starts on a queue it does not refuse. */
+const QUEUE_START_TEXT = {
+    install: 'pg-boss installs it as the app role, which then owns it',
+    migrate: 'pg-boss migrates it as the app role, its owner',
+    current: 'as it is, without migrating it',
+    newer: 'as it is, with a warning: it is newer than this build\'s pg-boss',
+} as const;
+
+function queueVersionText(queue: Extract<QueueStatus, { checked: true }>): string
+{
+    if (queue.notPgBoss)
+    {
+        return chalk.red('holds objects that are not pg-boss\'s');
+    }
+
+    if (queue.installed === undefined)
+    {
+        return chalk.yellow(`version unreadable to the app role; this build needs ${queue.required}`);
+    }
+
+    if (queue.installed === null)
+    {
+        return chalk.yellow(`not installed; this build needs pg-boss schema ${queue.required}`);
+    }
+
+    const versions = `pg-boss schema ${queue.installed}, this build needs ${queue.required}`;
+
+    return queue.installed < queue.required ? chalk.yellow(`${versions} — pending`) : chalk.green(versions);
 }
 
 function printMigrationTargets(targets: ReturnType<typeof migrationTargets>): void

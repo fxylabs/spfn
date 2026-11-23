@@ -34,7 +34,7 @@
 
 import { sql } from 'drizzle-orm';
 
-import { publicMayCreateInPublic, readRelations, readRoles, readSchemas } from './catalog';
+import { publicMayCreateInPublic, readManagedObjects, readRoles } from './catalog';
 import { catalogRows, type CatalogDb } from './ownership';
 import {
     planAppPrivileges,
@@ -140,22 +140,27 @@ export interface AppPrivilegesCheck
 }
 
 /**
- * Read, on the app role's connection, the catalog of `target.schemas` for the
- * app role and `read` — the read role, when there is one — and compare it as
- * `compareAppPrivileges` does. Neither role is taken for the owner, whom the
- * app cannot name, and no relation for one the owner cannot grant on.
+ * Read, on the app role's connection, the catalog of `target.schemas` and of
+ * the queue schema `target.queue` — what the step reads (`readManagedObjects`)
+ * — for the app role and `read` — the read role, when there is one — and
+ * compare it as `compareAppPrivileges` does. Neither role is taken for the
+ * owner, whom the app cannot name, and no schema, relation or function for
+ * one the owner cannot grant on: the owner is taken to own every schema
+ * (`mayGrant`), so a queue the owner installed is compared by the queue's
+ * rule, as the step plans it.
  */
 export async function checkAppPrivileges(db: CatalogDb, target: AppPrivilegesTarget, read?: string): Promise<AppPrivilegesCheck>
 {
     const [current] = catalogRows(await db.execute(sql`SELECT current_user::text AS name`));
     const app = String(current.name);
     const roleNames = read === undefined || read === app ? [app] : [app, read];
+    const { schemas, relations } = await readManagedObjects(db, target.schemas, roleNames, target.queue?.schema);
 
     return compareAppPrivileges({
         roles: (await readRoles(db, roleNames)).map(role => ({ ...role, inheritsOwner: false })),
         missingRoles: [],
-        schemas: await readSchemas(db, target.schemas, roleNames),
-        relations: await readRelations(db, target.schemas),
+        schemas: schemas.map(schema => ({ ...schema, mayGrant: true })),
+        relations,
         foreignOwned: [],
         publicMayCreateInPublic: await publicMayCreateInPublic(db),
     }, target, { app, read });

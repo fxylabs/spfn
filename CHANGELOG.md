@@ -442,6 +442,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (two-role databases with jobs): @spfn/core: `initBoss` lets pg-boss install or migrate
+  the queue schema only as a role that owns it — or, with nothing installed, may create it — and
+  otherwise refuses to start (#171, PR 3 of 3).** pg-boss's default start (`migrate: true`) created
+  and migrated `spfn_queue` as the app role, the one place where the owner did not own the
+  structure. Before pg-boss starts, `initBoss` now reads the queue schema as the connected role
+  (`readQueueSchemaState`) and applies a boot rule: at pg-boss's version (26 for 11.1.2) pg-boss
+  starts with `migrate: false`; newer, it starts unmigrated with a warning (`migrate: true`, under
+  which pg-boss sends nothing on a newer schema — its own `migrate: false` check refuses any other
+  version and would take old pods down in a rolling deploy); older, with the schema and every object in it
+  owned by the app role, or nothing installed where the app role may `CREATE` on the database and no other role owns the
+  schema, pg-boss installs or migrates it as before; anything else — not installed or older and
+  the app role may not change it, its version unreadable, older than the oldest version pg-boss
+  migrates from (for one-role apps too: pg-boss applied its 25→26 statements to a 24 and stamped it
+  26 — this is `QueueSchemaVersionError`, now a `JobQueueSchemaError`, with the answer
+  `queueMigrationSql` gives), or a schema holding objects that are not pg-boss's — throws `JobQueueSchemaError` (`schema`, `installed`, `required`, `step`: the owner's
+  step that resolves it, `owner` or `grant`, or `null` where none does) before the server
+  listens, naming the versions and `spfn db migrate`/`push` or `spfn db grant` — with the role
+  that owns the queue, which `DATABASE_OWNER_URL` has to connect as, where one role other than the
+  app role owns all of it. Where ownership is split — the app role owning part of such a queue (the
+  schema, objects in it, or an empty schema it may not install into), or two roles or more other
+  than the app role owning parts — the owner step changes nothing (it prints the ownership
+  transfer), so the refusal names every role that owns part and that transfer instead, from the
+  same function (`queueOwnershipTransfer`), with `step` `null`.
+  pg-boss's install, migration or version check runs on an instance of its own that supervises
+  and schedules nothing, stopped — its pool closed where its start failed — before the running
+  instance starts; where that step fails, the schema is read again and a changed answer acted on
+  once. `initBoss` compares
+  `spfn.jobs` in `package.json` with the schema `.jobs()` uses; where they differ (no
+  declaration, another schema, or one that cannot be read), a refusal says how to declare it, and
+  a start on a queue the app role does not own warns — an app that installs or owns its queue,
+  every one-role app, logs nothing new.
+  The detailed health payload adds `queue` (`schema`, `installed`, `required`, `start`,
+  `checkedAt`), the queue schema as boot read it. New exports from `@spfn/core/job`:
+  `JobQueueSchemaError`, `queueStart(state, role, declared)` (the rule as a pure function),
+  `ownsQueue(state)` and types `QueueStart`, `QueueSchemaStep`; `QueueSchemaState` gains `ownsObjects`,
+  `ownedBy`, `owners` and `bootstrapOwned`. From `@spfn/core/db`: `queueOwnershipTransfer(owners,
+  target, bootstrapObjects?)` — the transfer the owner step and the boot both print; `owners` every
+  role that owns part, the bootstrap superuser's objects moved one by one — its parts
+  `reassignOwnedLine`, `alterOwnerLines`, which `spfn db push`'s ownership remedy prints too, and
+  type `OwnedObject`.
+  - **Who is affected:** an app with `.jobs()` whose server role may not `CREATE` on the database and
+    whose queue schema the owner has not installed, or an app whose server role does not own a queue
+    schema older than pg-boss's and every object in it. It used to fail at boot on a raw `permission denied` / `must be owner`;
+    it now fails with the command to run: declare `"spfn": { "jobs": true }` (or `{ "schema": "<name>" }`)
+    in `package.json` and run `spfn db migrate` (or `spfn db push`) with `DATABASE_OWNER_URL` set,
+    then `spfn db grant` where the refusal names it. A two-role app that still grants its server role
+    `CREATE` on the database and whose queue the owner installed stops sending structure statements;
+    revoke that `CREATE` once the owner installed the queue. A schema of the queue's name holding a
+    project's table, and a queue schema name pg-boss's SQL cannot carry (upper case, a PostgreSQL
+    keyword, `pg_…`: `QueueSchemaNameError`), are refused at boot for every app.
+  - **Order for a two-role app:** this ships in one release with the owner step (#456, `spfn db
+    migrate`/`push`/`grant` install, migrate and grant the queue), which the refusals name. Upgrade
+    the CLI and run `spfn db migrate` (or `spfn db push`) with `DATABASE_OWNER_URL` set first, then
+    deploy the app on the new `@spfn/core`: deployed first, it is refused at boot until that step
+    has run, and an older CLI's `db migrate` does not touch the queue.
+  - **Not affected:** one-role apps (`spfn dev` with one URL) — the app owns or may create the
+    queue, so it installs and migrates it as before — and two-role deployments where the app role
+    installed the queue earlier: it owns it, so it still migrates it at boot.
+  - Partitioned queues are not supported under the role split: attaching a partition to `job`
+    needs its owner.
+- **spfn, @spfn/core: `spfn db status` reports the queue schema and compares the app role's
+  privileges there (#171).** `checkAppPrivileges` read only the managed schemas and took the app
+  role's ownership for the owner's, so a queue target compared nothing; it now reads what the grant
+  step reads (`readManagedObjects`: the queue schema and its functions too) and takes the owner to
+  own every schema, so the queue is compared by the plan's queue rule (`kind: "function"` drift for
+  `EXECUTE`). With `spfn.jobs` declared, `db status` adds the queue schema to its comparison and a
+  queue section — installed version against the one this build needs, owner, what the app role may
+  do there, and how the server would start on it (the boot rule itself). The human form's exit
+  code: a queue the server refuses until the owner's step runs — not installed, older than
+  pg-boss's, its version unreadable — is reported as pending migrations are, exit 0, since the
+  next `spfn db migrate` (or `spfn db grant`) resolves it; exit 1 stays for what `db status` exited
+  1 for before (not configured, unreachable, bookkeeping mismatch, permission denied) and for the
+  queue states no command resolves: a schema holding objects that are not pg-boss's, a version
+  pg-boss cannot migrate from, a queue whose ownership is split. A project that declares jobs and
+  has no table of its own is compared as `db grant` grants it, its queue checked. `--json`, additive: `queue` (`checked`, `schema`, `required`,
+  `installed`, `owner`, `owners`, `appRole`, `database`, `appOwnsQueue`, `appMayCreateOnDatabase`,
+  `notPgBoss`, `start`, `refusal`, `refusalStep` — `owner`, `grant` or `null`; `{ checked: false,
+  detail, schema? }` when unreadable); absent without a declaration.
 - **BREAKING (deployment, security-relevant): @spfn/core: `TRUSTED_PROXY_HOPS=0` declares that
   nothing stands in front of the Next.js app, and an invalid value is refused (#451).** Every value
   that was not a positive integer was read as `1`, and the forwarded-chain reader clamped to at
