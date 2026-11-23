@@ -61,6 +61,10 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+          # This job installs nothing: no pnpm is set up, so setup-node must not
+          # look for one to cache (its default since v5, read off the root
+          # package.json's `packageManager`) — it fails the step when it does.
+          package-manager-cache: false
 
       - name: Update npm to latest
         run: npm install -g npm@latest
