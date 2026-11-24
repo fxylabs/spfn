@@ -573,7 +573,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction open. **Migration:** wrap the call and the writes it protects in `runInTransaction`
   from `@spfn/core/db`:
   `await runInTransaction(async () => { await usersRepository.lockAccount(userId); /* writes */ });`.
-  No schema change, no migration; the mobile contract does not move.
+  Same for `Transactional()`, a `requiresNew` transaction and a savepoint inside one; a
+  transaction opened directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
+  `db.transaction`) is not one the repositories run on, so the call is refused as if none were
+  open. No schema change, no migration; the mobile contract does not move.
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored

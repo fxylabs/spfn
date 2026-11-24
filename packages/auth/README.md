@@ -7009,8 +7009,12 @@ under test). **The lock is taken only inside a transaction:** `usersRepository.l
 `lockAccountByEmailOrPhone` called with none open throw `AccountLockOutsideTransactionError`
 (exported from `@spfn/auth/server`; an internal error, answered 500, in every run) before any
 statement — a known account and an unknown identifier alike — because outside a transaction the
-lock would end with its own statement and its bounded wait would not apply. The message names the
-method and, for `lockAccount(id)`, the account id; never an email or a phone. An OAuth sign-in whose link moved between its read and its lock runs again (a second
+lock would end with its own statement and its bounded wait would not apply. The transaction is
+core's: `runInTransaction` from `@spfn/core/db` or the route's `Transactional()`, a `requiresNew`
+call and a savepoint inside one included. One opened on the driver directly —
+`getDatabase('write').transaction(…)`, drizzle's own `db.transaction` — the repositories never
+run on: outside it `this.db` is still the pool, and the lock is refused the same way. The message
+names the method and, for `lockAccount(id)`, the account id; never an email or a phone. An OAuth sign-in whose link moved between its read and its lock runs again (a second
 time answers `OAuthSignInContendedError`). `renewSession()` answers a 503 as
 `{ ok: false, reason: 'busy' }` — retry, the session is not over.
 
@@ -7031,6 +7035,11 @@ time answers `OAuthSignInContendedError`). `renewSession()` answers a 503 as
 >     // ...the writes the lock protects
 > });
 > ```
+>
+> `Transactional()`, a `requiresNew` transaction and a savepoint inside one satisfy it the same
+> way; opening one directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
+> `db.transaction`) does not — the repositories don't run on it — so the call is refused as if
+> none were open.
 
 The tables in that set include the OAuth 2.1 grants, codes and tokens and the WebAuthn
 challenges. A consent locks the account and admits the approving session again under the lock
