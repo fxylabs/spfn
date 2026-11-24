@@ -1521,12 +1521,16 @@ committed. `kit install`, `kit update` and `kit restore` also read it right afte
 `pnpm install`, and refuse a graph the release does not pin with `KIT_UNSUPPORTED_RESOLUTION`.
 
 **A lost graph is reinstalled by a resume.** On `spfn kit resume` the install step re-reads
-that same graph. A graph that is gone is the step's own effect gone, not a project that moved,
-so the step runs again — a fresh registry session from this machine's credential, the frozen
-install, the read after it — and the steps after it go on (event `KIT_CHECKPOINT_RERUN`).
-After an `installed-graph` failure, `spfn kit resume` therefore reinstalls, runs the gates
-again and commits. A completed step whose project did move — a managed file edited, a different
-migration set — still stops the resume with `KIT_RESUME_MISMATCH`.
+that same graph. When every package that differs is absent, the graph is the step's own effect
+gone, not a project that moved, so the step runs again — a fresh registry session from this
+machine's credential, the frozen install, the read after it — and the steps after it go on
+(event `KIT_CHECKPOINT_RERUN`). After an `installed-graph` failure that emptied
+`node_modules`, `spfn kit resume` therefore reinstalls, runs the gates again and commits. When
+any of those packages is present at another version, the project moved — somebody pinned or
+upgraded it — and the resume stops with `KIT_RESUME_MISMATCH`, reason `installed-graph-moved:`
+followed by the package, the version the release pins and the version found; nothing is
+reinstalled over it. Any other completed step whose project moved — a managed file edited, a
+different migration set — stops the resume the same way.
 
 **Release files are paid content, and are fetched as such.** Managed files, agent packs and
 the scaffold archive go out with the same bearer the private registry takes, and a refusal

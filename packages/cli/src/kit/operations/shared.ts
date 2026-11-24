@@ -635,7 +635,8 @@ async function runGates(
 
 /**
  * Fail the gate step on a graph the release does not pin. Resumable: the
- * install step's `verify` reads the same graph and runs the install again.
+ * install step's `verify` reads the same graph, runs the install again when
+ * the graph is gone, and refuses when a package is present at another version.
  */
 function assertGraphAroundGates(projectDir: string, manifest: KitReleaseManifestView, when: 'before' | 'after'): void
 {
@@ -660,16 +661,27 @@ function assertGraphAroundGates(projectDir: string, manifest: KitReleaseManifest
 
 /**
  * The install step's `verify`: done while the tree holds the release's graph.
- * A graph that is gone is the step's own effect gone, not a project that
- * moved, so the answer is to run the install again rather than a mismatch.
+ * A graph that is gone — every mismatch an absent package — is the step's own
+ * effect gone, so the answer is to run the install again. A package present
+ * at another version is a project that moved: installing over it would undo
+ * somebody's change, so that answer is a mismatch the runner refuses.
  */
 export function verifyInstalledGraph(projectDir: string, manifest: KitReleaseManifestView): VerifyResult
 {
-    const mismatch = installedGraphMismatches(projectDir, manifest)[0];
+    const mismatches = installedGraphMismatches(projectDir, manifest);
+    const moved = mismatches.find(mismatch => mismatch.actual !== null);
 
-    return mismatch === undefined
+    if (moved !== undefined)
+    {
+        return {
+            ok: false,
+            reason: `installed-graph-moved: ${moved.name} expected ${moved.expected}, found ${moved.actual}`,
+        };
+    }
+
+    return mismatches.length === 0
         ? { ok: true }
-        : { ok: false, rerun: true, reason: `installed-graph-mismatch: ${mismatch.name}` };
+        : { ok: false, rerun: true, reason: `installed-graph-absent: ${mismatches[0].name}` };
 }
 
 /**

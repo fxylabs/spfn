@@ -1903,9 +1903,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore` now check that graph right after `pnpm install`, as `kit update` did
   (`KIT_UNSUPPORTED_RESOLUTION`, exit 4). On a resume the install step re-reads the same graph —
   in `install` and `restore` it used to check only that a `node_modules` directory existed, and
-  `restore`'s check never held — and when the graph is gone it is run again (a progress event
-  `KIT_CHECKPOINT_RERUN`) instead of stopping with `KIT_RESUME_MISMATCH`, so `spfn kit resume`
-  after an `installed-graph` failure reinstalls, runs the gates again and commits. A restore
+  `restore`'s check never held — and when the graph is gone (every differing package absent) it
+  is run again (a progress event `KIT_CHECKPOINT_RERUN`) instead of stopping with
+  `KIT_RESUME_MISMATCH`, so `spfn kit resume` after an `installed-graph` failure that emptied
+  `node_modules` reinstalls, runs the gates again and commits. A package present at another
+  version is a project that moved, and still stops the resume with `KIT_RESUME_MISMATCH`, reason
+  `installed-graph-moved: <package> expected <version>, found <version>`. A restore
   resumed over a managed file edited since its install stops with `KIT_RESUME_MISMATCH`, reason
   `managed-drift: <path>`. `kit check`'s "The dependency graph is not installed" reads the same
   graph, so it also fires on a `node_modules` that is there but empty.

@@ -21,7 +21,7 @@ import { JournalStore } from '../../src/kit/journal.js';
 import { acquireOperationLock } from '../../src/kit/lock.js';
 import { readInstalledLock } from '../../src/kit/installed-state.js';
 import { KIT_EXIT, isKitError } from '../../src/kit/errors.js';
-import { FakeKitWorld, FAKE_LICENSE_KEY } from './fake-world.js';
+import { FakeKitWorld, FAKE_KIT_PACKAGE, FAKE_LICENSE_KEY } from './fake-world.js';
 
 const R0 = { version: '1.0.0', sequence: 1, releaseClass: 'feature' as const };
 const R1 = {
@@ -582,6 +582,43 @@ describe('table D — update, approval and resume', () =>
         expect(resumed.status).toBe('failed');
         expect(resumed.code).toBe('KIT_RESUME_MISMATCH');
         expect(resumed.evidence?.checkpoint).toBe('migration-applied');
+    });
+
+    it('refuses a resumed update over a kit package the customer pinned back, and leaves the pin', async () =>
+    {
+        const world = new FakeKitWorld({ releases: [R0] });
+
+        await install(world);
+        world.publish(R1);
+        world.faults.failingGates.add('build');
+
+        expect((await runUpdate({ projectDir: target, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        const manifestPath = join(target, 'package.json');
+        const installedPath = join(target, 'node_modules', ...FAKE_KIT_PACKAGE.split('/'), 'package.json');
+        const document = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> };
+
+        document.dependencies[FAKE_KIT_PACKAGE] = R0.version;
+        writeFileSync(manifestPath, `${JSON.stringify(document, null, 4)}\n`, 'utf8');
+        writeFileSync(installedPath, `${JSON.stringify({ name: FAKE_KIT_PACKAGE, version: R0.version })}\n`, 'utf8');
+        world.faults.failingGates.clear();
+
+        const pinned = { manifest: readFileSync(manifestPath, 'utf8'), installed: readFileSync(installedPath, 'utf8') };
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({
+            status: 'failed',
+            code: 'KIT_RESUME_MISMATCH',
+            evidence: { reason: `installed-graph-moved: ${FAKE_KIT_PACKAGE} expected ${R1.version}, found ${R0.version}` },
+        });
+        expect({ manifest: readFileSync(manifestPath, 'utf8'), installed: readFileSync(installedPath, 'utf8') })
+            .toEqual(pinned);
     });
 
     it('reinstalls the target graph on a resume when it is gone, and completes', async () =>
