@@ -56,7 +56,7 @@ import { getRecentAuthMs } from '../lib/config';
 import { isUniqueViolation } from '../lib/unique-violation';
 import { identifyHookError } from '../lib/hook-error';
 import { authLogger } from '../logger';
-import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
+import { admitBeforeProof, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
 import {
     authDeletionRequestedEvent,
@@ -187,8 +187,9 @@ interface ProvenHolder
  * Answers a missing account as it answers a wrong credential, at the same cost.
  *
  * A password is a guarded credential check (`deletion-cancel`) under the app's
- * `signIn` guard, as a password sign-in is: `admit` before the comparison — a
- * refused account is compared against the dummy hash and answered the refusal
+ * `signIn` guard, as a password sign-in is: `admit` before the comparison,
+ * under the account lock in a transaction that commits first — a refused
+ * account is compared against the dummy hash and answered the refusal
  * whatever the password — and a wrong password recorded before the 401. A
  * verification token proves the mailbox, not a guess, and is not guarded.
  *
@@ -201,17 +202,17 @@ interface ProvenHolder
  * @throws ValidationError, InvalidCredentialsError, InvalidVerificationTokenError,
  *   VerificationTokenPurposeMismatchError, VerificationTokenTargetMismatchError, SignInRefusedError
  */
-async function proveAccountHolder(user: User | null, params: CancelAccountDeletionParams): Promise<ProvenHolder>
+async function proveAccountHolder(found: User | null, params: CancelAccountDeletionParams): Promise<ProvenHolder>
 {
     if (params.verificationToken)
     {
         const token = deletionToken(params.verificationToken);
-        if (!user || addressOf(user, token.targetType) !== token.target)
+        if (!found || addressOf(found, token.targetType) !== token.target)
         {
             throw new VerificationTokenTargetMismatchError();
         }
 
-        return { user, proof: { kind: 'token', token } };
+        return { user: found, proof: { kind: 'token', token } };
     }
 
     if (!params.password)
@@ -219,8 +220,10 @@ async function proveAccountHolder(user: User | null, params: CancelAccountDeleti
         throw new ValidationError({ message: 'A password or a verification code is required to confirm this action' });
     }
 
-    const attempt = signInGuard() && cancelAttempt(user, params);
-    const refusal = attempt && await admitSignIn(attempt);
+    // With a guard, the account compared is the one `admit` was asked about,
+    // read again under the lock its identifier names.
+    const attempt = signInGuard() && cancelAttempt(found, params);
+    const { user, refusal } = attempt ? await admitBeforeProof(attempt) : { user: found, refusal: null };
     const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
     const matched = await verifyPassword(params.password, comparedHash);
     const accountRefused = user !== null && accountRefusalReason(user) === 'accountDisabled';

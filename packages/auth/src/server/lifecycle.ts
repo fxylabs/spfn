@@ -454,13 +454,15 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * sign-in. Stated, the app is asked whether each sign-in may go on and is
      * told how each one ended.
      *
-     * - `admit(attempt)` — answer `{ refuse: { code } }` to refuse: the client
-     *   gets 403 `SignInRefusedError` with `details.code`. Asked under the
-     *   account lock where a key is minted (every sign-in channel), and at the
-     *   second-factor completion; a password sign-in, `deletion/cancel` and
-     *   `mfa/verify` ask it once more before the credential is compared, and a
-     *   refused account is compared against a dummy hash and refused whatever
-     *   the password was. Never asked on renewal or key rotation.
+     * - `admit(attempt, call)` — answer `{ refuse: { code } }` to refuse: the
+     *   client gets 403 `SignInRefusedError` with `details.code`. Asked where a
+     *   key is minted (every sign-in channel) and at the second-factor
+     *   completion (`call` `'deciding'`); a password sign-in, `deletion/cancel`
+     *   and `mfa/verify` ask it first before the credential is compared
+     *   (`'before-proof'`) — the one place to count an attempt — and again
+     *   once a wrong one is recorded (`'after-failure'`). A refused account is
+     *   compared against a dummy hash and refused whatever the password was.
+     *   Never asked on renewal or key rotation.
      * - `settled(outcome)` — `succeeded` once a session exists, `challenged` on
      *   a 202, `failed` with a `reason` for every attempt that names an account
      *   or a credential, refusals included. A failure is recorded in a
@@ -469,12 +471,14 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   refusal decided inside the session's transaction is told once that
      *   transaction has rolled back.
      *
-     * Each runs in a transaction of the package's, holding the account's lock
-     * — except `admit`'s first call on `password`, `deletion-cancel` and
-     * `mfa/verify`, which runs before any — and an app repository extending
-     * `BaseRepository` joins it. Database work only, and fast. Never lock a
-     * second account. On OAuth a contended sign-in runs them twice, the first
-     * run rolled back. See the README, "Sign-in guard".
+     * Each runs in a transaction of the package's, holding the account's lock,
+     * and an app repository extending `BaseRepository` joins it. The
+     * `'before-proof'` call has one of its own, committed before the
+     * comparison whatever it answers, so concurrent attempts on one account
+     * take turns at an app's count; a throw there rolls it back. Database work
+     * only, and fast: no mail, no network call. Never lock a second account. On
+     * OAuth a contended sign-in runs them twice, the first run rolled back. See
+     * the README, "Sign-in guard".
      *
      * A later `createAuthLifecycle()` that omits it leaves it as it is; one
      * that states other functions refuses boot in `afterInfrastructure`.
@@ -483,10 +487,26 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```typescript
      * createAuthLifecycle({
      *     signIn: {
-     *         admit: async ({ user }) => user && await lockouts.isLocked(user.id)
-     *             ? { refuse: { code: 'LOCKED' } }
-     *             : undefined,
-     *         settled: async (outcome) => { await signInHistory.record(outcome); },
+     *         admit: async ({ user }, call) =>
+     *         {
+     *             if (!user)
+     *             {
+     *                 return undefined;
+     *             }
+     *
+     *             const attempts = call === 'before-proof'
+     *                 ? await signInAttempts.add(user.id)
+     *                 : await signInAttempts.count(user.id);
+     *
+     *             return attempts > 5 ? { refuse: { code: 'LOCKED' } } : undefined;
+     *         },
+     *         settled: async (outcome) =>
+     *         {
+     *             if (outcome.result === 'succeeded' && outcome.user)
+     *             {
+     *                 await signInAttempts.clear(outcome.user.id);
+     *             }
+     *         },
      *     },
      * })
      * ```

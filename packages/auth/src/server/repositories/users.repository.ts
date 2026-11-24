@@ -5,7 +5,7 @@
  * BaseRepository를 상속받아 자동 트랜잭션 컨텍스트 지원 및 Read/Write 분리
  */
 
-import { eq, and, inArray, isNull, notExists, sql, type EmptyRelations } from 'drizzle-orm';
+import { eq, and, inArray, isNull, notExists, sql, type EmptyRelations, type SQL } from 'drizzle-orm';
 import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { RepositoryDatabase } from '@spfn/core/db';
@@ -208,6 +208,12 @@ function foldedEmailEquals(normalizedEmail: string, email: AnyPgColumn = users.e
     return sql`lower(btrim(${email})) = ${normalizedEmail}`;
 }
 
+/** The row an email, or else a phone, names: the address as stored once normalised, the phone as given. */
+function emailOrPhoneEquals(email?: string, phone?: string): SQL
+{
+    return email ? eq(users.email, normalizeEmail(email)) : eq(users.phone, phone!);
+}
+
 /**
  * Users Repository 클래스
  *
@@ -219,7 +225,7 @@ function foldedEmailEquals(normalizedEmail: string, email: AnyPgColumn = users.e
 export class UsersRepository extends AccountStateRepository
 {
     static override readonly accountWrites: AccountWrites<UsersRepository> = {
-        lockAccount: { exempt: 'the lock statement itself, and the transaction-local lock_timeout set around it' },
+        lockAccountWhere: { exempt: 'the lock statement itself (lockAccount, lockAccountByEmailOrPhone), and the transaction-local lock_timeout set around it' },
         create: { exempt: 'a new account: no other transaction can name its row before this one commits' },
         normalizeEmailsExcept: { exempt: 'the boot backfill of email casing (normalizeStoredEmails), which under a rolling deploy runs while other instances serve: it writes no status, key generation or password, and folds in batches of EMAIL_NORMALIZATION_BATCH rows, one short statement each, so a lockAccount waits behind one batch at most rather than a table-wide rewrite' },
         fillEmailIfUnheld: { account: id => id },
@@ -268,13 +274,44 @@ export class UsersRepository extends AccountStateRepository
     {
         recordAccountLock(id);
 
+        return await this.lockAccountWhere(eq(users.id, id));
+    }
+
+    /**
+     * Lock the account an email or a phone names — the row
+     * `findByEmailOrPhoneOnPrimary` reads — as `lockAccount` locks it by id:
+     * the same row, the same bounded wait, the same three statements. An
+     * identifier that names no account sends them too, locks nothing and
+     * answers null, so a sign-in attempt does the same database work whether
+     * or not its identifier is an account's.
+     *
+     * The lock is recorded once the row is known: call it as the transaction's
+     * first account lock, as a sign-in attempt's own transaction does.
+     *
+     * @returns the account as of the lock, or null when the identifier names none
+     */
+    async lockAccountByEmailOrPhone(email?: string, phone?: string): Promise<User | null>
+    {
+        const user = await this.lockAccountWhere(emailOrPhoneEquals(email, phone));
+
+        if (user)
+        {
+            recordAccountLock(user.id);
+        }
+
+        return user;
+    }
+
+    /** `lockAccount`'s statements: the row `where` names, locked under the bounded `lock_timeout`. */
+    private async lockAccountWhere(where: SQL): Promise<User | null>
+    {
         const [setting] = await this.db.execute<{ previous: string }>(
             sql`select current_setting('lock_timeout') as previous, set_config('lock_timeout', ${String(ACCOUNT_LOCK_TIMEOUT_MS)}, true)`,
         );
         const result = await this.db
             .select()
             .from(users)
-            .where(eq(users.id, id))
+            .where(where)
             .for('no key update')
             .catch((error: unknown) => Promise.reject(isLockTimeout(error) ? new AccountBusyError() : error));
 
@@ -471,7 +508,7 @@ export class UsersRepository extends AccountStateRepository
         const result = await db
             .select()
             .from(users)
-            .where(email ? eq(users.email, normalizeEmail(email)) : eq(users.phone, phone!))
+            .where(emailOrPhoneEquals(email, phone))
             .limit(1);
 
         return result[0] ?? null;

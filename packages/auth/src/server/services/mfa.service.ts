@@ -90,7 +90,7 @@ import { accountRefusal, admitCompletion, sessionCredentialOf, type PrincipalCre
 import { ROUTE_ENROLMENT } from '../routes/channels';
 import { SWEEP_BATCH, sweepEachAccount } from './account-sweep.service';
 import {
-    admitSignIn,
+    admitBeforeProof,
     assertSignInAdmits,
     failedCredentialAnswer,
     recordSignInFailure,
@@ -595,14 +595,16 @@ async function spendStep(row: MfaChallenge, proof: SecondFactorProof, step: Seco
 }
 
 /**
- * `admit`, asked before the proof is judged. A refusal is reported in a
- * transaction of its own and answered, with the challenge left unspent.
+ * `admit`, asked before the proof is judged, under the account lock in a
+ * transaction of its own that commits first (`admitBeforeProof`). A refusal is
+ * reported in a transaction of its own and answered, with the challenge left
+ * unspent.
  *
  * @throws SignInRefusedError
  */
 async function refuseUnadmittedStep(step: SecondStep): Promise<void>
 {
-    const refusal = await admitSignIn(step.attempt);
+    const { refusal } = await admitBeforeProof(step.attempt);
 
     if (refusal)
     {

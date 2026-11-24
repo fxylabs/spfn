@@ -92,6 +92,7 @@ export type { AuthLifecycleOptions, AuthLifecycleConfig } from './server/lifecyc
 export type { AuthChannel, AuthChannelsOptions } from './server/lib/channels-config';
 export type {
     SignInAdmission,
+    SignInAdmitCall,
     SignInAttempt,
     SignInChannel,
     SignInFailureReason,

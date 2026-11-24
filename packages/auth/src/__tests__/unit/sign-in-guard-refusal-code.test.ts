@@ -18,7 +18,7 @@ function refusing(code: string): Promise<unknown>
 {
     configureSignIn({ admit: () => ({ refuse: { code } }) });
 
-    return admitSignIn(ATTEMPT);
+    return admitSignIn(ATTEMPT, 'deciding');
 }
 
 describe('signIn.admit refusal code (#361)', () =>

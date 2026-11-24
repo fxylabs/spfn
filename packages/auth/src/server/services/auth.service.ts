@@ -31,7 +31,7 @@ import { assertStepUp, mfaEnrolledForUser } from './mfa.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 import { updateLastLoginService } from './user.service';
 import { accountRefusalReason, signingKeyOf, type PrincipalCredential } from './admission.service';
-import { admitSignIn, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
+import { admitBeforeProof, assertOwnsTransactions, failedCredentialAnswer } from './sign-in-guard.service';
 import { assertPasswordChangeAdmits, reportPasswordChanged } from './password-change-guard.service';
 import { admitNewPassword, hashAdmittedPassword, reencodeProvenPassword } from './password-rule.service';
 import { signInGuard, type SignInAttempt } from '../lib/sign-in-guard';
@@ -374,7 +374,9 @@ async function accountExists(email?: string, phone?: string): Promise<boolean>
  * lock, and the session is written in a transaction of this function's own.
  * With the app's `signIn` guard configured:
  *
- * 1. `admit` is asked before the password is compared, without the lock. An
+ * 1. `admit` is asked before the password is compared, under the account
+ *    lock in a transaction of its own that commits before the comparison
+ *    (`admitBeforeProof`), so attempts take turns at the app's count. An
  *    account it refuses is compared against the dummy hash — never its own —
  *    and answered `SignInRefusedError` whatever the password was, so the
  *    refusal is neither a password oracle nor, by timing, an account oracle;
@@ -407,15 +409,17 @@ export async function loginService(
 
     // Find user — on the primary: a password changed a moment ago is the one
     // that has to match.
-    const user = await usersRepository.findByEmailOrPhoneOnPrimary(email, phone);
+    const found = await usersRepository.findByEmailOrPhoneOnPrimary(email, phone);
 
     if (!email && !phone)
     {
         throw new ValidationError({ message: 'Either email or phone must be provided' });
     }
 
-    const attempt = signInGuard() && passwordAttempt(user, params);
-    const refusal = attempt && await admitSignIn(attempt);
+    // With a guard, the account compared is the one `admit` was asked about,
+    // read again under the lock its identifier names.
+    const attempt = signInGuard() && passwordAttempt(found, params);
+    const { user, refusal } = attempt ? await admitBeforeProof(attempt) : { user: found, refusal: null };
 
     // An unknown account, one without a password and one the app refused spend
     // the time of the real verify path against the dummy hash, so none of the

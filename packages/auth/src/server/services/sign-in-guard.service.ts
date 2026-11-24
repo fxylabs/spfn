@@ -8,7 +8,10 @@
  * in the session's transaction, and the second-factor completion in
  * `mfa/verify`. A channel that checks a password for an identifier (`password`,
  * `deletion-cancel`) and `mfa/verify` also ask it once before the proof is
- * judged, so a refused account's credential is never compared.
+ * judged (`admitBeforeProof`), under the account lock in a transaction of its
+ * own that commits before the comparison: a refused account's credential is
+ * never compared, and an attempt the app counts there is counted in turn with
+ * every other attempt on the account.
  *
  * Every attempt it can name an account or a credential for is told to
  * `settled`, failed ones included, in a transaction of its own that commits
@@ -42,6 +45,7 @@ import type { User } from '../entities/users';
 import {
     SIGN_IN_REFUSAL_CODE,
     signInGuard,
+    type SignInAdmitCall,
     type SignInAttempt,
     type SignInChannel,
     type SignInFailureReason,
@@ -57,15 +61,15 @@ export interface SignInRefusal
 }
 
 /**
- * Ask `admit`.
+ * Ask `admit`, in the caller's transaction.
  *
  * @returns the refusal, or null without a guard or when the attempt may go on
  * @throws Error when `admit` throws, or answers something that is neither nothing nor a refusal
  *   whose code has the shape `SIGN_IN_REFUSAL_CODE` states
  */
-export async function admitSignIn(attempt: SignInAttempt): Promise<SignInRefusal | null>
+export async function admitSignIn(attempt: SignInAttempt, call: SignInAdmitCall): Promise<SignInRefusal | null>
 {
-    const answer: unknown = await signInGuard()?.admit?.(attempt);
+    const answer: unknown = await signInGuard()?.admit?.(attempt, call);
 
     if (answer === undefined || answer === null)
     {
@@ -83,14 +87,49 @@ export async function admitSignIn(attempt: SignInAttempt): Promise<SignInRefusal
     return { code };
 }
 
+/** What `admitBeforeProof` answers: the attempt's account as of the lock, and `admit`'s refusal. */
+export interface AdmittedBeforeProof
+{
+    user: User | null;
+    refusal: SignInRefusal | null;
+}
+
 /**
- * Ask `admit`, and report a refusal (`reportRefusal`) before throwing it.
+ * `admit`'s first call, before the credential is compared: in a transaction
+ * of its own, under the lock of the attempt's account (`underAccountLock`),
+ * committed before this returns. Whatever `admit` wrote commits with its
+ * answer, a refusal included, and concurrent attempts on one account take
+ * turns here — so an app counting attempts compares no more than its limit.
+ * The caller compares the account answered here — the one `admit` was asked
+ * about — after the commit, with no lock and no connection held. A throw
+ * rolls back what `admit` wrote. Without an `admit` nothing is opened, and the
+ * account is the attempt's.
+ *
+ * @throws Error as `admitSignIn`; AccountBusyError when the lock stays held past its wait
+ */
+export async function admitBeforeProof(attempt: SignInAttempt): Promise<AdmittedBeforeProof>
+{
+    if (!signInGuard()?.admit)
+    {
+        return { user: attempt.user, refusal: null };
+    }
+
+    return await underAccountLock(
+        attempt,
+        async locked => ({ user: locked.user, refusal: await admitSignIn(locked, 'before-proof') }),
+        'auth:sign-in-admit',
+    );
+}
+
+/**
+ * The deciding `admit`, in the caller's transaction under the account lock;
+ * a refusal is reported (`reportRefusal`) before it is thrown.
  *
  * @throws SignInRefusedError when `admit` refuses the attempt
  */
 export async function assertSignInAdmits(attempt: SignInAttempt, keyId?: string): Promise<void>
 {
-    const refusal = await admitSignIn(attempt);
+    const refusal = await admitSignIn(attempt, 'deciding');
 
     if (refusal)
     {
@@ -134,11 +173,11 @@ export function signInAttempt(
 }
 
 /**
- * A failure recorded in a transaction of its own, under the account's lock
- * when there is an account, and committed before the caller answers; then
- * `admit` asked again of the account as it stands now. An unknown identifier
- * has no row to lock: an app counting per identifier makes its write one
- * statement.
+ * A failure recorded in a transaction of its own, under the lock of the
+ * attempt's account (`underAccountLock`), and committed before the caller
+ * answers; then `admit` asked again of the account as it stands now. An
+ * unknown identifier sends the same lock statement and locks no row: an app
+ * counting per identifier makes its write one statement.
  *
  * @returns the refusal `admit` answers once the failure is recorded, or null
  */
@@ -152,8 +191,8 @@ export async function recordSignInFailure(
     {
         await reportSignIn({ ...locked, result: 'failed', reason, keyId });
 
-        return await admitSignIn(locked);
-    });
+        return await admitSignIn(locked, 'after-failure');
+    }, 'auth:sign-in-failure');
 }
 
 /**
@@ -183,7 +222,11 @@ export async function reportRefusal(attempt: SignInAttempt | null, reason: SignI
         return;
     }
 
-    const report = () => underAccountLock(attempt, locked => reportSignIn({ ...locked, result: 'failed', reason, keyId }));
+    const report = () => underAccountLock(
+        attempt,
+        locked => reportSignIn({ ...locked, result: 'failed', reason, keyId }),
+        'auth:sign-in-failure',
+    );
 
     if (getTransactionContext())
     {
@@ -257,15 +300,38 @@ function logLostReport(attempt: SignInAttempt, reason: SignInFailureReason, keyI
     });
 }
 
-/** `work` in a transaction of its own, with the attempt's account as of its lock. */
-async function underAccountLock<T>(attempt: SignInAttempt, work: (locked: SignInAttempt) => Promise<T>): Promise<T>
+/**
+ * `work` in a transaction of its own, with the attempt's account as of its
+ * lock (`lockedAccountOf`).
+ */
+async function underAccountLock<T>(
+    attempt: SignInAttempt,
+    work: (locked: SignInAttempt) => Promise<T>,
+    context: string,
+): Promise<T>
 {
-    return await runInTransaction(async () =>
-    {
-        const user = attempt.user && await usersRepository.lockAccount(attempt.user.id);
+    return await runInTransaction(
+        async () => await work({ ...attempt, user: await lockedAccountOf(attempt) }),
+        { context },
+    );
+}
 
-        return await work({ ...attempt, user });
-    }, { context: 'auth:sign-in-failure' });
+/**
+ * Lock the attempt's account. An attempt on an identifier (`password`,
+ * `deletion-cancel`) locks by it, the row its account was read by
+ * (`lockAccountByEmailOrPhone`): an identifier that names no account sends the
+ * statements a known one does, so the work tells neither apart. Any other
+ * attempt came from an account it already holds — a challenge, a passkey, a
+ * provider's subject — and locks it by id; with none, nothing is locked.
+ */
+async function lockedAccountOf(attempt: SignInAttempt): Promise<User | null>
+{
+    if (attempt.identifier)
+    {
+        return await usersRepository.lockAccountByEmailOrPhone(attempt.identifier.email, attempt.identifier.phone);
+    }
+
+    return attempt.user && await usersRepository.lockAccount(attempt.user.id);
 }
 
 /**

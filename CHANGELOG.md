@@ -517,6 +517,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (behaviour): @spfn/auth: the first `signIn.admit` runs under the account lock, so a
+  sign-in guard can bound the credentials compared, whatever the concurrency (#478).** The first
+  `admit` on `password`, `deletion-cancel` and `mfa/verify` — the one call before the credential is
+  compared — ran outside any transaction and without the account lock, and `admit` could not tell it
+  from its other calls. Nothing an app wrote there was serialized with other attempts on the account,
+  so under a burst every attempt that read the app's count before another wrote it was compared: the
+  passwords tried exceeded the app's limit, bounded only by the route's rate limit. That call now runs
+  under the account lock in a short transaction of its own, committed before the comparison, so
+  concurrent attempts take turns at it; the comparison runs after the commit, holding no lock and no
+  connection, against the account as read under that lock. `admit` gets a second argument,
+  `call: SignInAdmitCall` (`'before-proof' | 'deciding' | 'after-failure'`, new type export from
+  `@spfn/auth/server`), so an app counts an attempt once, at `before-proof`, and refuses past its
+  limit: it then compares at most that many credentials per account. The README's worked example
+  now does exactly that, in one statement per attempt, and clears the count on `succeeded`.
+  What changes for an existing guard at that call (with no `admit` stated, nothing is opened):
+  - it runs in one transaction, under the account lock: its writes, which committed statement by
+    statement, now commit together before the comparison, and an app repository extending
+    `BaseRepository` joins the transaction;
+  - a throw rolls those writes back (still 500); a refusal keeps them;
+  - it can answer `AccountBusyError` (503) when the lock stays held past its wait, and
+    `SecondAccountLockError` (500) when it locks a second account;
+  - mail or network work there now holds the account lock, and every other writer of the account
+    waits on it: keep it to database work, as every other call;
+  - **Migrate:** a guard that recognised the call by `getTransactionContext()` being null never sees
+    it that way again, and a counter written so stops counting with no error: read `call` instead.
+
+  On `password` and `deletion-cancel` the lock of that call and of the failure report
+  (`after-failure`) is now taken by the identifier the attempt names — the row the sign-in read —
+  rather than by the account's id, so an identifier that names no account sends the same statements
+  as an account's, and a configured guard no longer tells the two apart by the work done. With a
+  guard that does nothing, a wrong password sent six statements more for an account than for an
+  unknown identifier, two of them row locks; both now send the same ones. `user: null` still names no
+  account; your `admit` and `settled` doing different work for it is yours to equalise (README).
 - **BREAKING (clients reading `fields[].value`; security-relevant): @spfn/core: the framework's
   validation errors name the field and the rule, and no longer the value (#467).** Every TypeBox
   failure in path parameters, query, headers, cookies, body or form data answered with the submitted
@@ -1611,6 +1644,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scope keep the project's routing. pnpm 9 and 10 keep reading the `npm_config_` keys, which route
   nothing. No file carries the session. The install test pins its pnpm through corepack instead of running
   npm's `latest`, and its pnpm matrix gains 12.23.0.
+- **@spfn/auth: a sign-in guard can bound the credentials compared, whatever the concurrency
+  (#478).** The first `signIn.admit` on `password`, `deletion-cancel` and `mfa/verify` — the one call
+  before the credential is compared — ran outside any transaction and without the account lock, and
+  `admit` could not tell it from its other calls. Nothing an app wrote there was serialized with
+  other attempts on the account, so under a burst every attempt that read the app's count before
+  another wrote it was compared: the passwords tried exceeded the app's limit, bounded only by the
+  route's rate limit. That call now runs under the account lock in a short transaction of its own,
+  committed before the comparison, so concurrent attempts take turns at it; the comparison runs
+  after the commit, holding no lock and no connection. `admit` gets a second argument,
+  `call: SignInAdmitCall` (`'before-proof' | 'deciding' | 'after-failure'`, new type export from
+  `@spfn/auth/server`), so an app counts an attempt once, at `before-proof`, and refuses past its
+  limit: it then compares at most that many credentials per account. The README's worked example
+  now does exactly that, and clears the count on `succeeded`. What an existing guard sees
+  differently at that call: its writes, which committed statement by statement, now commit
+  together before the comparison — a refusal still keeps them, a throw now rolls them back (500 as
+  before); an app repository extending `BaseRepository` joins the transaction; the account lock is
+  held while it runs, so it is held to the rule of every other call — database work only, no mail
+  or network, never a second account (`SecondAccountLockError`), and a lock busy past its wait
+  answers `AccountBusyError` (503). A guard that told its first call apart by
+  `getTransactionContext()` being null must use `call` instead. With no `admit` stated, nothing is
+  opened. On `password` and `deletion-cancel` the lock of that call and of the failure report
+  (`after-failure`) is taken by the identifier the attempt names — the row the sign-in read — rather
+  than by the account's id, so an identifier that names no account sends the same statements as an
+  account's, and a configured guard does not tell the two apart by the work done; the comparison is
+  against the account as read under that lock.
 
 - **@spfn/auth, @spfn/core: an error the client restores keeps every field it was thrown with —
   `SignInRefusedError` and `PasswordChangeRefusedError` keep `details.code`, `HttpError`,

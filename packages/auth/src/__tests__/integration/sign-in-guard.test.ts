@@ -33,16 +33,19 @@
  *     the wrong password does not send
  * 14. the owner's one channel for that refusal lost: `settled` told
  *     `credential` for the right password, so the app cannot tell the owner why
- * 15. that reason rebuilding the oracle: a lockout counted from `settled`, as
- *     the README's worked example counts, that fires after a wrong fifth
- *     password on a refused account and not after the right one
+ * 15. that reason rebuilding the oracle: a lockout counted from `settled`, by
+ *     stage, that fires after a wrong fifth password on a refused account and
+ *     not after the right one
+ * 16. a limit on attempts that does not bound the comparisons (#478): eight
+ *     concurrent wrong passwords, each past a first `admit` that read the
+ *     count before any wrote it, all compared against the account's hash
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
  * Its table lives in a schema of this file's own.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { Hono } from 'hono';
 import postgres from 'postgres';
 import { and, desc, eq, sql } from 'drizzle-orm';
@@ -66,7 +69,7 @@ import { hashCredential } from '@/server/lib/link-credentials';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate } from '@/server/middleware/authenticate';
 import { authDeviceRegisteredEvent, authLoginEvent, DeviceRegistrationChannelSchema, mfaLockedEvent } from '@/server/events';
-import type { SignInAdmission, SignInAttempt, SignInOutcome } from '@/server/lib/sign-in-guard';
+import type { SignInAdmission, SignInAdmitCall, SignInAttempt, SignInOutcome } from '@/server/lib/sign-in-guard';
 
 // The remote JWKS fetch is the only part of native sign-in that leaves the
 // process; everything else about the id_token is verified for real.
@@ -109,6 +112,7 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { configureSignIn, resetSignInGuardForTests } = await import('@/server/lib/sign-in-guard');
+const { mfaChallengesRepository, usersRepository } = await import('@/server/repositories');
 const { getDummyPasswordHash, hashPassword } = await import('@/server/helpers/password');
 const { registerOAuthProvider } = await import('@/server/lib/oauth');
 const { createOAuthState, generateOAuthNonce } = await import('@/server/lib/oauth/state');
@@ -172,9 +176,33 @@ class SignInHistoryRepository extends BaseRepository
 
 const history = new SignInHistoryRepository();
 
+/**
+ * The app's count of attempts, read and then written in two statements, as a
+ * count kept in a table of the app's own is: the account lock is what makes
+ * two attempts take turns at it.
+ */
+class SignInAttemptsRepository extends BaseRepository
+{
+    async count(userId: number): Promise<number>
+    {
+        const [row] = await this.db.execute<{ count: number }>(sql`select count
+            from sign_in_guard_test.attempts where user_id = ${userId}`);
+
+        return row?.count ?? 0;
+    }
+
+    async write(userId: number, count: number): Promise<void>
+    {
+        await this.db.execute(sql`insert into sign_in_guard_test.attempts (user_id, count) values (${userId}, ${count})
+            on conflict (user_id) do update set count = excluded.count`);
+    }
+}
+
+const attempts = new SignInAttemptsRepository();
+
 /** What the guard does in the current row; the guard itself is stated once per row. */
 const policy: {
-    admit: (attempt: SignInAttempt) => Promise<SignInAdmission>;
+    admit: (attempt: SignInAttempt, call: SignInAdmitCall) => Promise<SignInAdmission>;
     settled: (outcome: SignInOutcome) => Promise<void>;
 } = {
     admit: async () => undefined,
@@ -182,7 +210,7 @@ const policy: {
 };
 
 const guard = {
-    admit: (attempt: SignInAttempt) => policy.admit(attempt),
+    admit: (attempt: SignInAttempt, call: SignInAdmitCall) => policy.admit(attempt, call),
     settled: (outcome: SignInOutcome) => policy.settled(outcome),
 };
 
@@ -269,6 +297,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         await getTestDb().execute(sql`create table sign_in_guard_test.history (
             id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
             reason text, key_id text, ip text, web_proxy boolean not null)`);
+        await getTestDb().execute(sql`create table sign_in_guard_test.attempts (user_id bigint primary key, count int not null)`);
 
         // `setupTestDb` points DATABASE_URL at the test database.
         observer = postgres(process.env.DATABASE_URL!, { max: 1 });
@@ -289,7 +318,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     beforeEach(async () =>
     {
         await clearTables(getTestDb());
-        await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts`);
         resetMemoryRateLimitStore();
         await initializeAuth();
         sendEmail.mockClear();
@@ -868,31 +897,30 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         resetMemoryRateLimitStore();
 
         // Four requests: three wrong passwords and the right one. Each takes
-        // its first admit — four failures recorded, so admitted — and none goes
-        // on until all four have. The right one then waits until a wrong one has
-        // written the fifth failure, under the account lock, not yet committed:
-        // it reaches the lock behind it, and its deciding admit sees five.
+        // its first admit — four failures recorded, so admitted — and none is
+        // compared until all four have. The right one then waits until a wrong
+        // one has written the fifth failure, under the account lock, not yet
+        // committed: it reaches the lock behind it, and its deciding admit sees
+        // five. The gates hold the comparison, where no lock is held.
         const contenders = ['wrong-a', 'wrong-b', 'wrong-c', 'right'];
         const firstAdmits = barrier(contenders.length);
         const fifthWritten = deferred();
+        const compare = verifyPassword.getMockImplementation()!;
+        onTestFinished(() => void verifyPassword.mockImplementation(compare));
 
-        policy.admit = async (attempt) =>
+        verifyPassword.mockImplementation(async (password: string, hash: string) =>
         {
-            const decision = await lockAfterFive(attempt);
+            firstAdmits.arrive();
+            await firstAdmits.passed;
 
-            if (!getTransactionContext())
+            if (password === PASSWORD)
             {
-                firstAdmits.arrive();
-                await firstAdmits.passed;
-
-                if (attempt.userAgent === 'right')
-                {
-                    await fifthWritten.promise;
-                }
+                await fifthWritten.promise;
             }
 
-            return decision;
-        };
+            return await compare(password, hash);
+        });
+        policy.admit = lockAfterFive;
         policy.settled = async (outcome) =>
         {
             await history.record(outcome);
@@ -1082,7 +1110,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         const { secret } = await enrolTotp('decide2@test.com');
         const { challenge, keyId } = await openChallenge('decide2@test.com');
         await getTestDb().execute(sql`truncate sign_in_guard_test.history`);
-        policy.admit = async attempt => attempt.stage === 'second-factor' && getTransactionContext() ? LOCKED : undefined;
+        policy.admit = async (attempt, call) => attempt.stage === 'second-factor' && call === 'deciding' ? LOCKED : undefined;
 
         await expectRefused(await post('/_auth/mfa/verify', { challenge, code: codeFor(secret) }));
 
@@ -1160,9 +1188,9 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     {
         const owner = await seedUser('decide@test.com');
         const key = deviceKeyBody();
-        policy.admit = async (attempt) =>
+        policy.admit = async (attempt, call) =>
         {
-            if (!getTransactionContext())
+            if (call !== 'deciding')
             {
                 return undefined;
             }
@@ -1325,16 +1353,18 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
 
         // Both requests are past the challenge's entry check before either
         // completes: each proof is right, and the challenge is spent once.
-        policy.admit = async () =>
+        // Held at the challenge's read, before the first admit: no lock is
+        // held there yet, and both requests pass it before either takes one.
+        const firstRead = mfaChallengesRepository.findByHash.bind(mfaChallengesRepository);
+        vi.spyOn(mfaChallengesRepository, 'findByHash').mockImplementation(async (hash) =>
         {
-            if (!getTransactionContext())
-            {
-                both.arrive();
-                await both.passed;
-            }
+            const row = await firstRead(hash);
+            both.arrive();
+            await both.passed;
 
-            return undefined;
-        };
+            return row;
+        });
+        onTestFinished(() => void vi.mocked(mfaChallengesRepository.findByHash).mockRestore());
 
         const answers = await Promise.all([
             post('/_auth/mfa/verify', { challenge, code: codeFor(secret) }),
@@ -1399,8 +1429,8 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     // Row 10 — no option, no cost
     // ========================================================================
 
-    /** What one request sent to the database, by kind. */
-    async function statementsOf(request: () => Promise<Response>): Promise<{ status: number; data: number; locks: number; begins: number; savepoints: number }>
+    /** What one request sent to the database, in order: each statement's text, its parameters bound rather than inlined. */
+    async function statementSequence(request: () => Promise<Response>): Promise<{ status: number; seen: string[] }>
     {
         const client = (getDatabase() as unknown as { $client: { options: { debug: unknown } } }).$client;
         const seen: string[] = [];
@@ -1411,10 +1441,18 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         {
             client.options.debug = original;
         });
+
+        return { status: response.status, seen };
+    }
+
+    /** What one request sent to the database, by kind. */
+    async function statementsOf(request: () => Promise<Response>): Promise<{ status: number; data: number; locks: number; begins: number; savepoints: number }>
+    {
+        const { status, seen } = await statementSequence(request);
         const control = /^(begin|commit|rollback|savepoint|release|set local)/;
 
         return {
-            status: response.status,
+            status,
             data: seen.filter(query => !control.test(query)).length,
             locks: seen.filter(query => query.includes('for no key update')).length,
             begins: seen.filter(query => query.startsWith('begin')).length,
@@ -1568,5 +1606,152 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
 
         expect(wrong.answer).toMatchObject({ status: 403, error: { code: 'SignInRefusedError' } });
         expect(right).toEqual(wrong);
+    });
+
+    // ========================================================================
+    // Row 16 — an attempt counted before the comparison bounds the comparisons
+    // ========================================================================
+
+    /**
+     * Whether a transaction holds the account's lock now: the lock statement,
+     * tried from another connection without waiting.
+     */
+    async function accountLockHeld(userId: number): Promise<boolean>
+    {
+        return await observer`select id from spfn_auth.users where id = ${userId} for no key update nowait`.then(
+            () => false,
+            (error: { code?: string }) =>
+            {
+                expect(error.code).toBe('55P03');
+
+                return true;
+            },
+        );
+    }
+
+    it('row 16 — "refuse past five attempts", counted at the first admit: eight wrong passwords at once compare at most five (#478)', async () =>
+    {
+        const owner = await seedUser('burst@test.com');
+        const BURST = 8;
+        const counted = barrier(BURST);
+        const firstAdmitsDone = barrier(BURST);
+        const compared: string[] = [];
+        const compare = verifyPassword.getMockImplementation()!;
+        onTestFinished(() => void verifyPassword.mockImplementation(compare));
+
+        // The count is read, then written. Where no lock makes the attempts
+        // take turns, every one reads before any writes — the order a burst
+        // can always arrange — and is let through on that read.
+        policy.admit = async ({ user }, call) =>
+        {
+            if (call !== 'before-proof' || !user)
+            {
+                return undefined;
+            }
+
+            const before = await attempts.count(user.id);
+
+            if (!await accountLockHeld(user.id))
+            {
+                counted.arrive();
+                await counted.passed;
+            }
+
+            await attempts.write(user.id, before + 1);
+            firstAdmitsDone.arrive();
+
+            return before + 1 > 5 ? LOCKED : undefined;
+        };
+
+        // Every comparison against the account's hash is held open until all
+        // eight first admits have answered: none ends before the last attempt
+        // is past the point a refusal could have stopped it.
+        verifyPassword.mockImplementation(async (password: string, hash: string) =>
+        {
+            if (hash === owner.passwordHash)
+            {
+                compared.push(password);
+                await firstAdmitsDone.passed;
+            }
+
+            return await compare(password, hash);
+        });
+
+        const answers = await Promise.all(Array.from({ length: BURST }, (_, index) =>
+            login('burst@test.com', WRONG_PASSWORD, { forwardedFor: `192.0.2.${40 + index}` })));
+
+        expect(compared).toHaveLength(5);
+        expect(answers.map(answer => answer.status).sort()).toEqual([401, 401, 401, 401, 401, 403, 403, 403]);
+        expect(await attempts.count(owner.id)).toBe(BURST);
+    });
+
+    // ========================================================================
+    // Row 17 — a configured guard tells no account from its database work
+    // ========================================================================
+
+    const IDENTIFIER_CHANNELS = [
+        { channel: 'password', attempt: (email: string) => login(email, WRONG_PASSWORD) },
+        { channel: 'deletion-cancel', attempt: (email: string) => post('/_auth/deletion/cancel', { email, password: WRONG_PASSWORD }) },
+    ] as const;
+
+    it.each(IDENTIFIER_CHANNELS)('row 17 — $channel, a guard that does nothing: a wrong password for an account and for an unknown identifier send the same statements, locks included', async ({ attempt }) =>
+    {
+        await seedUser('known@test.com');
+        policy.admit = async () => undefined;
+        policy.settled = async () => undefined;
+
+        const known = await statementSequence(() => attempt('known@test.com'));
+        const unknown = await statementSequence(() => attempt('nobody@test.com'));
+
+        expect(known.status).toBe(401);
+        expect(known.seen.filter(statement => statement.includes('for no key update'))).toHaveLength(2);
+        expect(known).toEqual(unknown);
+    });
+
+    // Each channel's account is one its right password would get through:
+    // a cancel is for a deletion that is pending.
+    const MOVED_IDENTIFIER_CHANNELS = [
+        { channel: 'password', seed: seedUser, attempt: (email: string) => login(email, PASSWORD) },
+        {
+            channel: 'deletion-cancel',
+            seed: async (email: string) =>
+            {
+                const owner = await seedUser(email);
+                await requestAccountDeletionService(owner.id, { requestedBy: 'admin' });
+
+                return owner;
+            },
+            attempt: (email: string) => post('/_auth/deletion/cancel', { email, password: PASSWORD }),
+        },
+    ] as const;
+
+    it.each(MOVED_IDENTIFIER_CHANNELS)('row 17b — $channel, an identifier moved off its account between the read and the lock: the hash compared is that of the account admit was asked about', async ({ seed, attempt }) =>
+    {
+        const owner = await seed('moving@test.com');
+        const asked: (number | null)[] = [];
+        policy.admit = async ({ user }, call) =>
+        {
+            if (call === 'before-proof')
+            {
+                asked.push(user?.id ?? null);
+            }
+
+            return undefined;
+        };
+
+        const read = usersRepository.findByEmailOrPhoneOnPrimary.bind(usersRepository);
+        vi.spyOn(usersRepository, 'findByEmailOrPhoneOnPrimary').mockImplementationOnce(async (email, phone) =>
+        {
+            const found = await read(email, phone);
+            await getTestDb().update(users).set({ email: 'moved@test.com' }).where(eq(users.id, owner.id));
+
+            return found;
+        });
+        onTestFinished(() => void vi.mocked(usersRepository.findByEmailOrPhoneOnPrimary).mockRestore());
+        comparedHashes();
+
+        expect((await attempt('moving@test.com')).status).toBe(401);
+        expect(asked).toEqual([null]);
+        expect(comparedHashes()).toEqual([await getDummyPasswordHash()]);
     });
 });

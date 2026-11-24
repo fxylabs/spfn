@@ -935,6 +935,9 @@ type SignInOutcome = SignInAttempt & (
 );
 
 type SignInAdmission = void | undefined | { refuse: { code: string } };   // code: /^[A-Za-z0-9_.-]{1,64}$/
+type SignInAdmitCall = 'before-proof' | 'deciding' | 'after-failure';
+
+admit?: (attempt: SignInAttempt, call: SignInAdmitCall) => SignInAdmission | Promise<SignInAdmission>;
 ```
 
 **`admit(attempt)`** answers nothing to let the attempt go on, or `{ refuse: { code } }`. The client
@@ -946,6 +949,12 @@ throwing is: 500, no session.
 On the web OAuth flow the refusal is the error redirect with `reason=sign_in_refused`. A refused
 registration (`register`, `signup-link`, `invitation`) rolls the new account back.
 
+`call` says which of an attempt's calls this is: `before-proof`, the first call on `password`,
+`deletion-cancel` and `mfa/verify`, before the credential or the proof is compared — the one place
+to count an attempt; `deciding`, where the key is written (at `mfa/verify`, where it is activated),
+the only call on every other channel; `after-failure`, asked again once a wrong credential is
+recorded. A policy that only reads its state can ignore it.
+
 **`settled(outcome)`** is told `challenged` at a 202 (the key is written inactive), `succeeded`
 once, when the session exists — at `mfa/verify` for a 202 — and `failed` with a `reason`.
 
@@ -955,7 +964,7 @@ decides what becomes of a write it makes:
 
 | Call | Runs | A write of yours there |
 |---|---|---|
-| `admit`, first call on `password`, `deletion-cancel` and `mfa/verify` (before the credential is compared) | outside any transaction, without the lock | commits at once, statement by statement, whatever the attempt's outcome |
+| `admit`, first call on `password`, `deletion-cancel` and `mfa/verify` (`before-proof`, before the credential is compared) | in a transaction of its own, under the account lock, committed before the comparison | commits before the comparison, whatever the attempt's outcome — a refusal of yours included; a throw rolls it back |
 | `admit`, deciding call — where the key is written; at `mfa/verify`, where it is activated | in the session's transaction, under the account lock | commits with the session; rolls back with a refused or failed one |
 | `admit`, asked again after a wrong credential | in the transaction that records the failure, under the account lock | commits with that record |
 | `settled`, `challenged` or `succeeded` | in the session's transaction, under the account lock | commits with the session; a throw rolls the session back |
@@ -979,8 +988,8 @@ decides what becomes of a write it makes:
   - **A wrong credential checked before any transaction** — the password on `password` and
     `deletion-cancel`, the proof at `mfa/verify`, a spent second-factor budget — is told, and `admit`
     is then asked again in that transaction: a failure that crossed your limit is answered with the
-    refusal. An unknown identifier has no account row to lock; count it with one statement (an
-    upsert).
+    refusal. An unknown identifier takes the lock by the identifier it names, as an account does,
+    and finds no row to lock; count it with one statement (an upsert).
   - **A refusal decided inside the session's transaction** — the deciding `admit` (`refused`), an
     account the package refuses (`accountDisabled`, `pendingDeletion`), a passkey assertion that
     fails for a known credential (`credential`), and at `mfa/verify`'s completion a right proof it
@@ -1001,12 +1010,13 @@ decides what becomes of a write it makes:
     your history is missing. On the first path the same two failures change the answer instead: a
     busy lock answers 503 (`AccountBusyError`), a throw 500, and nothing is lost unseen.
 - **A refusal is not a failure the package counts.** `reason: 'refused'` is your own `admit`'s
-  refusal told back to you. The worked example below counts it all the same, with every failure at
+  refusal told back to you. A counter of failures must count it all the same, with every failure at
   `stage: 'credential'`: the deciding `admit` is reached only by a right password, so a right
   password it refuses is told `refused` where a wrong one is told `credential`, and a counter that
-  skipped either would count them apart. A locked account's further attempts add to a count that is
-  already past the limit, and the lift starts it again.
-- **A throw** from `admit` answers 500, with no session. From `settled` on a failure, 500 — never a
+  skipped either would count them apart. The worked example below counts attempts instead, at the
+  `before-proof` call, where neither the reason nor the password is known yet.
+- **A throw** from `admit` answers 500, with no session; at the `before-proof` call it rolls back
+  what that call wrote, as at every other call. From `settled` on a failure, 500 — never a
   quiet 401 with nothing recorded. From `settled` on a success, the session rolls back: no key, no
   `auth.login`.
 - **The package's own count is not yours to roll back.** A wrong second-factor proof is charged to
@@ -1021,7 +1031,7 @@ decides what becomes of a write it makes:
 
 | Channel | Credential the package checks | `admit` asked | `settled` told |
 |---|---|---|---|
-| `password` (`POST /_auth/login`) | password for an identifier | before the comparison (no lock), and under the lock in the session's transaction, which decides | `failed` (`credential`, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
+| `password` (`POST /_auth/login`) | password for an identifier | before the comparison, under the lock in a transaction that commits first, and under the lock in the session's transaction, which decides | `failed` (`credential`, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
 | `passkey` | the passkey assertion | under the lock where the key is written | `failed` (`credential` for a known credential, `refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
 | `oauth`, `oauth-native`, `password-reset`, `device-code`, `device-link` | the provider, the reset link, the approving device | under the lock where the key is written | `failed` (`refused`, `accountDisabled`, `pendingDeletion`); `challenged` or `succeeded` |
 | `register`, `signup-link`, `invitation` | the code, the link, the invitation | under the lock, after `beforeRegister`; a refusal rolls the account back | `failed` (`refused`, `user: null`); `succeeded` |
@@ -1034,8 +1044,9 @@ decides what becomes of a write it makes:
 the app can tell the **owner**, out of band. On `password` and `deletion-cancel` they are told only
 for the right password, and a wrong one is told `credential`, so a lockout that counts `credential`
 alone fires after five wrong guesses and never after the right one — the oracle the package's own
-answer no longer is. Count every `failed` outcome with `stage: 'credential'`, whatever its reason,
-as the worked example below does; a reason added later is then counted without a change of yours.
+answer no longer is. Count every `failed` outcome with `stage: 'credential'`, whatever its reason;
+a reason added later is then counted without a change of yours. Or count attempts before the
+comparison, as the worked example below does: an attempt has no reason yet.
 
 A wrong **step-up** or **enrolment** proof is not reported: a signed-in person's typo is not a
 sign-in. **Not reported either**: an attempt that never identifies an account or a credential — a
@@ -1049,8 +1060,9 @@ a second time — answered 401 `InvalidCredentialsError`, told nothing. The race
 (a status change or a password change landing within the same request), not a guesser's to arrange,
 and a counter misses one right password by it. A reset link refused at its
 confirmation, before the sign-in step, is not a sign-in yet; an account refused at the completion is
-reported. Do not record from inside `admit`: a write there rolls back with a refused session — the
-report of the refusal is `settled`'s.
+reported. Do not record the outcome from inside the deciding `admit`: a write there rolls back with a
+refused session — the report of the refusal is `settled`'s. A count of attempts belongs in the
+`before-proof` call, whose writes commit whatever it answers.
 
 **Why a refused account still costs a comparison.** On `password` and `deletion-cancel`, `admit` is
 asked before the password is compared. An account it refuses is compared against the **dummy hash**,
@@ -1109,20 +1121,31 @@ sent only when the owner's password was used — which is why nothing but this m
 (see "Count by stage, never by reason" above). Rate-limit it (one per account per hour, say) so a
 leaked password cannot flood the inbox. Without a guard the package tells nobody.
 
-**Under concurrency** an attempt already past `admit` when your limit is reached is still judged, but
-a right password then meets the deciding `admit` under the account lock, after the failure that
-crossed the limit has committed — so no session starts past the limit. The guesses themselves stay
-bounded by the route's rate limit (10 a minute per account).
+**Under concurrency** attempts on one account take turns at the `before-proof` `admit`: each runs
+under the account lock in a transaction that commits before its credential is compared, so the
+next attempt's `admit` sees what this one wrote. Count an attempt there and refuse past your limit,
+and the credentials compared stay within that limit, however many requests arrive at once — the
+worked example below does. The comparison itself runs after that commit, holding no lock and no
+connection. A policy that counts failures in `settled` instead also starts no session past its
+limit — a right password meets the deciding `admit` under the lock, after the failure that crossed
+the limit has committed — but an attempt already past `before-proof` when that failure commits is
+still compared, so its guesses are bounded by the route's rate limit (10 a minute per account), not
+by its own.
 
 `loginService` and `cancelAccountDeletionService` own their transactions: with a guard configured,
 calling them inside one of yours throws, as `checkSecondFactorProof` does — a recorded failure would
 roll back with the refusal.
 
-#### Worked example — lock after five, lifted by an administrator
+#### Worked example — lock after five attempts, lifted by an administrator
+
+An attempt is counted at the `before-proof` call, before its password or second-factor proof is
+compared, and refused past five; a sign-in that succeeds starts the count again. The count is
+written under the account lock and committed before the comparison, so five is five comparisons
+however many requests arrive at once. The history is kept apart, from `settled`.
 
 ```typescript
 // src/server/entities/sign-in-history.ts
-import { bigint, boolean, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core';
+import { bigint, boolean, integer, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core';
 
 export const signInHistory = pgTable('sign_in_history', {
     id: serial('id').primaryKey(),
@@ -1136,18 +1159,18 @@ export const signInHistory = pgTable('sign_in_history', {
     at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const signInLockLifts = pgTable('sign_in_lock_lifts', {
+export const signInAttempts = pgTable('sign_in_attempts', {
     userId: bigint('user_id', { mode: 'number' }).primaryKey(),
-    liftedAt: timestamp('lifted_at', { withTimezone: true }).notNull(),
+    attempts: integer('attempts').notNull(),
 });
 ```
 
 ```typescript
 // src/server/repositories/sign-in-history.repository.ts
 import { BaseRepository } from '@spfn/core/db';
-import { and, count, eq, gt } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { SignInOutcome } from '@spfn/auth/server';
-import { signInHistory, signInLockLifts } from '../entities/sign-in-history';
+import { signInAttempts, signInHistory } from '../entities/sign-in-history';
 
 export class SignInHistoryRepository extends BaseRepository
 {
@@ -1163,55 +1186,66 @@ export class SignInHistoryRepository extends BaseRepository
             webProxy: outcome.webProxy,
         });
     }
+}
 
-    /**
-     * Failures at the credential stage since the last lift, whatever their reason — read in the
-     * package's transaction, under the account lock. Never a list of reasons: `accountDisabled` and
-     * `pendingDeletion` are told only for the right password.
-     */
-    async failuresSinceLift(userId: number): Promise<number>
+export class SignInAttemptsRepository extends BaseRepository
+{
+    /** Attempts since the last success or lift — read in the package's transaction, under the account lock. */
+    async count(userId: number): Promise<number>
     {
-        const [lift] = await this.db.select().from(signInLockLifts).where(eq(signInLockLifts.userId, userId));
-        const [row] = await this.db.select({ n: count() }).from(signInHistory).where(and(
-            eq(signInHistory.userId, userId),
-            eq(signInHistory.result, 'failed'),
-            eq(signInHistory.stage, 'credential'),
-            gt(signInHistory.at, lift?.liftedAt ?? new Date(0)),
-        ));
+        const [row] = await this.db.select().from(signInAttempts).where(eq(signInAttempts.userId, userId));
 
-        return row!.n;
+        return row?.attempts ?? 0;
     }
 
-    /** An administrator's lift: one upsert of the app's own row, no account lock taken. */
-    async lift(userId: number): Promise<void>
+    /**
+     * One more attempt, in the `before-proof` call's transaction; it commits whatever `admit` answers.
+     * One statement: the increment and the count it answers are one write, with no read before it.
+     */
+    async add(userId: number): Promise<number>
     {
-        const liftedAt = new Date();
+        const [row] = await this.db.insert(signInAttempts).values({ userId, attempts: 1 })
+            .onConflictDoUpdate({ target: signInAttempts.userId, set: { attempts: sql`${signInAttempts.attempts} + 1` } })
+            .returning({ attempts: signInAttempts.attempts });
 
-        await this.db.insert(signInLockLifts).values({ userId, liftedAt })
-            .onConflictDoUpdate({ target: signInLockLifts.userId, set: { liftedAt } });
+        return row!.attempts;
+    }
+
+    /** A sign-in that succeeded, or an administrator's lift: one statement, no account lock taken. */
+    async clear(userId: number): Promise<void>
+    {
+        await this.db.delete(signInAttempts).where(eq(signInAttempts.userId, userId));
     }
 }
 
 export const signInHistoryRepository = new SignInHistoryRepository();
+export const signInAttemptsRepository = new SignInAttemptsRepository();
 ```
 
 ```typescript
 // server.config.ts
 import { createAuthLifecycle } from '@spfn/auth/server';
-import { signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+import { signInAttemptsRepository, signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
 // The app's own record of the temporary passwords it issued.
 import { temporaryPasswordsRepository } from './src/server/repositories/temporary-passwords.repository';
 
+const LIMIT = 5;
+
 export const authLifecycle = createAuthLifecycle({
     signIn: {
-        admit: async ({ user, channel }) =>
+        admit: async ({ user, channel }, call) =>
         {
             if (!user)
             {
                 return undefined;
             }
 
-            if (await signInHistoryRepository.failuresSinceLift(user.id) >= 5)
+            // Counted before the comparison; every other call only reads the count.
+            const attempts = call === 'before-proof'
+                ? await signInAttemptsRepository.add(user.id)
+                : await signInAttemptsRepository.count(user.id);
+
+            if (attempts > LIMIT)
             {
                 return { refuse: { code: 'LOCKED' } };
             }
@@ -1226,17 +1260,42 @@ export const authLifecycle = createAuthLifecycle({
 
             return undefined;
         },
-        settled: outcome => signInHistoryRepository.record(outcome),
+        settled: async (outcome) =>
+        {
+            await signInHistoryRepository.record(outcome);
+
+            if (outcome.result === 'succeeded' && outcome.user)
+            {
+                await signInAttemptsRepository.clear(outcome.user.id);
+            }
+        },
     },
 });
 ```
 
-The lift is an ops or admin route calling `signInHistoryRepository.lift(userId)` behind
-`requireOpsScope` (or a role check). Whether a password reset lifts the lock is yours to decide: a
-`password-reset` sign-in reaches `admit` like any other, so the policy above refuses it while locked
-— lift on `channel === 'password-reset'` in `admit` if a reset should. The history is the sign-in
-list a settings page shows; `ip` is what the request said, `webProxy` whether the proxy vouched for
-it.
+The `add` is one statement, the increment and its answer together. The account lock makes two
+attempts on one account take turns at it, but the lift takes no account lock: an `add` that read the
+count, then wrote it back plus one, would put back a count a `clear` removed in between, and the
+owner would stay locked out. As one statement, a `clear` lands either before the increment (the
+count restarts at 1) or after it (the count is gone).
+
+An unknown identifier (`user: null`) is not counted here; count it by identifier with one statement
+(an upsert) if your policy does. The package's own statements are the same for an account and for an
+unknown identifier, but what your `admit` and `settled` do is yours: the policy above writes for an
+account and not for `user: null`, and a per-identifier count kept only for `user: null` writes for
+the unknown identifier and not for the account. Either way the work tells a caller whether the
+identifier names an account. Keep the same statements on both sides — count every attempt by
+identifier, say — if that matters to you.
+
+Every attempt is counted, the right password's too — a password sign-in that meets a 202 counts
+once more at `mfa/verify`, and the success clears both. A locked account stays locked: its right
+password is refused at `before-proof` like any other attempt, so only the lift ends it. The lift is
+an ops or admin route calling `signInAttemptsRepository.clear(userId)` behind `requireOpsScope` (or
+a role check). Whether a password reset lifts the lock is yours to decide: a `password-reset`
+sign-in reaches the deciding `admit` like any other, so the policy above refuses it while locked —
+clear the count on `channel === 'password-reset'` in `admit`, before reading it, if a reset should. The history is the
+sign-in list a settings page shows; `ip` is what the request said, `webProxy` whether the proxy
+vouched for it.
 
 #### Out of scope
 

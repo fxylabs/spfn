@@ -115,22 +115,39 @@ export const SIGN_IN_REFUSAL_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 export type SignInAdmission = void | undefined | { refuse: { code: string } };
 
 /**
+ * Which of `admit`'s calls this is, so an app can count each attempt once.
+ *
+ * - `before-proof` — the first call on `password`, `deletion-cancel` and
+ *   `mfa/verify`, before the credential or the proof is compared: the one
+ *   place to count an attempt. Every attempt of these three passes it, and
+ *   concurrent attempts on one account take turns at it
+ * - `deciding` — where the key is written; at `mfa/verify`, where it is
+ *   activated. On every other channel it is the only call
+ * - `after-failure` — asked again once a wrong credential or proof is recorded
+ */
+export type SignInAdmitCall = 'before-proof' | 'deciding' | 'after-failure';
+
+/**
  * `createAuthLifecycle({ signIn })`. Both optional.
  *
- * Every call but one runs in a transaction of the package's, holding the
- * account's lock, and an app repository extending `BaseRepository` joins it:
- * `admit` and `succeeded`/`challenged` in the session's transaction, a
- * failure in one of its own. The exception is `admit`'s first call on
- * `password`, `deletion-cancel` and `mfa/verify`, before the credential is
- * compared: outside any transaction, so a write there commits at once.
- * Database work only, and fast — every other writer of the account waits on
- * it. Never lock a second account. The README's "Where each call runs" has
- * the table.
+ * Every call runs in a transaction of the package's, holding the account's
+ * lock (for `user: null`, the same lock statement, which finds no row), and
+ * an app repository extending `BaseRepository` joins it through the
+ * transaction context: the deciding
+ * `admit` and `succeeded`/`challenged` in the session's transaction, a failure
+ * in one of its own, and the `before-proof` `admit` in one of its own that
+ * commits before the credential is compared — whatever it answers, so an
+ * attempt counted there stays counted, and concurrent attempts on one account
+ * take turns at the count: an app that refuses past N compares at most N
+ * credentials of the account. A throw rolls that transaction back. Database
+ * work only, and fast — every other writer of the account waits on it; no
+ * network call, no mail. Never lock a second account. The README's "Where
+ * each call runs" has the table.
  */
 export interface SignInGuardOptions
 {
     /** Whether this attempt may go on. Throwing refuses it with a 500. */
-    admit?: (attempt: SignInAttempt) => SignInAdmission | Promise<SignInAdmission>;
+    admit?: (attempt: SignInAttempt, call: SignInAdmitCall) => SignInAdmission | Promise<SignInAdmission>;
     /** How the attempt ended. Throwing on a failure answers 500; on a success, rolls the session back. */
     settled?: (outcome: SignInOutcome) => void | Promise<void>;
 }
