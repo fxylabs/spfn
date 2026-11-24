@@ -5751,7 +5751,12 @@ link can still put a code of that shape on your page, so treat an unknown one as
 at all. The parameter is not called `code`: this README once recommended the template
 `/auth/error?error={error}&code={reason}`, where `code` is the reason, and a page built on it keeps
 reading the reason from `code` — on `sign_in_refused` it now sees
-`code=sign_in_refused&refusalCode=<your code>`, one value under each name.
+`code=sign_in_refused&refusalCode=<your code>`, one value under each name. That template has no
+`reason` of its own, though: its `{reason}` sits inside `code=`, so it is filled there and nothing
+is appended. A page built on the package's own readers (`createOAuthCallbackHandler`,
+`OAuthCallback`) needs `reason` as its own parameter — with this template they find none, fall back
+to `provider_error`, and drop the refusal code. Add `reason={reason}` to the template, or drop
+`code={reason}` so `reason` is appended.
 
 The error behind a redirect is logged as core's error handler logs it: `@spfn/auth:service` at
 error level for an untyped error or a typed 5xx — `OAuth callback failed` (`OAuth link failed` when
@@ -5778,8 +5783,10 @@ error page only after that transaction rolled back.
 (`/auth/error?why={reason}&msg={error}&key={refusalCode}`); a template without `{reason}` gets
 `reason` as a query parameter, placed before any `#fragment`, and one without `{refusalCode}` gets
 `refusalCode` the same way when there is one. Without a refusal code, `{refusalCode}` is replaced by
-nothing. `createOAuthCallbackHandler` forwards `refusalCode` under the same name, and `OAuthCallback`
-passes the same three — `onError(message, reason, refusalCode?)` and
+nothing. A template with its own `refusalCode=` and no `{refusalCode}` placeholder gets it twice, as
+`reason` always has — use the placeholder. `createOAuthCallbackHandler` forwards `refusalCode`
+under the same name, and `OAuthCallback` passes the same three — `onError(message, reason,
+refusalCode?)` and
 `errorComponent(message, reason, refusalCode?)`: `message` is `OAUTH_ERROR_MESSAGES[reason]`;
 `reason` is the backend's code when the callback query carried one, `expired`, `invalid_state` or
 `no_cookie` for a finalize the proxy refused, and `failed` otherwise; `refusalCode` as above.

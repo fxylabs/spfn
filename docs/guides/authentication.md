@@ -942,8 +942,14 @@ On `sign_in_refused` the `code` your `admit` refused with travels as `refusalCod
 page to look its own copy up by; a reader drops a refusal code beside another reason or outside the
 `admit` code shape. It is not called `code`: this guide once recommended
 `/auth/error?error={error}&code={reason}`, where `code` is the reason, and with that template a
-`sign_in_refused` redirect now reads `code=sign_in_refused&refusalCode=<your code>`. Every caught error the redirect answers — and every failure of a link callback, which answers
-only `oauthLink=failed` — is logged by `@spfn/auth:service` as core's error handler would log it
+`sign_in_refused` redirect now reads `code=sign_in_refused&refusalCode=<your code>`. That template
+carries no `reason` of its own: its `{reason}` sits inside `code=`, so it is filled there and
+nothing is appended. A page built on the package's own readers (`createOAuthCallbackHandler`,
+`OAuthCallback`) needs `reason` as its own parameter — with this template they find none, fall back
+to `provider_error`, and drop the refusal code. Add `reason={reason}` to the template, or drop
+`code={reason}` so `reason` is appended. Every caught error the redirect answers — and every
+failure of a link callback, which answers only `oauthLink=failed` — is logged by
+`@spfn/auth:service` as core's error handler would log it
 (`errorLogLevel`): at error level for a fault (an untyped error, a typed 5xx), at warn for a refusal
 (#382). A provider error read as `provider_error` leaves a warn line naming the provider's `error`
 when it is a registered code, `unrecognised` otherwise, on a sign-in's callback and a link's alike. A
@@ -951,7 +957,9 @@ sign-in start for a provider that is not configured redirects with `failed` and 
 `OAuth provider is not configured { provider }` (a `/_auth/oauth/:provider` segment that names no
 registered provider is not logged). Put `{reason}` and `{refusalCode}` in the template
 (`/auth/error?error={error}&why={reason}&key={refusalCode}`) to place them yourself; without them
-they are appended as query parameters. `createOAuthCallbackHandler` forwards `refusalCode`, and
+they are appended as query parameters. A template with its own `refusalCode=` and no `{refusalCode}`
+placeholder gets it twice, as `reason` always has — use the placeholder.
+`createOAuthCallbackHandler` forwards `refusalCode`, and
 `OAuthCallback`'s `onError(message, reason, refusalCode?)` and
 `errorComponent(message, reason, refusalCode?)` receive the reason's sentence, the reason and the
 refusal code; the handler and the component ignore the `error` text on their own URL.

@@ -681,7 +681,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason, and a second `code` would have made the refusal code unreachable by `get('code')` and
   turned a Next.js page's `searchParams.code` into an array. An operator who kept that template sees
   `code` carry the reason as before, and on `sign_in_refused` one more parameter,
-  `refusalCode=<the app's code>`. A provider error read as `provider_error` now leaves one warn line
+  `refusalCode=<the app's code>` — but no `reason` of its own, since that template's `{reason}` sits
+  inside `code=` and is filled there rather than appended. A page built on the package's own readers
+  (`createOAuthCallbackHandler`, `OAuthCallback`) needs `reason` as its own parameter; with this
+  template they find none, fall back to `provider_error`, and drop the refusal code. **Migration for
+  that template:** add `reason={reason}` to it, or drop `code={reason}` so `reason` is appended. A
+  template with its own `refusalCode=` and no `{refusalCode}` placeholder gets it twice, as `reason`
+  always has — use the placeholder. A provider error read as `provider_error` now leaves one warn line
   on `@spfn/auth:service`, `OAuth provider returned an error { provider, reason, providerError }`,
   on a sign-in's callback and on a link's alike, `providerError` being the provider's `error` when
   it is a registered code and `unrecognised` otherwise; `error_description` is logged nowhere. A
