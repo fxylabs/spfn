@@ -137,7 +137,7 @@ function trailingNewline(raw: string): string
  */
 export function installedGraphMismatches(
     projectDir: string,
-    manifest: KitReleaseManifestView,
+    manifest: Pick<KitReleaseManifestView, 'packages'>,
     skip: (name: string) => boolean = () => false,
 ): GraphMismatch[]
 {

@@ -232,6 +232,75 @@ describe('table B — clean clone and credentials', () =>
         expect(result.code).toBe('KIT_MANAGED_DRIFT');
         expect(existsSync(join(clone, 'node_modules'))).toBe(false);
     });
+
+    it('reinstalls on a resume when the restored graph is gone', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+
+        const clone = cleanClone();
+
+        world.faults.failingGates.add('build');
+
+        expect((await runRestore({ projectDir: clone, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        rmSync(join(clone, 'node_modules'), { recursive: true });
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: clone,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({ status: 'completed', code: 'KIT_RESTORE_COMPLETE' });
+        expect(existsSync(join(clone, 'node_modules', '@spfn', 'core', 'package.json'))).toBe(true);
+    });
+
+    it('stops a resumed restore on a managed file edited since its install', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+
+        const clone = cleanClone();
+
+        world.faults.failingGates.add('build');
+        await runRestore({ projectDir: clone, json: true, write: silent }, world.adapters);
+
+        writeFileSync(join(clone, 'src/app/api/landing/route.ts'), '// edited by hand\n', 'utf8');
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: clone,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({
+            code: 'KIT_RESUME_MISMATCH',
+            evidence: { checkpoint: 'install-frozen', reason: 'managed-drift: src/app/api/landing/route.ts' },
+        });
+    });
+
+    it('warns that the graph is not installed when node_modules is there and the graph is not', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+        rmSync(join(target, 'node_modules', '@spfn'), { recursive: true });
+
+        const check = await runCheck({ projectDir: target }, world.adapters);
+
+        expect(check.diagnostics).toContainEqual(expect.objectContaining({
+            code: 'KIT_GATE_FAILED',
+            summary: 'The dependency graph is not installed in this checkout.',
+        }));
+    });
 });
 
 describe('table C — plan', () =>
@@ -513,5 +582,30 @@ describe('table D — update, approval and resume', () =>
         expect(resumed.status).toBe('failed');
         expect(resumed.code).toBe('KIT_RESUME_MISMATCH');
         expect(resumed.evidence?.checkpoint).toBe('migration-applied');
+    });
+
+    it('reinstalls the target graph on a resume when it is gone, and completes', async () =>
+    {
+        const world = new FakeKitWorld({ releases: [R0] });
+
+        await install(world);
+        world.publish(R1);
+        world.faults.failingGates.add('build');
+
+        expect((await runUpdate({ projectDir: target, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        rmSync(join(target, 'node_modules'), { recursive: true });
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({ status: 'completed', code: 'KIT_UPDATE_COMPLETE' });
+        expect(existsSync(join(target, 'node_modules', '@spfn', 'core', 'package.json'))).toBe(true);
     });
 });

@@ -15,7 +15,7 @@
 
 import { KitError } from './../errors.js';
 import { createEventSink, type KitOperationResult } from './../events.js';
-import { detectManagedDrift, managedDigests } from './../drift.js';
+import { detectManagedDrift } from './../drift.js';
 import { JournalStore } from './../journal.js';
 import { acquireOperationLock } from './../lock.js';
 import { kitPaths } from './../paths.js';
@@ -29,6 +29,7 @@ import {
     requireCredential,
     runLocalGates,
     verifiedManifest,
+    verifyInstalledGraph,
 } from './shared.js';
 
 export interface RestoreRequest
@@ -145,17 +146,24 @@ export async function runRestore(request: RestoreRequest, adapters: KitAdapters)
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
-                    // The signed manifest's, not the lock's: these scopes are
-                    // the routes pnpm sends to the private registry, and
-                    // nothing signs the lock.
-                    packages: manifest.packages,
+                    // The signed manifest, not the lock: its scopes are the
+                    // routes pnpm sends to the private registry, and nothing
+                    // signs the lock.
+                    manifest,
                 });
 
                 return { kind: 'done', evidence: { attempts: evidence.attempts } };
             },
             async verify()
             {
-                return { ok: true, evidence: managedDigests(request.projectDir, lock) };
+                const drift = detectManagedDrift(request.projectDir, lock);
+
+                if (drift.length > 0)
+                {
+                    return { ok: false, reason: `managed-drift: ${drift[0].path}` };
+                }
+
+                return verifyInstalledGraph(request.projectDir, manifest);
             },
         },
         {
@@ -165,7 +173,7 @@ export async function runRestore(request: RestoreRequest, adapters: KitAdapters)
             async run(): Promise<StepOutcome>
             {
                 const status = await adapters.database.status({ cwd: request.projectDir });
-                const gates = await runLocalGates(adapters, request.projectDir, manifest.gates);
+                const gates = await runLocalGates(adapters, request.projectDir, manifest);
 
                 return {
                     kind: 'done',

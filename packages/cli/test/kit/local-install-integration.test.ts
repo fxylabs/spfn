@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runInstall } from '../../src/kit/operations/install.js';
+import { runResume } from '../../src/kit/operations/resume.js';
 import { createKitRemotePorts } from '../../src/kit/http/index.js';
 import { createKitLocalPorts } from '../../src/kit/local/index.js';
 import { SpfnDatabasePort } from '../../src/kit/local/database.js';
@@ -174,14 +175,14 @@ const mappedFetch = (url: string, init?: RequestInit): Promise<Response> => fetc
 );
 
 /** The scaffold's `package.json`: two real dependencies and one real gate. */
-function scaffoldPackageJson(): string
+function scaffoldPackageJson(build = 'node -e "process.stdout.write(String(0))"'): string
 {
     return `${JSON.stringify({
         name: 'kit-scaffold',
         private: true,
         version: '0.0.0',
         type: 'module',
-        scripts: { build: 'node -e "process.stdout.write(String(0))"' },
+        scripts: { build },
         dependencies: { [CORE.name]: CORE.version, [KIT.name]: KIT.version },
     }, null, 4)}\n`;
 }
@@ -249,7 +250,7 @@ async function seedLockfile(): Promise<string>
 }
 
 /** Build the release around a given scaffold, and put it in the store. */
-function publish(lockfile: string): void
+function publish(lockfile: string, build?: string): void
 {
     world = new FakeKitWorld({
         kitId: KIT_ID,
@@ -261,7 +262,7 @@ function publish(lockfile: string): void
             sequence: 1,
             gates: ['build'],
             scaffoldFiles: {
-                'package.json': scaffoldPackageJson(),
+                'package.json': scaffoldPackageJson(build),
                 'pnpm-lock.yaml': lockfile,
                 'src/app/page.tsx': 'export default function Page() { return null; }\n',
             },
@@ -321,6 +322,18 @@ function adaptersFor(projectDir: string, database: DatabasePort): KitAdapters
     };
 }
 
+/**
+ * A `build` gate that removes `node_modules/@spfn` and exits 0 while `marker`
+ * exists: a gate that changes the graph under the kit and still passes.
+ */
+function graphEmptyingBuild(marker: string): string
+{
+    const script = `const fs = require('fs'); if (fs.existsSync(${JSON.stringify(marker)})) `
+        + "fs.rmSync('node_modules/@spfn', { recursive: true, force: true });";
+
+    return `node -e ${JSON.stringify(script)}`;
+}
+
 function install(): ReturnType<typeof runInstall>
 {
     return runInstall({
@@ -371,6 +384,47 @@ describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actual
         expect(npmrc).toContain('@spfn:registry=');
         expect(npmrc).not.toMatch(/_auth/i);
         expect(npmrc).not.toContain('${');
+    }, 300_000);
+
+    it('does not commit when a gate passes on a tree it emptied', async () =>
+    {
+        const marker = join(root, 'empty-the-graph');
+
+        writeFileSync(marker, '', 'utf8');
+        publish(await seedLockfile(), graphEmptyingBuild(marker));
+
+        const result = await install();
+
+        expect(result).toMatchObject({
+            status: 'failed',
+            code: 'KIT_GATE_FAILED',
+            evidence: { gate: 'installed-graph', when: 'after', firstPackage: CORE.name, actual: 'absent' },
+        });
+        expect(() => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target, stdio: 'ignore' })).toThrow();
+    }, 300_000);
+
+    it('reinstalls the graph on a resume after a gate emptied it, and commits', async () =>
+    {
+        const marker = join(root, 'empty-the-graph');
+
+        writeFileSync(marker, '', 'utf8');
+        publish(await seedLockfile(), graphEmptyingBuild(marker));
+
+        expect((await install()).evidence).toMatchObject({ gate: 'installed-graph', when: 'after' });
+
+        rmSync(marker);
+
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => licenseKey,
+            json: true,
+            write: () => undefined,
+        }, adaptersFor(target, settledDatabase));
+
+        expect(resumed).toMatchObject({ status: 'completed', code: 'KIT_LOCAL_READY' });
+        expect(existsSync(join(target, 'node_modules', CORE.name, 'package.json'))).toBe(true);
+        expect(execFileSync('git', ['log', '-1', '--format=%s'], { cwd: target }).toString().trim())
+            .toBe(`chore: install ${KIT_ID} ${KIT.version}`);
     }, 300_000);
 
     it('refuses rather than resolving when the release ships a lockfile for another graph', async () =>

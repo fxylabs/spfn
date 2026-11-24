@@ -49,6 +49,7 @@ import {
     requireCredential,
     resolveRelease,
     runLocalGates,
+    verifyInstalledGraph,
     writeRegistryNpmrc,
     type MaterializeTarget,
 } from './shared.js';
@@ -305,7 +306,7 @@ function installSteps(options: StepFactoryOptions): OperationStep[]
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
-                    packages: manifest.packages,
+                    manifest,
                 });
                 const tooling = await verifyToolingPlan(options, projectDir, context.journal.operationId);
 
@@ -323,9 +324,11 @@ function installSteps(options: StepFactoryOptions): OperationStep[]
             },
             async verify()
             {
-                if (!existsSync(join(projectDir, 'node_modules')))
+                const graph = verifyInstalledGraph(projectDir, manifest);
+
+                if (!graph.ok)
                 {
-                    return { ok: false, reason: 'dependencies-missing' };
+                    return graph;
                 }
 
                 // A resume of an operation that installed its graph before this
@@ -397,7 +400,7 @@ function installSteps(options: StepFactoryOptions): OperationStep[]
             {
                 // The lock is already there — written when the graph landed, so
                 // that these gates had something to check against.
-                const gates = await runLocalGates(adapters, projectDir, manifest.gates);
+                const gates = await runLocalGates(adapters, projectDir, manifest);
 
                 await adapters.git.init({ cwd: projectDir });
 

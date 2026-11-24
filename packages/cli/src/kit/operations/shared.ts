@@ -304,8 +304,12 @@ export interface FrozenInstallOptions
     activationId: string;
     localClientId: string;
     credential: string;
-    /** The packages the private registry serves, for the scopes the session is filed under. */
-    packages: readonly KitPackageEntry[];
+    /**
+     * The signed release whose graph this installs: its packages are the scopes
+     * the session is filed under, and the installed tree must end up holding
+     * exactly them.
+     */
+    manifest: KitReleaseManifestView;
     /** Whether one retry after an unauthorized fetch is allowed. */
     allowSessionRetry?: boolean;
     /**
@@ -318,8 +322,6 @@ export interface FrozenInstallOptions
      * not the same as accepting whatever the registry happens to offer.
      */
     resolve?: boolean;
-    /** Refuse unless the installed tree ends up holding exactly this graph. */
-    expect?: KitReleaseManifestView;
 }
 
 export interface FrozenInstallEvidence
@@ -389,7 +391,7 @@ export async function installFrozenGraph(
             frozen: options.resolve !== true,
             env: createChildEnv({
                 registryToken: session.token,
-                registry: { url: adapters.registryUrl, scopes: scopesOf(options.packages) },
+                registry: { url: adapters.registryUrl, scopes: scopesOf(options.manifest.packages) },
             }),
         });
 
@@ -475,12 +477,7 @@ export function writeRegistryNpmrc(
  */
 function assertGraphInstalled(options: FrozenInstallOptions): void
 {
-    if (options.expect === undefined)
-    {
-        return;
-    }
-
-    const mismatches = installedGraphMismatches(options.projectDir, options.expect);
+    const mismatches = installedGraphMismatches(options.projectDir, options.manifest);
 
     if (mismatches.length === 0)
     {
@@ -489,7 +486,7 @@ function assertGraphInstalled(options: FrozenInstallOptions): void
 
     throw new KitError('KIT_UNSUPPORTED_RESOLUTION', 'The installed graph is not the one this release pins.', {
         evidence: {
-            release: options.expect.version,
+            release: options.manifest.version,
             packages: mismatches.length,
             firstPackage: mismatches[0].name,
             expected: mismatches[0].expected,
@@ -585,8 +582,32 @@ export async function assertCommittedStateTracked(adapters: KitAdapters, project
     return [...tracked];
 }
 
-/** Run the release's local gates. `health` belongs to deployment, not here. */
+/**
+ * Run the release's local gates, between two reads of the installed graph.
+ *
+ * A gate is a script about the project, not a reader of the graph: it exits 0
+ * on an emptied `node_modules` as readily as on the release's. Its success
+ * says the graph was there only because the graph is read here immediately
+ * before it and immediately after it — after, because the gates themselves
+ * run in a package manager that may install, or remove, before the script.
+ */
 export async function runLocalGates(
+    adapters: KitAdapters,
+    projectDir: string,
+    manifest: KitReleaseManifestView,
+): Promise<Record<string, string>>
+{
+    assertGraphAroundGates(projectDir, manifest, 'before');
+
+    const evidence = await runGates(adapters, projectDir, manifest.gates);
+
+    assertGraphAroundGates(projectDir, manifest, 'after');
+
+    return evidence;
+}
+
+/** `health` belongs to deployment, not here. */
+async function runGates(
     adapters: KitAdapters,
     projectDir: string,
     gates: readonly KitGate[],
@@ -610,6 +631,45 @@ export async function runLocalGates(
     }
 
     return evidence;
+}
+
+/**
+ * Fail the gate step on a graph the release does not pin. Resumable: the
+ * install step's `verify` reads the same graph and runs the install again.
+ */
+function assertGraphAroundGates(projectDir: string, manifest: KitReleaseManifestView, when: 'before' | 'after'): void
+{
+    const mismatch = installedGraphMismatches(projectDir, manifest)[0];
+
+    if (mismatch === undefined)
+    {
+        return;
+    }
+
+    throw new KitError('KIT_GATE_FAILED', `The installed graph is not the release's ${when} the gates.`, {
+        evidence: {
+            gate: 'installed-graph',
+            when,
+            firstPackage: mismatch.name,
+            expected: mismatch.expected,
+            actual: mismatch.actual ?? 'absent',
+        },
+        next: { command: 'spfn kit resume --json', requiresHumanApproval: false },
+    });
+}
+
+/**
+ * The install step's `verify`: done while the tree holds the release's graph.
+ * A graph that is gone is the step's own effect gone, not a project that
+ * moved, so the answer is to run the install again rather than a mismatch.
+ */
+export function verifyInstalledGraph(projectDir: string, manifest: KitReleaseManifestView): VerifyResult
+{
+    const mismatch = installedGraphMismatches(projectDir, manifest)[0];
+
+    return mismatch === undefined
+        ? { ok: true }
+        : { ok: false, rerun: true, reason: `installed-graph-mismatch: ${mismatch.name}` };
 }
 
 /**

@@ -1510,6 +1510,24 @@ with that file left exactly as it was found. An update is the one operation that
 and only after drift has already been refused, so every managed file is known to hold the
 previous release's bytes rather than somebody's edit.
 
+**A gate passes only on the release's graph.** A gate is a script about the project, and it
+exits 0 on an emptied `node_modules` as readily as on the release's, so its exit status alone
+says nothing about what is installed. The gate step reads the installed graph itself — every
+package the signed manifest names, at its pinned version, in `node_modules` — immediately
+before the gates and immediately after them. A package missing or at another version fails the
+step with `KIT_GATE_FAILED` (exit 3), `evidence.gate: "installed-graph"`, `when` (`before` or
+`after`), and the first such package with its `expected` and `actual` version; nothing is
+committed. `kit install`, `kit update` and `kit restore` also read it right after
+`pnpm install`, and refuse a graph the release does not pin with `KIT_UNSUPPORTED_RESOLUTION`.
+
+**A lost graph is reinstalled by a resume.** On `spfn kit resume` the install step re-reads
+that same graph. A graph that is gone is the step's own effect gone, not a project that moved,
+so the step runs again — a fresh registry session from this machine's credential, the frozen
+install, the read after it — and the steps after it go on (event `KIT_CHECKPOINT_RERUN`).
+After an `installed-graph` failure, `spfn kit resume` therefore reinstalls, runs the gates
+again and commits. A completed step whose project did move — a managed file edited, a different
+migration set — still stops the resume with `KIT_RESUME_MISMATCH`.
+
 **Release files are paid content, and are fetched as such.** Managed files, agent packs and
 the scaffold archive go out with the same bearer the private registry takes, and a refusal
 comes back in the same vocabulary — so "this machine's credential has been replaced" never
