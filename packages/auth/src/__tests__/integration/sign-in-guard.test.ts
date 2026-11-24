@@ -42,7 +42,8 @@
  * 18. the README's worked example as an existence oracle (#486): its policy
  *     answering an account's sixth wrong password otherwise than an unknown
  *     identifier's — and the README's printed example edited away from the
- *     code this row runs
+ *     code this row runs, or given a block that names no path, so no fixture
+ *     stands for it (the text rows read no database and run without one)
  * 19. the worked example's count of an email by each of its case spellings
  *     (#486): the package resolves them all to one account, so a count per
  *     spelling no longer bounds the guesses at it
@@ -221,14 +222,21 @@ const attempts = new SignInAttemptsRepository();
 const README_EXAMPLE = resolve(__dirname, '../fixtures/readme-sign-in-guard');
 const { signInPolicy: readmeSignInPolicy } = await import('../fixtures/readme-sign-in-guard/src/server/sign-in-policy');
 
-/** The worked example's blocks in the README, by the path each names on its first line. */
-function readmeExampleBlocks(): Map<string, string>
+/** A fenced block of the README, and the path its first line names if it names one. */
+interface ReadmeBlock
+{
+    path: string | undefined;
+    text: string;
+}
+
+/** The fenced blocks under the README heading that starts with `heading`, up to the next `####` heading. */
+function readmeBlocks(heading: string): ReadmeBlock[]
 {
     const readme = readFileSync(resolve(__dirname, '../../../README.md'), 'utf8');
-    const section = readme.split('\n#### Worked example — lock after five attempts')[1]!.split('\n#### ')[0]!;
+    const section = readme.split(`\n${heading}`)[1]!.split('\n#### ')[0]!;
 
-    return new Map([...section.matchAll(/```typescript\n(\/\/ (\S+)\n[\s\S]*?)```/g)]
-        .map(([, block, path]) => [path!, block!]));
+    return [...section.matchAll(/```\w*\n([\s\S]*?)```/g)]
+        .map(([, text]) => ({ path: /^\/\/ (\S+)\n/.exec(text!)?.[1], text: text! }));
 }
 
 /** The fixture modules that stand for a block: those whose first line names their own path. */
@@ -1849,11 +1857,6 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         policy.settled = async outcome => readmeSignInPolicy.settled!(outcome);
     }
 
-    it('row 18 — the README\'s worked example is the code rows 18 and 19 run: each of its blocks is a fixture module, text for text (#486)', () =>
-    {
-        expect(readmeExampleBlocks()).toEqual(readmeExampleFixtures());
-    });
-
     it.each(IDENTIFIER_CHANNELS)('row 18 — $channel, the README\'s worked example: six wrong passwords for an account and six for an unknown identifier answer the same statuses (#486)', async ({ attempt }) =>
     {
         await seedUser('known@test.com');
@@ -1888,5 +1891,28 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         }
 
         expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
+    });
+
+});
+
+// ============================================================================
+// Row 18 — the README's worked example's blocks are the fixture modules, text
+// for text; it reads no database, so it runs without one
+// ============================================================================
+
+describe('the README\'s sign-in guard, as printed (#486)', () =>
+{
+    it('row 18 — each block of the worked example names its path on its first line and is that fixture module, text for text', () =>
+    {
+        const blocks = readmeBlocks('#### Worked example — lock after five attempts');
+        const fixtures = readmeExampleFixtures();
+
+        expect(blocks.filter(({ path }) => !path).map(({ text }) => text), 'a block that names no path').toEqual([]);
+        expect(blocks.map(({ path }) => path).sort()).toEqual([...fixtures.keys()].sort());
+
+        for (const { path, text } of blocks)
+        {
+            expect(text, `the README's ${path}`).toBe(fixtures.get(path!));
+        }
     });
 });
