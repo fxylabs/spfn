@@ -1850,6 +1850,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **@spfn/auth: every exported service that takes the account lock opens its own transaction
+  (#494).** Nine of them took the lock (`usersRepository.lockAccount`) and left the transaction to
+  their route's `Transactional()`: `startTotpEnrolmentService`, `regenerateRecoveryCodesService`,
+  `markPasskeySecondFactorService`, `unlinkOAuthService`, `pollDeviceAuthService`,
+  `redeemDeviceLinkService`, `denyDeviceLinkService`, `cancelDeviceLinkService` and
+  `pollDeviceLinkService`. Called from application code with no transaction open, each statement
+  committed on its own: the lock was released as its statement ended, so the writes after it were
+  not serialised against the account's other writers (two regenerations could leave two live
+  generations of codes, two unmarks could both pass the last-factor check), its bounded wait never
+  applied, and a failure part-way kept what was already written — a device poll refused while its
+  key was registered left the code spent and no key. Each now runs its whole body in
+  `runInTransaction` (`auth:mfa-totp-enrol`, `auth:recovery-regenerate`, `auth:mfa-passkey-mark`,
+  `auth:oauth-unlink`, `auth:device-poll`, `auth:device-link-redeem`, `auth:device-link-deny`,
+  `auth:device-link-cancel`, `auth:device-link-poll` in core's transaction logs), as
+  `revokePasskeyService` does: called alone, the act commits whole or not at all and reads on the
+  primary; under a caller's transaction — the routes keep `Transactional()` — it is a savepoint, so
+  a throw the caller catches rolls back the service's own writes. Recovery codes are still hashed
+  before the transaction. No signature, route or wire change.
 - **spfn: `kit install`, `kit update` and `kit restore` authenticate under pnpm 12.23 (#482).** The
   registry session reached pnpm only as `npm_config_//host/npm/:_authToken`. pnpm 12.23's corepack
   entry starts its native binary through `/bin/sh`, and dash (Debian's and Ubuntu's `/bin/sh`)

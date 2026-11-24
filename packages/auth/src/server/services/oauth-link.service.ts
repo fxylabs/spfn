@@ -352,7 +352,9 @@ export interface UnlinkOAuthParams
  * Refused when it is the account's last way to sign in; a link-only provider's
  * identity (#157) is never a way in, so its removal is never refused. The account is locked
  * before anything is read, so two unlinks at once cannot both count the other's
- * identity as the one that remains. Runs under the route's `Transactional()`.
+ * identity as the one that remains. Runs in a transaction of its own — a
+ * savepoint under a caller's — around the whole act: the step-up and the recent
+ * authentication are read in it, on the primary, where a step-up just written is.
  * Reads the link without its stored tokens, so a token that no longer decrypts
  * does not stand in the way of removing it.
  *
@@ -364,6 +366,15 @@ export interface UnlinkOAuthParams
  * @throws OAuthLinkNotFoundError, LastRecoveryCredentialError
  */
 export async function unlinkOAuthService(params: UnlinkOAuthParams): Promise<{ provider: SocialProvider }>
+{
+    return await runInTransaction(
+        () => unlinkLockedOAuth(params),
+        { context: 'auth:oauth-unlink' },
+    );
+}
+
+/** The unlink, run in `unlinkOAuthService`'s transaction. */
+async function unlinkLockedOAuth(params: UnlinkOAuthParams): Promise<{ provider: SocialProvider }>
 {
     await assertStepUp(params);
     await assertLinkRecentAuthentication(params, 'unlink');

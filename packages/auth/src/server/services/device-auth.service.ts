@@ -503,7 +503,7 @@ export async function denyDeviceAuthService(params: DenyDeviceAuthParams): Promi
  * Called by the poll route's long-poll middleware, before `Transactional()`
  * opens: a transaction held open for the wait would pin a pooled connection per
  * waiting device. The reads here only decide whether to keep waiting and never
- * the answer — `pollDeviceAuthService` reads the record again inside the route's
+ * the answer — `pollDeviceAuthService` reads the record again inside its own
  * transaction, and that read is the one the answer is built from. They go to
  * the primary, so a wake is not wasted on a replica that has not caught up.
  *
@@ -586,6 +586,18 @@ function isWaitable(record: DeviceAuthorization | null): boolean
 export async function pollDeviceAuthService(
     params: PollDeviceAuthParams,
 ): Promise<PollDeviceAuthResult>
+{
+    return await runInTransaction(
+        () => judgePoll(params),
+        { context: 'auth:device-poll' },
+    );
+}
+
+/**
+ * The poll, run in `pollDeviceAuthService`'s transaction: the spend and the key
+ * it registers commit together, or neither does.
+ */
+async function judgePoll(params: PollDeviceAuthParams): Promise<PollDeviceAuthResult>
 {
     const deviceCodeHash = hashDeviceCode(params.deviceCode);
     const record = assertActionable(
@@ -787,10 +799,10 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         ...await secondFactorEnrolmentFields(user.id),
     };
 
-    // After commit, not inline: the poll route is transactional, and a login
-    // event emitted from inside it would announce a sign-in that a rollback then
-    // erased — the key would not exist and the subscriber would already have
-    // acted on it.
+    // After commit, not inline: the poll runs in a transaction of its own (a
+    // savepoint under a caller's), and a login event emitted from inside it
+    // would announce a sign-in that a rollback then erased — the key would not
+    // exist and the subscriber would already have acted on it.
     const mfaEnrolled = await mfaEnrolledForUser(user.id);
 
     onAfterCommit(() => authLoginEvent.emit({
