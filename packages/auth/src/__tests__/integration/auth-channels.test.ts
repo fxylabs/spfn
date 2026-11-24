@@ -555,7 +555,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
                 status: 'pending',
                 expiresAt: new Date(Date.now() + 86_400_000),
             });
-            configureChannels({ signup: false });
+            configureChannels({ signup: false, invitations: true });
 
             const response = await post('/_auth/invitations/accept', {
                 token: INVITATION_TOKEN, password: TEST_PASSWORD, ...deviceKeyBody(),
@@ -636,6 +636,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             expect(await invitationStatus(id)).toBe('pending');
 
             __resetChannelsForTests();
+            configureChannels({ invitations: true });
 
             const response = await accept();
             expect(response.status, await response.clone().text()).toBe(200);
@@ -702,6 +703,7 @@ describe.skipIf(!dbAvailable)('An app chooses which sign-in channels exist (#308
             }
 
             __resetChannelsForTests();
+            configureChannels({ selfDeletion: true });
 
             const response = await request();
             expect(response.status, await response.clone().text()).toBe(200);

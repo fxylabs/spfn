@@ -151,20 +151,22 @@ Environment variables are not checked here. Each `SPFN_AUTH_*` value is validate
 first time it is read, against the schema in `@spfn/auth/config`.
 
 `createAuthLifecycle({ channels })` chooses which channels the app offers — `signup`,
-`passwordReset`, `deviceCode`, `deviceLink`, `passkeyLogin`, `invitations`, `selfDeletion`, each `true`
-unless set to `false`. A channel turned off
+`passwordReset`, `deviceCode`, `deviceLink`, `passkeyLogin`, `invitations`, `selfDeletion`. Every key
+is optional: state only what you change. The four 0.3 channels — `signup`, `passwordReset`,
+`deviceCode`, `deviceLink` — are on unless stated `false`; `passkeyLogin`, `invitations`,
+`selfDeletion` and every channel a later release adds are off unless stated `true`, so an upgrade
+never opens a way into an account. A channel that is off
 answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`, `details.channel`) on every one of its routes,
 before the route's rate limit — after the global `auth` middleware, so a signed-in route still answers
 an anonymous caller 401. A later `createAuthLifecycle()` without `channels` does not reopen one, and
-two that state different channels refuse boot — partial ones such as `{ signup: false }` and
-`{ deviceCode: false }` included, since an omitted key means `true`. `signup: false` also
+two whose channels resolve differently — a channel left out takes its default — refuse boot. `signup: false` also
 refuses the account a first social sign-in would create (`SignupDisabledError`, 403
-`SIGNUP_DISABLED`, `reason=signup_disabled`). `invitations: false` closes all seven invitation
-routes, acceptance and the public `GET /_auth/invitations/:token` included; pending invitations stay
-pending until your code settles them with `cancelInvitation` / `deleteInvitation`.
-`selfDeletion: false` closes `POST /_auth/deletion/request` only — `deletion/cancel` and the
-`account_deletion` code stay on, since a pending deletion blocks every sign-in — and refuses boot
-beside `deletion.allowSelfImmediate: true`. Service functions are not affected. A sign-in page
+`SIGNUP_DISABLED`, `reason=signup_disabled`). `invitations` covers all seven invitation
+routes, acceptance and the public `GET /_auth/invitations/:token` included; while it is off, pending
+invitations stay pending until your code settles them with `cancelInvitation` / `deleteInvitation`.
+`selfDeletion` covers `POST /_auth/deletion/request` only — `deletion/cancel` and the
+`account_deletion` code stay on, since a pending deletion blocks every sign-in — and
+`deletion.allowSelfImmediate: true` refuses boot unless `channels.selfDeletion: true` is stated. Service functions are not affected. A sign-in page
 reads which channels are on from the public `GET /_auth/channels` (`authApi.getAuthChannels`) —
 `{ signup, passwordReset, deviceCode, deviceLink, passkeyLogin, invitations, selfDeletion }`, one
 boolean each — and draws no
@@ -188,7 +190,7 @@ operator's re-issue path). Boot is refused for `methods: []`, for `required` bes
 verification needs no second factor while `'passkey'` is listed. `required` means a factor on a new
 device, not the password on every sign-in: social sign-in, a password reset and a recovery code each
 get in without the password. An app that wants the password and the passkey whenever a person signs
-in on a device that is not already signed in closes `channels.passkeyLogin` and
+in on a device that is not already signed in leaves `channels.passkeyLogin` off, closes
 `channels.passwordReset`, sets `recoveryCodes: false` and enables no social provider for sign-in. It
 does not cover a still-signed-in browser signing in again (the password alone), a bound session's
 renewal (the passkey alone), or an account that has not enrolled yet (the password, then enrolment)
@@ -777,7 +779,7 @@ notifications) and the purge job registration caveat live in the package README 
 
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|
-| `/_auth/deletion/request` | POST | Required | Request deletion — step-up for an account with a second factor (403 `STEP_UP_REQUIRED`), and recent authentication or the `password` (403 `RECENT_AUTH_REQUIRED`). 404 `CHANNEL_DISABLED` under `channels: { selfDeletion: false }` |
+| `/_auth/deletion/request` | POST | Required | Request deletion — step-up for an account with a second factor (403 `STEP_UP_REQUIRED`), and recent authentication or the `password` (403 `RECENT_AUTH_REQUIRED`). 404 `CHANNEL_DISABLED` unless `channels.selfDeletion: true` is stated |
 | `/_auth/deletion/cancel` | POST | Public | Cancel a pending deletion with the password or a one-time code (`purpose: 'account_deletion'`) to the account's e-mail or phone — sessions were revoked at request time |
 
 ```typescript
@@ -924,7 +926,7 @@ codes are the closed union `OAuthErrorReason`:
 | `account_unavailable` | the account is disabled, pending deletion, or gone |
 | `link_only` | the app made this provider link-only (#157) |
 | `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'`, or `'attach'` found that email on several accounts stored in different cases (#156) |
-| `signup_disabled` | a first sign-in would have created an account and the app set `channels: { signup: false }` (#308) |
+| `signup_disabled` | a first sign-in would have created an account and the app set `channels.signup: false` (#308) |
 | `provider_already_linked` | a first sign-in matched an account by email that already holds another identity of the same provider — an account holds one per provider |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does |
 | `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361) |
@@ -1725,8 +1727,8 @@ full design.
 | `/_auth/invitations/resend` | POST | Required | `user:invite` | Resend invitation (new link; the old one stops working) |
 | `/_auth/invitations/delete` | POST | Required | `superadmin` | Delete invitation |
 
-`channels: { invitations: false }` closes all seven with 404 `CHANNEL_DISABLED`; the invitation
-services stay callable.
+All seven answer 404 `CHANNEL_DISABLED` unless the app states `channels.invitations: true`; the
+invitation services stay callable.
 
 The invitation token is stored only as a hash. Create and resend answer it (with
 `invitationUrl`) once, and `invitationCreatedEvent` carries it for your mailer; the list

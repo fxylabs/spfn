@@ -235,7 +235,8 @@ export function __resetDeletionForTests(): void
 }
 
 /**
- * Refuse boot on `allowSelfImmediate: true` beside `channels.selfDeletion: false`.
+ * Refuse boot on `allowSelfImmediate: true` beside a `selfDeletion` channel that
+ * is off — as it is unless the application sets `channels.selfDeletion: true`.
  *
  * The option only shapes a request made through `POST /_auth/deletion/request`,
  * and that route is closed: a setting that silently does nothing. Called from
@@ -248,7 +249,8 @@ export function assertSelfDeletionConsistent(): void
     if (config.allowSelfImmediate && !isChannelEnabled('selfDeletion'))
     {
         throw new Error('deletion.allowSelfImmediate is true, but the selfDeletion channel is off, so no one can '
-            + 'request their own deletion. Drop allowSelfImmediate, or turn the channel back on.');
+            + 'request their own deletion. Set channels.selfDeletion: true in createAuthLifecycle({ channels }), '
+            + 'or drop allowSelfImmediate. The channel is off unless stated.');
     }
 }
 

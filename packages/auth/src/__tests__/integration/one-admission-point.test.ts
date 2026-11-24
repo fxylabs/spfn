@@ -69,6 +69,7 @@ import {
     TEST_REDIRECT_URI,
     TEST_RESOURCE,
 } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { accountDeletionRequests, mfaTotp, userPublicKeys, users, type User } from '@/server/entities';
 import { usersRepository } from '@/server/repositories';
 import { admitPrincipal } from '@/server/services/admission.service';
@@ -215,6 +216,8 @@ describe.skipIf(!dbAvailable)('one admission point for a person principal (T1-T1
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;

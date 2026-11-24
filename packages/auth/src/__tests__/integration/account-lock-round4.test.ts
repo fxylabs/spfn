@@ -32,6 +32,7 @@ import {
     TEST_PASSWORD,
 } from '../helpers/oauth2';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { configureChannels } from '@/server/lib/channels-config';
 import { mfaRecoveryCodes, mfaTotp, oauth2AuthorizationCodes, oauth2Grants, passkeys, users } from '@/server/entities';
 import { passkeysRepository, usersRepository } from '@/server/repositories';
 import { ACCOUNT_LOCK_TIMEOUT_MS } from '@/server/repositories/users.repository';
@@ -92,6 +93,8 @@ describe.skipIf(!dbAvailable)('Credential spends under the account lock (round 4
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin is off unless the app states it (#475).
+        configureChannels({ passkeyLogin: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = ACTIVE_KEYRING;
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;

@@ -46,6 +46,7 @@ import {
     users,
     verificationCodes,
 } from '@/server/entities';
+import { configureChannels } from '@/server/lib/channels-config';
 import { hashPassword } from '@/server/helpers/password';
 import { encryptMfaSecret } from '@/server/lib/mfa-cipher';
 import { usersRepository } from '@/server/repositories';
@@ -102,6 +103,8 @@ describe.skipIf(!dbAvailable)('second-factor hardening (bundle 6)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin and selfDeletion are off unless the app states them (#475).
+        configureChannels({ passkeyLogin: true, selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;

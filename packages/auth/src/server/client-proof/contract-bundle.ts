@@ -379,7 +379,7 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  * type or enum changes shape, so the supported range does not move.
  *
  * 0.13.8 lists `SignupDisabledError` (403) (#308). An app can turn sign-up off
- * with `createAuthLifecycle({ channels: { signup: false } })`, and
+ * with `channels.signup: false` in `createAuthLifecycle({ channels })`, and
  * `auth.enroll.oauthNative` then refuses a first sign-in that would create an
  * account with this code. A patch, by 0.10.1's rule: one code joins the open
  * list, and no operation, type or enum changes shape, so the supported range

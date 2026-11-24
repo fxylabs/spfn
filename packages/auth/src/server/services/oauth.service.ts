@@ -971,7 +971,7 @@ async function attachByEmail(userId: number, identity: NormalizedIdentity): Prom
  * keepEmail이 false면(`oauthEmailMatch: 'separate'`로 기존 계정과 이메일이 같을 때, #156)
  * 이메일은 다른 계정이 가지므로 검증됐어도 새 계정에 싣지 않는다.
  *
- * 앱이 가입을 끄면(`channels: { signup: false }`) 여기서 거절한다 — web 콜백과 native가
+ * 앱이 가입을 끄면(`channels.signup: false`) 여기서 거절한다 — web 콜백과 native가
  * 계정을 만드는 유일한 지점이고, 어떤 행도 쓰기 전이다. 서비스 계층이 채널 설정을 읽는
  * 유일한 곳: 첫 소셜 로그인으로 생기는 계정은 다른 문으로 들어온 가입이기 때문이다.
  *

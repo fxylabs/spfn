@@ -27,6 +27,7 @@ import {
 import type { SetCookie } from '@spfn/core/nextjs';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { configureChannels } from '@/server/lib/channels-config';
 import { mfaVerifications, userInvitations, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -90,6 +91,8 @@ describe.skipIf(!dbAvailable)('replacing a key requires proof of the old key (bu
     beforeAll(async () =>
     {
         await setupTestDb();
+        // invitations is off unless the app states it (#475).
+        configureChannels({ invitations: true });
         vi.stubEnv('SPFN_AUTH_SESSION_SECRET', 'test-secret-key-for-testing-only-min-32-chars');
         vi.stubEnv('SPFN_AUTH_CSRF', 'enforce');
         vi.stubEnv('SPFN_AUTH_PASSKEY_RP_ID', RP_ID);

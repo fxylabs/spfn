@@ -37,6 +37,7 @@ import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { configureChannels } from '@/server/lib/channels-config';
 import { userPublicKeys, users } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
@@ -167,6 +168,8 @@ describe.skipIf(!dbAvailable)('SSE streams close after a key revocation commits 
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;

@@ -25,6 +25,7 @@ import { eq, sql } from 'drizzle-orm';
 import { clearTables, getTestDb, isDatabaseAvailable, setupTestDb, teardownTestDb } from '../helpers/db';
 import { createTestUser, mountAuthApp, resetMemoryRateLimitStore, TEST_PASSWORD } from '../helpers/oauth2';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { configureChannels } from '@/server/lib/channels-config';
 import { mfaAttemptBudgets, mfaChallenges, mfaTotp, passkeys, userPublicKeys, userSocialAccounts, users } from '@/server/entities';
 import {
     deviceLinksRepository,
@@ -107,6 +108,8 @@ describe.skipIf(!dbAvailable)('Every credential writer under the account lock', 
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin is off unless the app states it (#475).
+        configureChannels({ passkeyLogin: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = `active:${Buffer.alloc(32, 7).toString('base64')}`;
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;

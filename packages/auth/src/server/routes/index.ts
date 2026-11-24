@@ -281,7 +281,7 @@ const authRoutes = {
  * - OAuth 2.1 authorization server: /_auth/oauth2/*, /.well-known/oauth-authorization-server
  * - Android App Link verification: /.well-known/assetlinks.json
  *
- * A route of a sign-in channel the app turned off with
+ * A route of a sign-in channel that is off in
  * `createAuthLifecycle({ channels })` answers 404 — see ./channels.ts. So does
  * a second-factor route of a method `createAuthLifecycle({ secondFactor })`
  * does not list, and each enrolment route carries the marker the global

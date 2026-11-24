@@ -274,6 +274,8 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     {
         __resetSecondFactorPolicyForTests();
         __resetChannelsForTests();
+        // Passkey sign-in is off unless the app states it (#475), and rows here sign in with a passkey.
+        configureChannels({ passkeyLogin: true });
         handled.length = 0;
         seen.clear();
 
@@ -306,7 +308,8 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
     function usePolicy(options: SecondFactorOptions = TABLE_POLICY): void
     {
-        configureChannels({ deviceCode: false, deviceLink: false });
+        __resetChannelsForTests();
+        configureChannels({ deviceCode: false, deviceLink: false, passkeyLogin: true });
         configureSecondFactor(options);
     }
 

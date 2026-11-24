@@ -20,15 +20,17 @@ so upgrade them in one step. The full list of changes is in the
 | Routes, a `.csrf()` or a `.packages()` mount registered only under some `NODE_ENV` or other environment key | Register them unconditionally and gate behaviour inside the handler — code generation now refuses the router. [Core README](../../../packages/core/README.md#do-i-have-to-run-codegen) |
 | A committed `src/generated/route-map.ts` (or `states.ts`) | Regenerate and commit — the `Generated with NODE_ENV=…` header line is gone. [Step 4](#4-regenerate-and-commit) |
 | `NODE_ENV=development spfn build` (or `test`) | `next build` and the server build now run under `production` too. A build that needs another value runs those steps itself. [CLI README](../../../packages/cli/README.md#spfn-build) |
+| `@spfn/auth` with passkey sign-in, invitations or self-service deletion (`POST /_auth/deletion/request`) | Turn each one you use on: `createAuthLifecycle({ channels: { passkeyLogin: true, invitations: true, selfDeletion: true } })`. The 0.4 channels `passkeyLogin`, `invitations` and `selfDeletion` are off unless stated, as is every channel a later release adds; without it their routes answer 404 `CHANNEL_DISABLED`, and `deletion.allowSelfImmediate: true` refuses boot. [Auth README](../../../packages/auth/README.md#which-sign-in-channels-exist-channels) |
 | `@spfn/auth` with `secondFactor: { required: true }` | Make `hono` resolve to one install (`pnpm why hono`). A second copy now refuses the boot instead of answering 403. [Below](#auth-refuses-to-start-two-copies-of-hono) |
 | A Kit release whose `spfnCli` range ends `<0.4.0` | The 0.4 beta CLI is not refused, but only because the range check orders `0.4.0-beta.1` below `0.4.0` — the release was made for 0.3, not tested against 0.4. Use a Kit release made for 0.4 when one exists. [Below](#a-kit-release-refuses-the-cli) |
 | An app that imports `drizzle-typebox` without listing it in its own `package.json` | Add it, or import `drizzle-orm/typebox-legacy` — `@spfn/core` no longer brings it. |
 | An npm app whose `package.json` lists `drizzle-typebox@0.x` (every npm app `spfn init` 0.4.0-beta.1 or earlier scaffolded) | Remove it, or import `drizzle-orm/typebox-legacy` instead, and drop `--legacy-peer-deps` from your own scripts and Dockerfile. [Below](#npm-refuses-the-app-drizzle-typebox) |
 | None of the above, and every `@spfn/*` package upgraded | Nothing |
 
-What is new and needs nothing from you: a `passkeyLogin` sign-in channel in `@spfn/auth`
-([auth README](../../../packages/auth/README.md#which-sign-in-channels-exist-channels)), and an
-`appUrl` that `@spfn/mcp` reads at first use
+What is new: the `passkeyLogin`, `invitations` and `selfDeletion` channels in `@spfn/auth`, each
+off unless the app states it `true` (the `@spfn/auth` row above,
+[auth README](../../../packages/auth/README.md#which-sign-in-channels-exist-channels)), and, needing
+nothing from an app, an `appUrl` that `@spfn/mcp` reads at first use
 ([mcp README](../../../packages/mcp/README.md#reading-the-origin-at-request-time)).
 
 ## Upgrade, in order

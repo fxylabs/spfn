@@ -1516,7 +1516,7 @@ export class OAuthProviderLinkOnlyError extends ForbiddenError
  * Signup Disabled Error (403)
  *
  * A first social sign-in would have created an account, and the app turned
- * sign-up off (`createAuthLifecycle({ channels: { signup: false } })`). No row
+ * sign-up off (`channels.signup: false` in `createAuthLifecycle({ channels })`). No row
  * is written. A sign-in whose identity is already linked, and one that attaches
  * to an existing account, are not refused. Clients branch on `code`; the OAuth
  * error page carries `reason=signup_disabled`.
@@ -1538,7 +1538,7 @@ export class SignupDisabledError extends ForbiddenError
 /**
  * Channel Disabled Error (404)
  *
- * A route of a channel the app turned off (`createAuthLifecycle({ channels })`):
+ * A route of a channel that is off (`createAuthLifecycle({ channels })`):
  * sign-up, password reset, device-code login, device link, passkey sign-in,
  * invitations or the self-deletion request. Not found rather than forbidden —
  * to every caller the route is not there — but its own code, so a client can

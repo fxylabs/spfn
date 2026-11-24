@@ -46,6 +46,7 @@ import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { configureChannels } from '@/server/lib/channels-config';
 import { users, userPublicKeys, deviceAuthorizations } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
@@ -88,6 +89,8 @@ describe.skipIf(!dbAvailable)('Device-code login', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
 
         app = new Hono();

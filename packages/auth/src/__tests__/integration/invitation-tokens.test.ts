@@ -21,6 +21,7 @@ import { eq, sql } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { authMigrations } from '../helpers/migrations';
 import { JSON_HEADERS, TEST_PASSWORD, createTestUser, mountAuthApp, resetMemoryRateLimitStore, signIn } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { userInvitations, users } from '@/server/entities';
 import { generateKeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
@@ -93,6 +94,8 @@ describe.skipIf(!dbAvailable)('Invitation tokens are bearer credentials (w-etq2g
     beforeAll(async () =>
     {
         await setupTestDb();
+        // invitations is off unless the app states it (#475).
+        configureChannels({ invitations: true });
         app = await mountAuthApp();
     });
 

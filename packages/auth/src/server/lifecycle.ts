@@ -360,40 +360,53 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * Which channels this application offers: the ways into an account, and
      * the invitation and self-deletion routes
      *
-     * Every key is optional and defaults to `true`, so an application that
-     * passes nothing serves every route it served before. A channel set to
-     * `false` answers 404 `CHANNEL_DISABLED` (`ChannelDisabledError`) on each
-     * of its routes, before the route's rate limit, long poll or transaction
-     * runs. A signed-in route still runs the global `auth` middleware first,
+     * Every key is optional: state only what changes. `signup`,
+     * `passwordReset`, `deviceCode` and `deviceLink` — the channels this
+     * option shipped with in 0.3 — are on unless stated `false`. Every other
+     * channel — `passkeyLogin`, `invitations`, `selfDeletion`, and any a later
+     * release adds — is off unless stated `true`, so an upgrade never opens
+     * a way into an account. A key left out, or `undefined`, takes its
+     * default. `channels` is a plain object: its prototype is `null` or the
+     * `Object.prototype` of some realm. A key that is not a channel — every
+     * own name, enumerable or not — a value that is not a boolean — read once
+     * per channel — and a `channels` that is not a plain object (a class
+     * instance, a `Map`, an array, `Object.create(other)`) throw here.
+     *
+     * A channel that is off answers 404 `CHANNEL_DISABLED`
+     * (`ChannelDisabledError`) on each of its routes, before the route's rate
+     * limit, long poll or transaction runs. A signed-in route still runs the global `auth` middleware first,
      * so an anonymous caller there is answered 401 and a signed-in one 404.
      *
-     * A later `createAuthLifecycle()` that omits `channels` leaves them as
-     * they are; one that states different channels refuses boot in
-     * `afterInfrastructure`, and every channel either call closed stays closed.
+     * The defaults hold only while no call states `channels`. A later
+     * `createAuthLifecycle()` that omits `channels` leaves them as they are;
+     * each call that states it resolves every channel — what it states, the
+     * default for the rest — and one whose resolution differs from the
+     * first's refuses boot in `afterInfrastructure`, every channel either
+     * call resolved off staying off until then.
      *
-     * - `signup` — `register`, the verified-email signup link, and a
+     * - `signup` (on) — `register`, the verified-email signup link, and a
      *   verification code with `purpose: 'registration'`. Also refuses the
      *   account a first social sign-in would create (`SignupDisabledError`,
      *   403 `SIGNUP_DISABLED`); a sign-in whose identity is linked, or that
      *   attaches to an existing account under `oauthEmailMatch`, is untouched.
-     * - `passwordReset` — the reset link
-     * - `deviceCode` — device-code login
-     * - `deviceLink` — device link
-     * - `passkeyLogin` — passkey sign-in (`passkeys/login/options`,
+     * - `passwordReset` (on) — the reset link
+     * - `deviceCode` (on) — device-code login
+     * - `deviceLink` (on) — device link
+     * - `passkeyLogin` (off) — passkey sign-in (`passkeys/login/options`,
      *   `passkeys/login/verify`). An app whose every sign-in is a password
      *   plus a passkey (`secondFactor: { required: true, methods: ['passkey'] }`)
-     *   closes it, since a passkey sign-in with user verification needs no
+     *   leaves it off, since a passkey sign-in with user verification needs no
      *   second factor. Registering a passkey and proving one as a second
-     *   factor stay on.
-     * - `invitations` — every invitation route: create, list, resend, cancel,
-     *   delete, and the public `invitations/:token` read and accept. Pending
-     *   invitations stay pending and cannot be accepted while it is off; the
-     *   app settles them with `cancelInvitation` / `deleteInvitation`.
-     * - `selfDeletion` — `POST /_auth/deletion/request` only. `deletion/cancel`
-     *   and the `account_deletion` code stay on: a pending deletion blocks
-     *   every sign-in, and closing its only way back would lock the person
-     *   out until the purge. Refused at boot beside
-     *   `deletion.allowSelfImmediate: true`, which it would leave dead.
+     *   factor are on whatever it says.
+     * - `invitations` (off) — every invitation route: create, list, resend,
+     *   cancel, delete, and the public `invitations/:token` read and accept.
+     *   Pending invitations stay pending and cannot be accepted while it is
+     *   off; the app settles them with `cancelInvitation` / `deleteInvitation`.
+     * - `selfDeletion` (off) — `POST /_auth/deletion/request` only.
+     *   `deletion/cancel` and the `account_deletion` code stay on: a pending
+     *   deletion blocks every sign-in, and closing its only way back would
+     *   lock the person out until the purge. `deletion.allowSelfImmediate:
+     *   true` refuses boot unless this is `true`, since it would be dead.
      *
      * Password sign-in has no key. Service functions ignore this setting and
      * stay callable by the application — the invitation services and admin
@@ -404,8 +417,7 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * createAuthLifecycle({
      *     channels: {
      *         signup: false,       // accounts are issued, not taken
-     *         invitations: false,  // ...and only by the app's own code
-     *         deviceCode: false,
+     *         passkeyLogin: true,  // off unless stated
      *     },
      * })
      * ```
@@ -440,7 +452,10 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * @example
      * ```typescript
      * createAuthLifecycle({
-     *     channels: { deviceCode: false, deviceLink: false },
+     *     channels: {
+     *         deviceCode: false,   // refused at boot under required
+     *         deviceLink: false,
+     *     },
      *     secondFactor: { required: true, methods: ['passkey'], recoveryCodes: false },
      * })
      * ```
@@ -620,9 +635,10 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     configureAuthorizationServer(options.authorizationServer);
 
     // Same again: every gated route reads this at request time and answers 404
-    // for a channel turned off — see routes/channels.ts. An omitted option
-    // leaves an earlier call's channels as they are; a contradicting one is
-    // refused below, in afterInfrastructure.
+    // for a channel that is off — see routes/channels.ts. An unknown key or a
+    // value that is not a boolean throws here: that is known from this call
+    // alone. An omitted option leaves an earlier call's channels as they are;
+    // a contradicting one is refused below, in afterInfrastructure.
     configureChannels(options.channels);
 
     // Same again: the enrolment check in `authenticate`, the method gates and
@@ -683,7 +699,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Silent when at most one stated each.
             assertDeletionConsistent();
             // Same reasoning, after the channels and the deletion options it
-            // reads: allowSelfImmediate beside a closed selfDeletion channel.
+            // reads: allowSelfImmediate beside a selfDeletion channel that is
+            // off, as it is unless stated true.
             assertSelfDeletionConsistent();
             // Same reasoning, after the channels it reads: a contradicting
             // second statement, no method listed, a required factor beside a

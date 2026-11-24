@@ -373,9 +373,10 @@ export interface SignInWithPasskeyValue
  * proxy interceptor, exactly as on a password login — nothing here handles a
  * private key.
  *
- * An app that closed passkey sign-in (`createAuthLifecycle({ channels:
- * { passkeyLogin: false } })`) answers both calls 404 `CHANNEL_DISABLED`
- * (`ChannelDisabledError`); the rejection reaches the caller as thrown.
+ * Passkey sign-in is off unless the app sets `channels.passkeyLogin: true` in
+ * `createAuthLifecycle({ channels })`; while it is off both calls answer 404
+ * `CHANNEL_DISABLED` (`ChannelDisabledError`), and the rejection reaches the
+ * caller as thrown.
  */
 export async function signInWithPasskey(
     api: AuthApi,

@@ -45,6 +45,7 @@ import { and, eq, desc, sql } from 'drizzle-orm';
 import { pgSchema, serial, text } from 'drizzle-orm/pg-core';
 import { BaseRepository } from '@spfn/core/db';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { configureChannels } from '@/server/lib/channels-config';
 import { verificationCodes, users, accountDeletionRequests } from '@/server/entities';
 import { generateKeyPair, generateClientToken, type KeyPair } from '@/server/lib/crypto';
 
@@ -118,6 +119,8 @@ describe.skipIf(!dbAvailable)('Account Deletion Lifecycle Integration', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         await getTestDb().execute(sql`CREATE TABLE spfn_auth.test_deletion_notice_outbox (id serial PRIMARY KEY, public_id text NOT NULL, email text, phone text)`);
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';

@@ -39,6 +39,7 @@ import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { ValidationError } from '@spfn/core/errors';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { configureChannels } from '@/server/lib/channels-config';
 import { passwordResetTokens, roles, signupLinkTokens, userInvitations, users, verificationCodes } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { hashCredential } from '@/server/lib/link-credentials';
@@ -125,6 +126,8 @@ describe.skipIf(!dbAvailable)('the password rule (#458)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // invitations is off unless the app states it (#475).
+        configureChannels({ invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';

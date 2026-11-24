@@ -229,7 +229,7 @@ function assertNoUnprovenChannel(): void
         if (isChannelEnabled(channel))
         {
             throw new Error(`secondFactor.required is true, but the ${channel} channel is on, and it signs a device in `
-                + `with no listed second factor. Turn it off with createAuthLifecycle({ channels: { ${channel}: false } }).`);
+                + `with no listed second factor. Set channels.${channel} to false in createAuthLifecycle({ channels }).`);
         }
     }
 }

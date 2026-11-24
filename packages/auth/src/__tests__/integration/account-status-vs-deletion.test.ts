@@ -43,6 +43,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { authMigrations } from '../helpers/migrations';
 import { createTestUser, mountAuthApp, resetMemoryRateLimitStore, TEST_PASSWORD } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { accountDeletionRequests, mfaTotp, mfaVerifications, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { hashPassword } from '@/server/helpers';
@@ -137,6 +138,8 @@ describe.skipIf(!dbAvailable)('account status and deletion are separate facts (T
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         previousTokenSecret = process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET;
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = VERIFICATION_TOKEN_SECRET;

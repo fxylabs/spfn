@@ -25,6 +25,7 @@ import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } f
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { mountAuthApp } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { userInvitations, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
@@ -92,6 +93,8 @@ describe.skipIf(!dbAvailable)('device-registered event (case table 7a)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin and invitations are off unless the app states them (#475).
+        configureChannels({ passkeyLogin: true, invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';

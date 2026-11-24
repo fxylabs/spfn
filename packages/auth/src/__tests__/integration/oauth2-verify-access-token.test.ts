@@ -33,6 +33,7 @@ import {
     TEST_REDIRECT_URI,
     TEST_RESOURCE,
 } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { oauth2Grants, oauth2Tokens } from '@/server/entities';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { hashOAuth2Secret, toEpochSeconds } from '@/server/lib/oauth2/tokens';
@@ -70,6 +71,8 @@ describe.skipIf(!dbAvailable)('verifyAccessToken (8e)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // selfDeletion is off unless the app states it (#475).
+        configureChannels({ selfDeletion: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';

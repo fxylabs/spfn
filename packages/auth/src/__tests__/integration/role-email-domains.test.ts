@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { configureChannels } from '@/server/lib/channels-config';
 import { roles, users, userInvitations } from '@/server/entities';
 import type { UserStatus } from '@/server/types';
 import { hashPassword } from '@/server/helpers/password';
@@ -111,6 +112,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // invitations is off unless the app states it (#475).
+        configureChannels({ invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
 
         app = new Hono();

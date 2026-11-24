@@ -64,6 +64,7 @@ import {
     users,
     verificationCodes,
 } from '@/server/entities';
+import { configureChannels } from '@/server/lib/channels-config';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { hashCredential } from '@/server/lib/link-credentials';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
@@ -262,6 +263,8 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin and invitations are off unless the app states them (#475).
+        configureChannels({ passkeyLogin: true, invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_APP_URL = 'https://app.example.com';

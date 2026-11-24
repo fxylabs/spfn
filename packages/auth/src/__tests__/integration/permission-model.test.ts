@@ -73,6 +73,7 @@ import { closeDatabase, initDatabase, runInTransaction } from '@spfn/core/db';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { JSON_HEADERS, TEST_PASSWORD, createTestUser, resetMemoryRateLimitStore, signIn } from '../helpers/oauth2';
+import { configureChannels } from '@/server/lib/channels-config';
 import { mfaTotp, mfaVerifications, opsTokens, permissions, rolePermissions, roles, userInvitations, userPermissions, users } from '@/server/entities';
 import { rolePermissionsRepository, rolesRepository, usersRepository } from '@/server/repositories';
 import { generateKeyPair } from '@/server/lib/crypto';
@@ -321,6 +322,8 @@ describe.skipIf(!dbAvailable)('The permission model (bundle 5)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // invitations is off unless the app states it (#475).
+        configureChannels({ invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = `active:${Buffer.alloc(32, 7).toString('base64')}`;
 

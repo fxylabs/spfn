@@ -21,6 +21,7 @@ import { eq } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { pinClockInsideTotpStep } from '../helpers/totp-clock';
 import { FixtureAuthenticator } from '../helpers/webauthn-fixture';
+import { configureChannels } from '@/server/lib/channels-config';
 import { mfaChallenges, mfaTotp, userPublicKeys, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
@@ -95,6 +96,8 @@ describe.skipIf(!dbAvailable)('new-device step-up (case table 6b)', () =>
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin is off unless the app states it (#475).
+        configureChannels({ passkeyLogin: true });
         process.env.SPFN_AUTH_SESSION_SECRET = 'test-secret-key-for-testing-only-min-32-chars';
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;
         process.env.SPFN_AUTH_PASSKEY_ORIGINS = ORIGIN;

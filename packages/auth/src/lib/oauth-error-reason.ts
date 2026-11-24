@@ -44,7 +44,7 @@ export const OAUTH_ERROR_REASONS = [
  *   an existing account and the app set `oauthEmailMatch: 'reject'` (#156); the
  *   person can sign in to that account and link the provider from settings
  * - `signup_disabled` — a first sign-in with this provider would have created
- *   an account, and the app turned sign-up off (`channels: { signup: false }`)
+ *   an account, and the app turned sign-up off (`channels.signup: false`)
  * - `provider_already_linked` — a first sign-in with this provider matched an
  *   account by email, and that account already holds another identity of the
  *   same provider; an account holds one per provider

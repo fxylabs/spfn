@@ -103,6 +103,7 @@ vi.mock('@spfn/notification/server', async (importOriginal) =>
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture';
 import { mountProxy, type MountedProxy, type ProxiedBackend } from '../helpers/rpc-proxy';
+import { configureChannels } from '@/server/lib/channels-config';
 import { userInvitations, userPublicKeys, users, verificationCodes } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
@@ -286,6 +287,8 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
     beforeAll(async () =>
     {
         await setupTestDb();
+        // passkeyLogin and invitations are off unless the app states them (#475).
+        configureChannels({ passkeyLogin: true, invitations: true });
         process.env.SPFN_AUTH_SESSION_SECRET = SECRET;
         process.env.SPFN_AUTH_VERIFICATION_TOKEN_SECRET = 'test-verification-token-secret-min-32-chars';
         process.env.SPFN_APP_URL = 'http://app.test';

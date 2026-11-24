@@ -603,6 +603,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinct roles refused them. `resolveAuthority` and `resolveAuthorities` leave out an account that
   is not active, which holds nothing either way. A log query on `userId` or `storedRole` matches
   nothing now; `userIds` and `storedRoles` hold the same values. Never an email.
+- **BREAKING (source; security-relevant): @spfn/auth: a stated `createAuthLifecycle({ channels })` is
+  complete — every channel `true` or `false` (#475).** `AuthChannelsOptions` was
+  `Partial<Record<AuthChannel, boolean>>` and an omitted key meant `true`, so a stated configuration
+  was a list of channels to close and changed meaning whenever a release added a channel: an app that
+  closed every 0.3 channel (`signup`, `passwordReset`, `deviceCode`, `deviceLink`) got `passkeyLogin`,
+  `invitations` and `selfDeletion` open on upgrade, with nothing at type-check, build or boot to say
+  so — and an app requiring a password plus a passkey got passkey sign-in, a session for a passkey
+  alone. `AuthChannelsOptions` is now `Record<AuthChannel, boolean>`, every key required, so a
+  release that adds a channel fails the app's type-check until it decides. `createAuthLifecycle()`
+  holds a JavaScript caller and a cast to the same rule: a `channels` that leaves a channel out, or
+  gives one as `undefined`, throws when it is called, naming every channel missing and the complete
+  list. An unknown key and a value that is not a boolean stay refused. **Not passing `channels` is
+  unchanged: every channel on, and every channel a later release adds.** Two calls stating different
+  channels still refuse boot, and a call without `channels` still reopens nothing. Upgrade: list
+  every channel; write `true` for each you left out to keep what you served, or decide it now — the
+  error names the ones missing. `GET /_auth/channels`, the routes and the mobile contract are
+  unchanged.
+- **BREAKING (security-relevant): @spfn/auth: a channel added after `channels` shipped is off unless
+  the app turns it on (#475).** Every channel used to be on unless stated `false`, so a way into an
+  account that a release added was open from the deploy that brought it — for an app that stated no
+  `channels` and for one that closed every 0.3 channel alike, with nothing at type-check, build or boot
+  to say so; an app requiring a password plus a passkey got passkey sign-in, a session for a passkey
+  alone. Now `signup`, `passwordReset`, `deviceCode` and `deviceLink` — the channels the option
+  shipped with in 0.3, served before it existed — stay on unless stated `false`, and `passkeyLogin`
+  (0.4.0-beta.1), `invitations` and `selfDeletion` (0.4.0-beta.2) are **off unless stated `true`**.
+  So is every channel a later release adds: the on-by-default list is one frozen list of those four
+  that never grows. `AuthChannelsOptions` stays `Partial<Record<AuthChannel, boolean>>`; a key left
+  out or `undefined` takes its default. `channels` must be a plain object — its prototype `null` or
+  the `Object.prototype` of any realm — so a class instance, a `Map`, an array or an
+  `Object.create(other)` is refused, where `main` applied a class instance's own fields and ignored
+  its prototype's getters. A key that is not a channel — every own name, enumerable or not, so a
+  misspelt `false` cannot be lost — and a value that is not a boolean are refused, and each channel
+  is read once, so the value checked is the value used. Two calls: the defaults hold only while no call states `channels`; a
+  call without `channels` reopens nothing; a call that states it resolves every channel (the default
+  for those it leaves out), and two that resolve a channel differently refuse boot in
+  `afterInfrastructure`. `deletion.allowSelfImmediate: true` now refuses boot unless
+  `channels.selfDeletion: true` is stated. **Upgrade:** an app that uses passkey sign-in, invitations
+  or self-service deletion adds `true` for each — `channels: { passkeyLogin: true, invitations: true,
+  selfDeletion: true }`, or the ones it uses; without it their routes answer 404 `CHANNEL_DISABLED`.
+  `GET /_auth/channels` answers the new defaults. The mobile contract is unchanged: none of the three
+  marks a contract operation.
 - **BREAKING (clients reading `fields[].value`; security-relevant): @spfn/core: the framework's
   validation errors name the field and the rule, and no longer the value (#467).** Every TypeBox
   failure in path parameters, query, headers, cookies, body or form data answered with the submitted
