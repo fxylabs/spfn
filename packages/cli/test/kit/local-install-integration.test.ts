@@ -30,6 +30,7 @@ import { createKitRemotePorts } from '../../src/kit/http/index.js';
 import { createKitLocalPorts } from '../../src/kit/local/index.js';
 import { SpfnDatabasePort } from '../../src/kit/local/database.js';
 import { CommandGatePort } from '../../src/kit/local/gates.js';
+import { runCommand } from '../../src/kit/local/process.js';
 import { HttpLicensePort } from '../../src/kit/http/control-plane.js';
 import { newCandidateCredential } from '../../src/kit/credentials.js';
 import { createChildEnv, registryNpmrc } from '../../src/kit/child-env.js';
@@ -377,6 +378,26 @@ function pinnedGatePort(): CommandGatePort
     });
 }
 
+/**
+ * The same gate port, but with the install guard the kit sets
+ * (`pnpm_config_verify_deps_before_run`) stripped from every call: the control
+ * for the two rows below. Each of those rows claims `late` is missing only
+ * because the kit's gate installs nothing before it runs — a claim that is
+ * only true if pnpm, left to its own `verify-deps-before-run`, really would
+ * have installed `late` here. Without this control, a premise that stopped
+ * holding (the project untrusted, the lockfile stale, the registry
+ * unreachable) would make the row's own assertion pass for the wrong reason.
+ */
+function pinnedGatePortWithoutInstallGuard(): CommandGatePort
+{
+    return new CommandGatePort({
+        database: settledDatabase,
+        packageManagerBinary: pinnedPnpmBinary(E2E_PNPM),
+        timeoutMs: 120_000,
+        run: request => runCommand({ ...request, extraEnv: undefined }),
+    });
+}
+
 function install(): ReturnType<typeof runInstall>
 {
     return runInstall({
@@ -477,6 +498,10 @@ describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actual
         await pinnedGatePort().run('build', { cwd: target });
 
         expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
+
+        await pinnedGatePortWithoutInstallGuard().run('build', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late')), 'control: pnpm installs before a run here').toBe(true);
     }, 300_000);
 
     it('installs nothing before the typecheck fallback, though the project declares a dependency the graph lacks', async () =>
@@ -486,6 +511,10 @@ describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actual
         await pinnedGatePort().run('typecheck', { cwd: target });
 
         expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
+
+        await pinnedGatePortWithoutInstallGuard().run('typecheck', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late')), 'control: pnpm installs before a run here').toBe(true);
     }, 300_000);
 
     it('refuses rather than resolving when the release ships a lockfile for another graph', async () =>
