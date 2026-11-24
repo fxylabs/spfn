@@ -292,19 +292,14 @@ describe('the gate port', () =>
         expect(calls[0].args).toEqual(['exec', 'tsc', '--noEmit']);
     });
 
-    it('runs every package-manager gate through the install\'s binary, with pnpm\'s install-before-run off', async () =>
+    it('runs the typecheck fallback through the install\'s binary', async () =>
     {
-        const port = new CommandGatePort({ database, packageManagerBinary: '/opt/pnpm-pinned', run: recording([ok(), ok()]) });
-
-        withScripts({ build: 'next build' });
-        await port.run('build', { cwd: root });
         withScripts({});
-        await port.run('typecheck', { cwd: root });
 
-        expect(calls.map(call => [call.file, call.extraEnv])).toEqual([
-            ['/opt/pnpm-pinned', { pnpm_config_verify_deps_before_run: 'false' }],
-            ['/opt/pnpm-pinned', { pnpm_config_verify_deps_before_run: 'false' }],
-        ]);
+        await new CommandGatePort({ database, packageManagerBinary: '/opt/pnpm-pinned', run: recording([ok()]) })
+            .run('typecheck', { cwd: root });
+
+        expect(calls[0].file).toBe('/opt/pnpm-pinned');
     });
 
     it('fails a gate the project has no way to run, rather than passing it', async () =>

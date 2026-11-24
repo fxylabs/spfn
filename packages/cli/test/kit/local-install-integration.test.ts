@@ -29,6 +29,7 @@ import { runResume } from '../../src/kit/operations/resume.js';
 import { createKitRemotePorts } from '../../src/kit/http/index.js';
 import { createKitLocalPorts } from '../../src/kit/local/index.js';
 import { SpfnDatabasePort } from '../../src/kit/local/database.js';
+import { CommandGatePort } from '../../src/kit/local/gates.js';
 import { HttpLicensePort } from '../../src/kit/http/control-plane.js';
 import { newCandidateCredential } from '../../src/kit/credentials.js';
 import { createChildEnv, registryNpmrc } from '../../src/kit/child-env.js';
@@ -339,6 +340,43 @@ function graphEmptyingBuild(marker: string): string
     return `node -e ${JSON.stringify(script)}`;
 }
 
+/**
+ * Install the release, then declare a dependency the install never saw: a
+ * local `link:` directory, so a package manager that installs before a gate
+ * can do so with no registry and no network.
+ *
+ * The lockfile is trusted in the project's own configuration for the same
+ * reason. Otherwise pnpm 12 first checks it against its supply-chain policies,
+ * which fetches registry metadata the gate holds no session for: that install
+ * fails, warns and runs the script anyway, and `late` would be absent whether
+ * pnpm installs before the gate or not.
+ */
+async function installThenDeclareLate(): Promise<void>
+{
+    publish(await seedLockfile());
+
+    expect((await install()).status).toBe('completed');
+
+    const manifestPath = join(target, 'package.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> };
+
+    mkdirSync(join(target, 'late'));
+    writeFileSync(join(target, 'late', 'package.json'), `${JSON.stringify({ name: 'late', version: '0.0.0' })}\n`, 'utf8');
+    manifest.dependencies.late = 'link:./late';
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`, 'utf8');
+    writeFileSync(join(target, 'pnpm-workspace.yaml'), 'trustLockfile: true\n', 'utf8');
+}
+
+/** The gate port the kit runs, on the binary the install ran. */
+function pinnedGatePort(): CommandGatePort
+{
+    return new CommandGatePort({
+        database: settledDatabase,
+        packageManagerBinary: pinnedPnpmBinary(E2E_PNPM),
+        timeoutMs: 120_000,
+    });
+}
+
 function install(): ReturnType<typeof runInstall>
 {
     return runInstall({
@@ -430,6 +468,24 @@ describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actual
         expect(existsSync(join(target, 'node_modules', CORE.name, 'package.json'))).toBe(true);
         expect(execFileSync('git', ['log', '-1', '--format=%s'], { cwd: target }).toString().trim())
             .toBe(`chore: install ${KIT_ID} ${KIT.version}`);
+    }, 300_000);
+
+    it('installs nothing before a script gate, though the project declares a dependency the graph lacks', async () =>
+    {
+        await installThenDeclareLate();
+
+        await pinnedGatePort().run('build', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
+    }, 300_000);
+
+    it('installs nothing before the typecheck fallback, though the project declares a dependency the graph lacks', async () =>
+    {
+        await installThenDeclareLate();
+
+        await pinnedGatePort().run('typecheck', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
     }, 300_000);
 
     it('refuses rather than resolving when the release ships a lockfile for another graph', async () =>
