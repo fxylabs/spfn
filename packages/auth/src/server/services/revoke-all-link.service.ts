@@ -28,7 +28,7 @@ import { RevokeAllLinkError } from '@spfn/auth/errors';
 
 import { authLogger } from '../logger';
 import { buildConfirmUrl, hashCredential, mintCredential } from '../lib/link-credentials';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 import { keyRevokeAllTokensRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllKeysService } from './key.service';
 

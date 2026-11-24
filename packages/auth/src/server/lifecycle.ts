@@ -14,7 +14,7 @@ import { assertAppFromThisHono } from './lib/hono-copy';
 import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
-import { optionKeys, readOptions } from './lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 import { AUTH_INIT_OPTIONS, readInitOptions } from './services/rbac.service';
 import { settleLinkMail } from './lib/link-mail-delivery';
 import { assertDeletionConsistent, assertSelfDeletionConsistent, configureDeletion } from './lib/deletion-config';

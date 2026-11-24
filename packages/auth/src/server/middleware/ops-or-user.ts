@@ -65,7 +65,7 @@ import { authenticate } from './authenticate';
 import { opsTokenAuth, requireOpsScope } from './ops-token-auth';
 import { requireRole } from './require-role';
 import { requirePermissions } from './require-permission';
-import { optionKeys, readList, readOptions } from '../lib/stated-options';
+import { optionKeys, readList, readOptions } from '@spfn/core/options';
 
 /** What a route admits, on each of the two branches. */
 export interface OpsOrUserConfig

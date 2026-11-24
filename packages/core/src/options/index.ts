@@ -1,9 +1,11 @@
 /**
  * Options the Application States
  *
- * The one way `@spfn/auth` reads an object of options the application hands
- * over — `createAuthLifecycle(options)`, each object inside it, `configureAuth`
- * and the other `configure*` functions (#477). Package-internal: not exported.
+ * The one way a package reads an object of options the application hands
+ * over — `@spfn/auth`'s `createAuthLifecycle(options)`, each object inside it,
+ * `configureAuth` and the other `configure*` functions (#477). For packages;
+ * an application may use it. Isomorphic: it imports nothing, so a browser or
+ * edge bundle may import it too (#492).
  *
  * A reader that checks one reach of the object and uses another loses what the
  * application stated. `Object.keys` (own, enumerable) beside `options.x` (own
@@ -14,9 +16,14 @@
  * name it carries must be one the reader knows, and each known option is read
  * once into a snapshot. The caller checks the snapshot and stores from it, and
  * never reads the application's object again.
+ *
+ * Only Node tells a Proxy from its target, so a Proxy is refused on Node and
+ * read like any object where the host cannot tell (a browser or edge bundle):
+ * the same call answers differently by host for a Proxy (`isProxy`). Where it
+ * is read like any object, its traps can defeat the rest of this rule too —
+ * an `ownKeys` trap hiding a misspelt name, a `getPrototypeOf` trap passing a
+ * class instance as plain.
  */
-
-import { types } from 'node:util';
 
 /** How the messages name what an object holds: options, or channels for `channels`. */
 export interface OptionTerms
@@ -212,7 +219,52 @@ function isPlainObject(options: unknown): options is object
  */
 function isOrdinaryObject(value: unknown): value is object
 {
-    return typeof value === 'object' && value !== null && !types.isProxy(value);
+    return typeof value === 'object' && value !== null && !isProxy(value);
+}
+
+/** What `isProxy` needs of the host's `process`: Node's, where `getBuiltinModule` is. */
+interface HostProcess
+{
+    getBuiltinModule?(id: string): { types?: { isProxy?(value: unknown): boolean } } | undefined;
+}
+
+/**
+ * The host's `util.types.isProxy`, taken through `process.getBuiltinModule`
+ * (as `module-evaluation.ts` takes `node:fs`), or `undefined` where the host
+ * cannot hand over a working one: no `process`, no `getBuiltinModule`, no
+ * module, no `types`, no `isProxy`, or a lookup that throws. Only this lookup
+ * is guarded — a function it does hand over runs unguarded, like the rest of
+ * the rule.
+ */
+function hostIsProxy(): ((value: unknown) => boolean) | undefined
+{
+    try
+    {
+        return (globalThis as { process?: HostProcess }).process?.getBuiltinModule?.('node:util')?.types?.isProxy;
+    }
+    catch
+    {
+        return undefined;
+    }
+}
+
+/**
+ * Whether `value` is a Proxy, as the running host tells: Node's
+ * `util.types.isProxy` (`hostIsProxy`), so the module holds no `node:` import
+ * a bundler would have to replace — a browser's userland `util` throws from
+ * `types.isProxy`. `process` is read off `globalThis`: a free `process` would
+ * have a client bundler inject a shim. Where the host cannot hand over a
+ * working `types.isProxy` — a browser or edge bundle, or any other host that
+ * falls short of it — it cannot tell, and a Proxy is read like any object,
+ * under every other part of the rule: its traps can then defeat that part —
+ * an `ownKeys` trap hiding a misspelt name, a `getPrototypeOf` trap passing a
+ * class instance as plain.
+ */
+function isProxy(value: unknown): boolean
+{
+    const isProxyFn = hostIsProxy();
+
+    return typeof isProxyFn === 'function' && isProxyFn(value);
 }
 
 /**
@@ -244,7 +296,7 @@ function isObjectPrototype(candidate: object): boolean
 
 function describeNotPlain(value: unknown): string
 {
-    if (types.isProxy(value))
+    if (isProxy(value))
     {
         return 'a Proxy, whose names do not say what a read of it finds';
     }

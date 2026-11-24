@@ -68,7 +68,7 @@ import type { AuthInitOptions, RoleConfig, PermissionConfig } from '../rbac';
 import { assertPasskeyConfig, configureAuth } from '../lib/config';
 import { authLogger } from '../logger';
 import { isLockTimeout } from '../lib/lock-timeout';
-import { optionKeys, readEntries, readList, readOptions, readRecords } from '../lib/stated-options';
+import { optionKeys, readEntries, readList, readOptions, readRecords } from '@spfn/core/options';
 import { installUserSettings, sealUserSettings } from '../lib/user-settings/registry';
 import { installProfileFields, sealProfileFields } from '../lib/profile-fields';
 import { reconcileUserSettings } from './user-settings.service';

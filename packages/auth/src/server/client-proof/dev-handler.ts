@@ -32,7 +32,7 @@ import { ClientProofRefusal, newHexId } from './refusal';
 import { CLIENT_PROOF_STATE_OPTIONS, ClientProofState, type ClientProofStateOptions, TestClock } from './state';
 import { handleControlRequest, CONTROL_PREFIX } from './dev-control';
 import { serverContractHeaders } from './wire-version';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /** Far above any contract request and far below anything worth buffering. */
 const MAX_BODY_BYTES = 1 << 20;

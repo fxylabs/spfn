@@ -10,7 +10,7 @@ import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
 
-import { optionKeys, readList, readOptions } from '../lib/stated-options';
+import { optionKeys, readList, readOptions } from '@spfn/core/options';
 
 /**
  * Role guard options

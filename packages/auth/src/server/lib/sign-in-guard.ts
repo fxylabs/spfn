@@ -14,7 +14,7 @@
 import type { DeviceRegistrationChannel } from '../events';
 import type { User } from '../entities/users';
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /**
  * Every door a sign-in comes through: the device-registration channels except

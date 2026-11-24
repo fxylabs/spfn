@@ -15,7 +15,7 @@
 
 import { authLogger } from '../../logger';
 import { resolveAppUrl } from '../app-url';
-import { optionKeys, readEntries, readList, readOptions } from '../stated-options';
+import { optionKeys, readEntries, readList, readOptions } from '@spfn/core/options';
 
 /**
  * Everything the authorization server needs, resolved.

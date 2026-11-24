@@ -31,6 +31,7 @@ const entry = {
     'logger/index': 'src/logger/index.ts',
     'config/index': 'src/config/index.ts',
     'app-config/index': 'src/app-config/index.ts',
+    'options/index': 'src/options/index.ts',
     'job/index': 'src/job/index.ts',
     'event/index': 'src/event/index.ts',
     'event/sse/index': 'src/event/sse/index.ts',

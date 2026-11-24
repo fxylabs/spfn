@@ -42,7 +42,7 @@ import { ForbiddenError, UnauthorizedError } from '@spfn/core/errors';
 
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { authLogger } from '../logger';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 import { clientProofRefusalOf, selectAuthProfile } from './auth-profiles';
 
 /** What a verified machine request acts as. Not a user, by construction. */

@@ -120,6 +120,11 @@
             "import": "./dist/app-config/index.js",
             "require": "./dist/app-config/index.js"
         },
+        "./options": {
+            "types": "./dist/options/index.d.ts",
+            "import": "./dist/options/index.js",
+            "require": "./dist/options/index.js"
+        },
         "./job": {
             "types": "./dist/job/index.d.ts",
             "import": "./dist/job/index.js",

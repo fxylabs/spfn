@@ -18,7 +18,7 @@ import { admitClientProofRequest, type ClientProofCredentials } from './admissio
 import type { CanonicalValue } from './canonical-json';
 import { clientProofRefusalResponse } from './refusal-response';
 import type { ClientProofState } from './state';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /** What the guard leaves in the context for the route handler. */
 export interface ClientProofContext

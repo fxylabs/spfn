@@ -8,7 +8,7 @@
 import { SSETokenManager } from '@spfn/core/event/sse';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import { admitPrincipal } from '../services/admission.service';
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /** What `initOneTimeTokenManager` reads: `createAuthLifecycle`'s `oneTimeToken`. */
 export interface OneTimeTokenOptions

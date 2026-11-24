@@ -12,7 +12,7 @@ import { createOAuth2ClientPurgeJob } from './oauth2-client-purge';
 import { createRevokeAllTokenPurgeJob } from './revoke-all-token-purge';
 import { createMfaSweepJob } from './mfa-sweep';
 import { linkMailJob } from './link-mail';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 export { createAuthDeletionPurgeJob } from './deletion-purge';
 export { createOAuth2ClientPurgeJob, DEFAULT_OAUTH2_CLIENT_PURGE_CRON } from './oauth2-client-purge';

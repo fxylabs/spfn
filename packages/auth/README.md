@@ -128,6 +128,8 @@ and each object inside it (`deletion`, `deviceAuth`, `deviceLink`, `authorizatio
   option (`chanels`, `purgeCron` as `purgecron`) is an error rather than an option left out;
 - **each option is read once**, and the value checked is the value used: a getter runs once.
 
+The rule is `@spfn/core/options`; these readers run on Node, where it refuses a `Proxy`.
+
 A refusal throws from the call — `createAuthLifecycle()` before it returns, so before any route can
 answer; a middleware factory when the route is defined, never on a request. A map keyed by the app's
 own names — `authorizationServer.scopes`, `rolePermissions`, `ClientProofState`'s `publicKeys` —

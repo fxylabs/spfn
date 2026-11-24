@@ -14,7 +14,7 @@ import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
 import { readPolicyValues } from './auth-config-values';
 import type { AuthCsrfConfig, CsrfMode, OAuthLinkConfig, OAuthLinkRecentAuth, OAuthProviderPolicy } from './auth-config-values';
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 export { parseDuration };
 export type { AuthCsrfConfig, CsrfMode, OAuthLinkConfig, OAuthLinkRecentAuth, OAuthProviderPolicy } from './auth-config-values';

@@ -22,7 +22,7 @@
  */
 
 import { SOCIAL_PROVIDERS } from '../types';
-import { optionKeys, readList, readOptions, type OptionTerms } from './stated-options';
+import { optionKeys, readList, readOptions, type OptionTerms } from '@spfn/core/options';
 
 /**
  * How the Next.js proxy treats a cookie-authenticated mutation that arrives

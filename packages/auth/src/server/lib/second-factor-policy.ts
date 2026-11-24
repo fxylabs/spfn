@@ -22,7 +22,7 @@ import { SecondFactorMethodDisabledError } from '@spfn/auth/errors';
 
 import { isChannelEnabled } from './channels-config';
 import { getEncryptionKeyring } from './oauth/token-cipher';
-import { optionKeys, readList, readOptions } from './stated-options';
+import { optionKeys, readList, readOptions } from '@spfn/core/options';
 
 /** The methods that count as a second factor. */
 export const SECOND_FACTOR_METHODS = ['totp', 'passkey'] as const;
