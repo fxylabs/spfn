@@ -173,6 +173,18 @@ describe('the host\'s Proxy test (#492)', () =>
             + 'naming its options — signup, deviceCode; received a Proxy, whose names do not say what a read of it finds.');
     });
 
+    it('runs the host\'s isProxy unguarded — a function the host hands over that throws is not caught', () =>
+    {
+        function throwHostIsProxyFailed(): never
+        {
+            throw new Error('host isProxy failed');
+        }
+
+        (process as { getBuiltinModule?: unknown }).getBuiltinModule = () => ({ types: { isProxy: throwHostIsProxyFailed } });
+
+        expect(() => readChannels({ signup: false })).toThrow('host isProxy failed');
+    });
+
     function throwNoUtil(): never
     {
         throw new Error('no node:util here');
@@ -182,6 +194,7 @@ describe('the host\'s Proxy test (#492)', () =>
         ['answers undefined', () => undefined],
         ['answers an object with no types', () => ({})],
         ['throws', throwNoUtil],
+        ['answers types.isProxy that is not a function', () => ({ types: { isProxy: true } })],
     ])('cannot tell when getBuiltinModule %s — a plain object is still read and a refusal keeps its wording', (_label, stub) =>
     {
         (process as { getBuiltinModule?: unknown }).getBuiltinModule = stub;
