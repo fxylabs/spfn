@@ -1,6 +1,6 @@
 {
   "name": "spfn",
-  "version": "0.4.0-beta.5",
+  "version": "0.4.0-beta.6",
   "description": "Scaffold a full-stack TypeScript backend onto a Next.js app built with an AI coding agent: auth, database, typed routes and codegen, one fixed vertical slice per feature",
   "type": "module",
   "bin": {
@@ -72,7 +72,7 @@
     "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "peerDependencies": {
-    "@spfn/core": ">=0.4.0-beta.5 <0.5.0-0",
+    "@spfn/core": ">=0.4.0-beta.6 <0.5.0-0",
     "typescript": "^5.3.0"
   },
   "peerDependenciesMeta": {

@@ -1,6 +1,6 @@
 {
     "name": "@spfn/mcp",
-    "version": "0.4.0-beta.5",
+    "version": "0.4.0-beta.6",
     "description": "Official-SDK-based Model Context Protocol adapter for SPFN applications.",
     "type": "module",
     "sideEffects": false,
@@ -74,7 +74,7 @@
         "@modelcontextprotocol/server": "2.0.0-beta.5"
     },
     "peerDependencies": {
-        "@spfn/core": ">=0.4.0-beta.5 <0.5.0-0"
+        "@spfn/core": ">=0.4.0-beta.6 <0.5.0-0"
     },
     "peerDependenciesMeta": {
         "@spfn/core": {
