@@ -17,6 +17,7 @@ import {
     ServiceUnavailableError,
     TooManyRequestsError,
 } from '@spfn/core/errors';
+import { OAUTH_ERROR_MESSAGES } from '../lib/oauth-error-reason';
 
 /**
  * Invalid Credentials Error (401)
@@ -1116,8 +1117,7 @@ export class OAuthStateInvalidError extends ValidationError
  * of the cookies the start set (#129): the backend callback, the Next.js
  * callback handler and the finalize interceptor.
  */
-export const OAUTH_COOKIE_MISSING_MESSAGE
-    = 'This browser kept none of the cookies this sign-in set. Allow cookies for this site, or start the sign-in again in the browser where it began.';
+export const OAUTH_COOKIE_MISSING_MESSAGE = OAUTH_ERROR_MESSAGES.no_cookie;
 
 /**
  * OAuth Cookie Missing Error (400)

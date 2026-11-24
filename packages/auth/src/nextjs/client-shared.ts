@@ -9,6 +9,6 @@
  */
 
 export { isSafeReturnPath, toSafeReturnPath } from '../lib/return-path';
-export { OAUTH_ERROR_REASONS, callbackQueryReason, isOAuthErrorReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
+export { OAUTH_ERROR_MESSAGES, OAUTH_ERROR_REASONS, callbackQueryReason, isOAuthErrorReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
 export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from '../lib/oauth-link-outcome';
 export { runOAuthCallback } from './components/oauth-callback-flow';

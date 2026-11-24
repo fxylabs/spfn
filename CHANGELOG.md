@@ -663,6 +663,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an argument of its own to a function of the same file into a logger call there. A log query that
   read `path` from the CSRF lines, or `provider` from the OAuth lines, reads `route` instead.
 
+- **BREAKING: @spfn/auth: the OAuth error page is told a reason and a code, never text from the
+  request (#489).** The error redirect's `error` was free text whose author the page cannot know:
+  the callback copied the provider's `error_description` (reached before any state check, so anyone
+  could put it there), and `createOAuthCallbackHandler` and `OAuthCallback` copied whatever `?error=`
+  their own URL carried — the default `OAuthCallback` UI rendered it. Now `error` is always the
+  fixed English sentence for `reason`, from the new `OAUTH_ERROR_MESSAGES` table, on every path: a
+  provider error, a typed error (`account_unavailable`, `sign_in_refused`, `failed`, …) and an
+  untyped one. Both readers ignore the URL's `error` text: the handler forwards the sentence for the
+  reason it read, and `onError` / `errorComponent` receive that sentence. An app's `signIn.admit`
+  refusal keeps a channel — its `code`, not its message: on `reason=sign_in_refused` the redirect
+  carries `code` (`{code}` in `SPFN_AUTH_OAUTH_ERROR_URL`, else appended), the handler passes it on,
+  and `onError(message, reason, code?)` / `errorComponent(message, reason, code?)` receive it; a
+  reader drops a `code` beside another reason or outside the `admit` code shape. A provider error
+  read as `provider_error` now leaves one warn line on `@spfn/auth:service`, `OAuth provider
+  returned an error { provider, reason, providerError }`, `providerError` being the provider's
+  `error` when it is a registered code and `unrecognised` otherwise; `error_description` is logged
+  nowhere. **Migration:** render the error page by `reason` (and `code` on `sign_in_refused`) —
+  show your own copy per reason, or `OAUTH_ERROR_MESSAGES[reason]`; `error` is the default English
+  sentence for it, and a page that renders `error` from its own URL shows whatever a forged link put
+  there. Code that branched on a typed error's message on the redirect, or on `onError`'s message,
+  branches on `reason` instead. `buildOAuthErrorUrl(error, reason?)` (from `@spfn/auth/server`) is
+  now `buildOAuthErrorUrl(reason, code?)`; `oauthFailureUrl(error, logMessage)` no longer puts any
+  message on the redirect. New exports: `OAUTH_ERROR_MESSAGES` from `@spfn/auth`,
+  `@spfn/auth/server` and `@spfn/auth/nextjs/client`. The mobile contract does not move.
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored

@@ -211,3 +211,40 @@ describe('createOAuthCallbackHandler - the session binding fields', () =>
         expect(session).not.toHaveProperty('uaFamily');
     });
 });
+
+/**
+ * The error page the handler sends the browser to (#489). Anyone can put
+ * `?error=` on the handler's URL, so the page is told the reason's fixed
+ * sentence, never that text; the app's refusal code travels only beside
+ * `sign_in_refused` and only in the shape `signIn.admit` must answer.
+ */
+describe('createOAuthCallbackHandler - the error page (#489)', () =>
+{
+    async function errorPageFor(query: string): Promise<URLSearchParams>
+    {
+        const response = await createOAuthCallbackHandler()(new NextRequest(new URL(`/api/auth/callback?${query}`, APP)));
+        const location = new URL(response.headers.get('location')!);
+
+        expect(location.pathname).toBe('/auth/error');
+
+        return location.searchParams;
+    }
+
+    it('O2: ?error=Call+us&reason=cancelled — error is the cancelled sentence, not the URL\'s text', async () =>
+    {
+        const params = await errorPageFor('error=Call+us&reason=cancelled');
+
+        expect([params.get('reason'), params.get('error')]).toEqual(['cancelled', 'The sign-in was cancelled at the provider.']);
+    });
+
+    it('O4 (handler): the app\'s refusal code beside sign_in_refused travels as code; a forged one, or one beside another reason, does not', async () =>
+    {
+        const refused = await errorPageFor('error=Sign-in+refused&reason=sign_in_refused&code=LOCKED');
+        const forged = await errorPageFor('error=x&reason=sign_in_refused&code=Call+us+at+555');
+        const elsewhere = await errorPageFor('error=x&reason=cancelled&code=LOCKED');
+
+        expect([refused.get('reason'), refused.get('code')]).toEqual(['sign_in_refused', 'LOCKED']);
+        expect([forged.get('reason'), forged.has('code')]).toEqual(['sign_in_refused', false]);
+        expect(elsewhere.has('code')).toBe(false);
+    });
+});

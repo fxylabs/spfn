@@ -11,7 +11,13 @@ import { logger } from '@spfn/core/logger';
 import { createRpcProxy } from '@spfn/core/nextjs/server';
 import { isSafeReturnPath } from '../lib/return-path';
 import { resolveMfaConfirmPath } from './mfa-confirm-path';
-import { callbackQueryReason, isOAuthErrorReason, type OAuthErrorReason } from '../lib/oauth-error-reason';
+import {
+    OAUTH_ERROR_MESSAGES,
+    callbackQueryReason,
+    isOAuthErrorReason,
+    oauthErrorCode,
+    type OAuthErrorReason,
+} from '../lib/oauth-error-reason';
 import { routeMap as authRouteMap } from '../generated/route-map';
 import { authInterceptors } from './interceptors';
 
@@ -24,8 +30,11 @@ export interface OAuthCallbackOptions
     defaultRedirectUrl?: string;
 
     /**
-     * Error redirect URL. Every redirect to it carries `error` (text) and
-     * `reason` (an `OAuthErrorReason` code).
+     * Error redirect URL. Every redirect to it carries `reason` (an
+     * `OAuthErrorReason` code), `error` (the fixed sentence for it,
+     * `OAUTH_ERROR_MESSAGES`) and, on `sign_in_refused`, `code` (the app's
+     * `signIn.admit` refusal code) when the callback carried a valid one.
+     * Never the callback URL's own `error` text (#489).
      * @default '/auth/error'
      */
     errorRedirectUrl?: string;
@@ -117,13 +126,21 @@ function mfaRedirect(
     return NextResponse.redirect(target);
 }
 
-/** The error page, with the text and the reason code on its query. */
-function errorRedirect(request: NextRequest, errorUrl: string, error: string, reason: OAuthErrorReason): NextResponse
+/**
+ * The error page, with the reason code, its fixed sentence and the app's
+ * refusal code on its query (#489).
+ */
+function errorRedirect(request: NextRequest, errorUrl: string, reason: OAuthErrorReason, code?: string): NextResponse
 {
     const target = new URL(errorUrl, request.url);
 
-    target.searchParams.set('error', error);
+    target.searchParams.set('error', OAUTH_ERROR_MESSAGES[reason]);
     target.searchParams.set('reason', reason);
+
+    if (code !== undefined)
+    {
+        target.searchParams.set('code', code);
+    }
 
     return NextResponse.redirect(target);
 }
@@ -149,9 +166,12 @@ function errorRedirect(request: NextRequest, errorUrl: string, error: string, re
  * browser goes to `SPFN_AUTH_MFA_CONFIRM_PATH` with the challenge, and the
  * session is sealed by `mfaVerifyInterceptor` once the page proves it.
  *
- * Every failure redirects to `errorRedirectUrl` with `error` and a `reason`
- * code (#126): `cancelled`, `failed`, `expired`, `invalid_state` or `no_cookie`
- * (#129) — or the code the backend's own redirect already carried.
+ * Every failure redirects to `errorRedirectUrl` with a `reason` code (#126):
+ * `cancelled`, `failed`, `expired`, `invalid_state` or `no_cookie` (#129) — or
+ * the code the backend's own redirect already carried — and `error`, the fixed
+ * sentence for it. The callback URL's `error` text is never passed on: anyone
+ * can write it (#489). Its `code` is, on `sign_in_refused`, when it has the
+ * shape of an app's refusal code (`oauthErrorCode`).
  *
  * @example
  * ```typescript
@@ -181,7 +201,9 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         // Handle error from backend
         if (error)
         {
-            return errorRedirect(request, errorUrl, error, callbackQueryReason(searchParams.get('reason'), error));
+            const reason = callbackQueryReason(searchParams.get('reason'), error);
+
+            return errorRedirect(request, errorUrl, reason, oauthErrorCode(reason, searchParams.get('code')));
         }
 
         if (mfaChallenge)
@@ -193,7 +215,7 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         {
             logger.error('OAuth callback missing required params', { keyId: false });
 
-            return errorRedirect(request, errorUrl, 'Missing required parameters', 'failed');
+            return errorRedirect(request, errorUrl, 'failed');
         }
 
         return await finishCallback(request, {
@@ -237,9 +259,7 @@ async function finishCallback(
 
     if (!finalized?.ok)
     {
-        const failure = await failureOf(finalized);
-
-        return errorRedirect(request, input.errorUrl, failure.message, failure.reason);
+        return errorRedirect(request, input.errorUrl, await failureReasonOf(finalized));
     }
 
     const response = NextResponse.redirect(new URL(input.returnUrl, request.url));
@@ -293,13 +313,10 @@ async function postFinalize(request: NextRequest, input: FinalizeInput): Promise
     return await input.rpcProxy.POST(finalize, { params: Promise.resolve({ routeName: 'oauthFinalize' }) });
 }
 
-/** The refusal's message, and the reason the proxy named for it (`failed` when none). */
-async function failureOf(response: Response | null): Promise<{ message: string; reason: OAuthErrorReason }>
+/** The reason the proxy named for its refusal (`failed` when none). */
+async function failureReasonOf(response: Response | null): Promise<OAuthErrorReason>
 {
     const data = response ? await response.json().catch(() => ({})) : {};
 
-    return {
-        message: typeof data.message === 'string' && data.message ? data.message : 'OAuth sign-in could not be completed',
-        reason: isOAuthErrorReason(data.reason) ? data.reason : 'failed',
-    };
+    return isOAuthErrorReason(data.reason) ? data.reason : 'failed';
 }

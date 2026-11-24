@@ -19,7 +19,7 @@ import { Transactional } from '@spfn/core/db';
 import { ValidationError } from '@spfn/core/errors';
 import { rateLimitPolicy } from '@spfn/core/middleware';
 import { defineRouter, route } from '@spfn/core/route';
-import { OAuthProviderError, OAuthProviderLinkOnlyError } from '@spfn/auth/errors';
+import { OAuthProviderError } from '@spfn/auth/errors';
 
 import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialProvider } from '../../types';
 import { DeviceNameSchema, OAuthNativeProfileSchema, PasskeyProofResponseSchema, PlatformSchema } from '../schema';
@@ -52,7 +52,7 @@ import {
     oauthLinkResultUrl,
     unlinkOAuthService,
 } from '../../services';
-import { logOAuthFailure } from '../../services/oauth.service';
+import { logOAuthFailure, providerErrorUrl } from '../../services/oauth.service';
 import { assertSignInProvider, isSignInProvider } from '../../lib/config';
 import { isGoogleOAuthEnabled, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import {
@@ -75,7 +75,7 @@ const providerParams = Type.Object({
 /** The error page for a sign-in start that named a link-only provider (#157). */
 function linkOnlyErrorUrl(): string
 {
-    return buildOAuthErrorUrl(new OAuthProviderLinkOnlyError().message, 'link_only');
+    return buildOAuthErrorUrl('link_only');
 }
 
 /** What a provider's redirect back to a callback route carries. */
@@ -92,10 +92,9 @@ interface CallbackQuery
 /**
  * Where a provider's redirect back sends the browser — both callback routes.
  *
- * Every failure goes to the error URL with a `reason` code beside the text
- * (#126), classified by the error's type. The text is a typed error's own
- * message, and a fixed sentence for any other error, whose message may carry
- * a failed statement's values (#382).
+ * Every failure goes to the error URL with a `reason` code (#126), classified
+ * by the error's type, and the fixed sentence for that code: never text from
+ * the query, the provider or the error (#489).
  */
 async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query: CallbackQuery): Promise<string>
 {
@@ -118,13 +117,13 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
     // provider에서 에러가 반환된 경우
     if (query.error)
     {
-        return buildOAuthErrorUrl(query.error_description || query.error, providerErrorReason(query.error));
+        return providerErrorUrl(provider, query.error);
     }
 
     // code와 state 필수 확인
     if (!query.code || !query.state)
     {
-        return buildOAuthErrorUrl('Missing authorization code or state', 'failed');
+        return buildOAuthErrorUrl('failed');
     }
 
     try
@@ -245,7 +244,7 @@ export const oauthGoogleStart = route.get('/_auth/oauth/google')
 
         if (!isGoogleOAuthEnabled())
         {
-            return c.redirect(buildOAuthErrorUrl('Google OAuth is not configured'));
+            return c.redirect(buildOAuthErrorUrl('failed'));
         }
 
         if (!isSignInProvider('google'))
@@ -586,7 +585,7 @@ export const oauthProviderStart = route.get('/_auth/oauth/:provider')
 
         if (!provider?.isEnabled())
         {
-            return c.redirect(buildOAuthErrorUrl(`OAuth provider '${params.provider}' is not configured`));
+            return c.redirect(buildOAuthErrorUrl('failed'));
         }
 
         if (!isSignInProvider(params.provider))

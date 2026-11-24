@@ -18,13 +18,16 @@
 
 import { CSRF_HEADER, csrfHeaderValue, documentCookieEntries } from '@spfn/core/nextjs';
 import { isSafeReturnPath, toSafeReturnPath } from '../../lib/return-path';
-import { callbackQueryReason, isOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
+import {
+    OAUTH_ERROR_MESSAGES,
+    callbackQueryReason,
+    isOAuthErrorReason,
+    oauthErrorCode,
+    type OAuthErrorReason,
+} from '../../lib/oauth-error-reason';
 
 /** Where the second-factor page lives when nothing says otherwise. */
 export const DEFAULT_MFA_CONFIRM_PATH = '/auth/mfa';
-
-/** The message every failed finalize falls back to. */
-const FINALIZE_FAILED = 'Failed to finalize OAuth';
 
 /**
  * Where the page goes next, or why it cannot.
@@ -33,13 +36,19 @@ const FINALIZE_FAILED = 'Failed to finalize OAuth';
  * one (else the provider's `error` read as `cancelled` or `provider_error`),
  * `expired`, `invalid_state` or `no_cookie` (#129) for the finalize refusals the
  * proxy names, and `failed` for anything else — so an app page can branch on it.
+ * `message` is the fixed sentence for that reason, never text off the URL or a
+ * server body (#489). `code` is the app's `signIn.admit` refusal code, present
+ * only on `sign_in_refused` when the query carried one in its shape.
  */
 export type CallbackOutcome =
     | { kind: 'navigate'; to: string; userId?: string }
-    | { kind: 'error'; message: string; reason: OAuthErrorReason };
+    | OAuthCallbackError;
+
+/** A failed callback: the reason, its fixed sentence, and the app's refusal code when there is one. */
+type OAuthCallbackError = { kind: 'error'; message: string; reason: OAuthErrorReason; code?: string };
 
 type CallbackInput =
-    | { kind: 'error'; message: string; reason: OAuthErrorReason }
+    | OAuthCallbackError
     | { kind: 'mfa'; mfaChallenge: string; keyId: string | null; returnUrl: string }
     | { kind: 'session'; userId: string; keyId: string; returnUrl: string };
 
@@ -57,11 +66,19 @@ export interface CallbackOptions
     fetch: typeof fetch;
 }
 
+/** The error outcome for `reason`: its fixed sentence, and the code when one was carried. */
+function callbackError(reason: OAuthErrorReason, code?: string): OAuthCallbackError
+{
+    return { kind: 'error', message: OAUTH_ERROR_MESSAGES[reason], reason, ...(code === undefined ? {} : { code }) };
+}
+
 /**
  * Which of the three shapes the callback query is.
  *
  * `?error=` wins over everything, and a challenge wins over a `userId`/`keyId`
- * pair — the order `createOAuthCallbackHandler` reads them in.
+ * pair — the order `createOAuthCallbackHandler` reads them in. The `error`
+ * text is read as a provider's code only, never as a message: anyone can put
+ * one on this page's URL (#489).
  */
 export function readCallbackInput(search: string): CallbackInput
 {
@@ -74,7 +91,9 @@ export function readCallbackInput(search: string): CallbackInput
 
     if (error)
     {
-        return { kind: 'error', message: error, reason: callbackQueryReason(params.get('reason'), error) };
+        const reason = callbackQueryReason(params.get('reason'), error);
+
+        return callbackError(reason, oauthErrorCode(reason, params.get('code')));
     }
 
     if (mfaChallenge)
@@ -84,7 +103,7 @@ export function readCallbackInput(search: string): CallbackInput
 
     if (!userId || !keyId)
     {
-        return { kind: 'error', message: 'Missing required parameters', reason: 'failed' };
+        return callbackError('failed');
     }
 
     return { kind: 'session', userId, keyId, returnUrl };
@@ -148,7 +167,7 @@ export async function runOAuthCallback(search: string, options: CallbackOptions)
     {
         // A caught error's text — a fetch failure's, a client library's — is not
         // client-safe; the page gets the fixed sentence (#382)
-        return { kind: 'error', message: FINALIZE_FAILED, reason: 'failed' };
+        return callbackError('failed');
     }
 }
 
@@ -161,7 +180,7 @@ async function finishWithSession(
 
     if (!response.ok)
     {
-        return { kind: 'error', ...await failureOf(response) };
+        return callbackError(await failureReasonOf(response));
     }
 
     const data = await response.json();
@@ -192,9 +211,7 @@ async function finishWithChallenge(
 
     if (response.status !== 202)
     {
-        const failure = await failureOf(response);
-
-        return { kind: 'error', message: withoutSecret(failure.message, input.mfaChallenge), reason: failure.reason };
+        return callbackError(await failureReasonOf(response));
     }
 
     const data = await response.json().catch(() => ({}));
@@ -231,19 +248,10 @@ async function postFinalize(options: CallbackOptions, body: Record<string, strin
     });
 }
 
-/** The refusal's message, and the reason the proxy named for it (`failed` when none). */
-async function failureOf(response: Response): Promise<{ message: string; reason: OAuthErrorReason }>
+/** The reason the proxy named for its refusal (`failed` when none). */
+async function failureReasonOf(response: Response): Promise<OAuthErrorReason>
 {
     const data = await response.json().catch(() => ({}));
 
-    return {
-        message: typeof data.message === 'string' && data.message ? data.message : FINALIZE_FAILED,
-        reason: isOAuthErrorReason(data.reason) ? data.reason : 'failed',
-    };
-}
-
-/** A server message that echoes the challenge is replaced, not passed on to `onError`. */
-function withoutSecret(message: string, secret: string): string
-{
-    return message.includes(secret) ? FINALIZE_FAILED : message;
+    return isOAuthErrorReason(data.reason) ? data.reason : 'failed';
 }

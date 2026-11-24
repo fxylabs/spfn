@@ -79,8 +79,9 @@ export * from './server/types';
 export * from './server/routes/schema';  // TypeBox schemas for validation
 export * from './server/lib';
 export * from './server/logger';
-// `buildOAuthErrorUrl(error, reason)` takes one of these (#126)
-export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
+// `buildOAuthErrorUrl(reason, code?)` takes one of these (#126); the error page's
+// `error` is the sentence for it (#489)
+export { OAUTH_ERROR_MESSAGES, OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
 export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from './lib/oauth-link-outcome';
 
 // ============================================================================

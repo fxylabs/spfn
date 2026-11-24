@@ -817,7 +817,7 @@ SPFN_AUTH_GOOGLE_CLIENT_SECRET=GOCSPX-...
 # Optional
 SPFN_AUTH_GOOGLE_SCOPES=email,profile               # Default: email,profile
 SPFN_AUTH_OAUTH_SUCCESS_URL=/auth/callback           # Default: /auth/callback
-SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}; {reason} optional (else appended as reason=)
+SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}; {reason} and {code} optional (else appended as reason= / code=)
 SPFN_AUTH_GOOGLE_REDIRECT_URI=                       # Default: {NEXT_PUBLIC_SPFN_APP_URL||SPFN_APP_URL}/_auth/oauth/google/callback (an override is checked at boot)
 ```
 
@@ -913,8 +913,10 @@ error, and a retry works.
 
 ### Error page reasons
 
-Every redirect to `SPFN_AUTH_OAUTH_ERROR_URL` carries `reason=<code>` beside the `error` text. The
-codes are the closed union `OAuthErrorReason`:
+Every redirect to `SPFN_AUTH_OAUTH_ERROR_URL` carries `reason=<code>` and `error`, the fixed English
+sentence for that code (`OAUTH_ERROR_MESSAGES[reason]`). **Render the page by `reason`, never by the
+`error` on its own URL:** anyone can put `?error=` on a link to your page, and a page that renders it
+shows whatever that link said. The codes are the closed union `OAuthErrorReason`:
 
 | `reason` | cause |
 |---|---|
@@ -929,23 +931,24 @@ codes are the closed union `OAuthErrorReason`:
 | `signup_disabled` | a first sign-in would have created an account and the app set `channels.signup: false` (#308) |
 | `provider_already_linked` | a first sign-in matched an account by email that already holds another identity of the same provider — an account holds one per provider |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does |
-| `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361) |
+| `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361); the redirect carries the app's refusal code as `code` |
 | `failed` | anything else |
 
 A refused sign-in writes nothing — no account, social row, key, stored token or event: the callback
 asks the provider first, does every write in one transaction, and redirects only after it rolled back.
 
-For `expired`, `invalid_state`, `no_cookie` and a library failure behind `provider_error` the `error` text is a
-fixed sentence, never a library message. For `failed` it is a typed error's own text (a missing
-`code`/`state`, an unverified email that would link an account), and for any other error — a missing
-role, a failed statement — the fixed `OAuth callback failed` (`OAuth link failed` when the link
-state could not be read). Every caught error the redirect answers — and every failure of a link
-callback, which answers only `oauthLink=failed` — is logged by `@spfn/auth:service` as core's error
-handler would log it (`errorLogLevel`): at error level for a fault (an untyped error, a typed 5xx),
-at warn for a refusal (#382). Put `{reason}` in the template
-(`/auth/error?error={error}&code={reason}`) to place it yourself; without it `reason` is appended as
-a query parameter. `OAuthCallback`'s `onError(message, reason)` and `errorComponent(message, reason)`
-receive the code as well.
+The `error` text is never a provider's, a library's, a typed error's or your `admit`'s message (#489).
+On `sign_in_refused` the `code` your `admit` refused with travels as `code` — a key for your page to
+look its own copy up by; a reader drops a `code` beside another reason or outside the `admit` code
+shape. Every caught error the redirect answers — and every failure of a link callback, which answers
+only `oauthLink=failed` — is logged by `@spfn/auth:service` as core's error handler would log it
+(`errorLogLevel`): at error level for a fault (an untyped error, a typed 5xx), at warn for a refusal
+(#382). A provider error read as `provider_error` leaves a warn line naming the provider's `error`
+when it is a registered code, `unrecognised` otherwise. Put `{reason}` and `{code}` in the template
+(`/auth/error?error={error}&why={reason}&key={code}`) to place them yourself; without them they are
+appended as query parameters. `OAuthCallback`'s `onError(message, reason, code?)` and
+`errorComponent(message, reason, code?)` receive the reason's sentence, the reason and the code; the
+handler and the component ignore the `error` text on their own URL.
 
 ### Callback Page
 
@@ -2016,4 +2019,4 @@ NEXT_PUBLIC_SPFN_APP_URL=http://localhost:3000
 
 The landing path is `SPFN_AUTH_OAUTH_SUCCESS_URL` (default `/auth/callback`); errors go to
 `SPFN_AUTH_OAUTH_ERROR_URL` (default `/auth/error?error={error}`), with a
-[`reason` code](#error-page-reasons) beside the text.
+[`reason` code](#error-page-reasons) and its fixed sentence.

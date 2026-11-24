@@ -1,13 +1,18 @@
 /**
  * @spfn/auth - OAuth error reason codes (#126)
  *
- * Every redirect to the OAuth error page carries `reason=<code>` beside the
- * free-text `error`, so an app page can branch on a closed set of values instead
- * of matching prose that a provider or a library wrote.
+ * Every redirect to the OAuth error page carries `reason=<code>`, a closed set
+ * of values an app page branches on, and `error`, the fixed sentence for that
+ * code (#489). Nothing on the redirect is text a provider, a request or the
+ * application wrote: a URL parameter is writable by anyone, so a reader cannot
+ * tell the backend's redirect from a forged link, and reads nothing to display
+ * from it.
  *
- * The module imports nothing: the `OAuthCallback` page flow reads the same codes
- * in the client bundle.
+ * The module imports only the refusal code's shape, which imports nothing: the
+ * `OAuthCallback` page flow reads the same codes in the client bundle.
  */
+
+import { SIGN_IN_REFUSAL_CODE } from './sign-in-refusal-code';
 
 /** Every reason the OAuth error redirect can carry. */
 export const OAUTH_ERROR_REASONS = [
@@ -57,6 +62,27 @@ export const OAUTH_ERROR_REASONS = [
  */
 export type OAuthErrorReason = typeof OAUTH_ERROR_REASONS[number];
 
+/**
+ * The fixed sentence for each reason: the redirect's `error`, and the message
+ * `OAuthCallback` gives `onError` and `errorComponent` (#489). A page that wants
+ * its own copy looks the reason up in its own table instead.
+ */
+export const OAUTH_ERROR_MESSAGES: Readonly<Record<OAuthErrorReason, string>> = {
+    cancelled: 'The sign-in was cancelled at the provider.',
+    expired: 'This sign-in took longer than ten minutes. Start it again.',
+    invalid_state: 'This sign-in could not be confirmed as started in this browser. Start it again.',
+    no_cookie: 'This browser kept none of the cookies this sign-in set. Allow cookies for this site, or start the sign-in again in the browser where it began.',
+    provider_error: 'The sign-in provider could not complete the sign-in. Try again.',
+    account_unavailable: 'This account cannot sign in.',
+    link_only: 'This provider can only be linked to a signed-in account, not used to sign in',
+    email_in_use: 'An account with this email already exists. Sign in to it and link this provider from settings',
+    signup_disabled: 'This application does not create accounts by sign-up',
+    provider_already_linked: 'This account already has an identity from this provider. Unlink it first.',
+    sign_in_contended: 'Another sign-in with this identity was in progress. Sign in again.',
+    sign_in_refused: 'Sign-in refused',
+    failed: 'OAuth sign-in could not be completed',
+};
+
 /** Whether a value read off a URL or a body is one of the codes. */
 export function isOAuthErrorReason(value: unknown): value is OAuthErrorReason
 {
@@ -82,6 +108,21 @@ export function callbackQueryReason(reason: string | null, error: string): OAuth
 }
 
 /**
+ * The application's refusal code for an error redirect: kept only beside
+ * `sign_in_refused` and only in the shape `signIn.admit` must answer
+ * (`SIGN_IN_REFUSAL_CODE`), `undefined` otherwise (#489).
+ *
+ * A forged link can put anything in `code`. A value outside that shape — a
+ * sentence, markup, an address — is no code an application issued, so it is
+ * dropped rather than passed on: what reaches a page is at most an identifier
+ * it looks up in its own table, never text to show.
+ */
+export function oauthErrorCode(reason: OAuthErrorReason, code: unknown): string | undefined
+{
+    return reason === 'sign_in_refused' && typeof code === 'string' && SIGN_IN_REFUSAL_CODE.test(code) ? code : undefined;
+}
+
+/**
  * Put `reason` on an error URL: into its `{reason}` placeholder when it has one,
  * otherwise appended as `reason=<code>` before any `#fragment`, after `&` when
  * the URL already has a query and `?` when it does not.
@@ -92,14 +133,31 @@ export function callbackQueryReason(reason: string | null, error: string): OAuth
  */
 export function withOAuthErrorReason(url: string, reason: OAuthErrorReason): string
 {
-    if (url.includes('{reason}'))
+    return withTemplateParameter(url, 'reason', reason);
+}
+
+/**
+ * Put the application's refusal `code` on an error URL the way `reason` is put
+ * (#489): into `{code}`, else appended. Without a code a `{code}` placeholder is
+ * emptied and nothing is appended. The code is held to `SIGN_IN_REFUSAL_CODE`
+ * (`oauthErrorCode`), whose characters need no encoding.
+ */
+export function withOAuthErrorCode(url: string, code: string | undefined): string
+{
+    return code === undefined ? url.replaceAll('{code}', '') : withTemplateParameter(url, 'code', code);
+}
+
+/** `value` into the template's `{name}`, else appended as `name=value` before any fragment. */
+function withTemplateParameter(url: string, name: string, value: string): string
+{
+    if (url.includes(`{${name}}`))
     {
-        return url.replaceAll('{reason}', reason);
+        return url.replaceAll(`{${name}}`, value);
     }
 
     const hashAt = url.indexOf('#');
     const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
     const separator = beforeHash.includes('?') ? '&' : '?';
 
-    return `${beforeHash}${separator}reason=${reason}${hashAt === -1 ? '' : url.slice(hashAt)}`;
+    return `${beforeHash}${separator}${name}=${value}${hashAt === -1 ? '' : url.slice(hashAt)}`;
 }

@@ -217,7 +217,7 @@ describe.skipIf(!dbAvailable)('a caught error\'s text outside core (#382)', () =
         const params = new URL(location, 'https://app.example').searchParams;
 
         expectNoLeak(decodeURIComponent(location));
-        expect([params.get('error'), params.get('reason')]).toEqual(['OAuth callback failed', 'failed']);
+        expect([params.get('error'), params.get('reason')]).toEqual(['OAuth sign-in could not be completed', 'failed']);
     });
 
     it('C2: a link state failing on a statement redirects with a fixed text, reason failed', async () =>
@@ -228,7 +228,7 @@ describe.skipIf(!dbAvailable)('a caught error\'s text outside core (#382)', () =
         const params = new URL(location, 'https://app.example').searchParams;
 
         expectNoLeak(decodeURIComponent(location));
-        expect([params.get('error'), params.get('reason')]).toEqual(['OAuth link failed', 'failed']);
+        expect([params.get('error'), params.get('reason')]).toEqual(['OAuth sign-in could not be completed', 'failed']);
     });
 
     it('C3: an admin account whose create fails is logged by its description, not its text', async () =>
