@@ -320,7 +320,8 @@ async function underAccountLock<T>(
  * Lock the attempt's account. An attempt on an identifier (`password`,
  * `deletion-cancel`) locks by it, the row its account was read by
  * (`lockAccountByEmailOrPhone`): an identifier that names no account sends the
- * statements a known one does, so the work tells neither apart. Any other
+ * statements a known one does, though only a known one's lock writes a commit
+ * record (#486). Any other
  * attempt came from an account it already holds — a challenge, a passkey, a
  * provider's subject — and locks it by id; with none, nothing is locked.
  */

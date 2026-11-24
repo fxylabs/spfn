@@ -286,9 +286,12 @@ export class UsersRepository extends AccountStateRepository
      * `findByEmailOrPhoneOnPrimary` reads — as `lockAccount` locks it by id:
      * the same row, the same bounded wait, the same three statements. An
      * identifier that names no account sends them too, locks nothing and
-     * answers null, so a sign-in attempt does the same database work whether
+     * answers null, so a sign-in attempt sends the same statements whether
      * or not its identifier is an account's — and, with no transaction open,
-     * is refused as a known one is, before any statement.
+     * is refused as a known one is, before any statement. It does not do the
+     * same work: a row locked assigns the transaction an id, whose commit
+     * writes and flushes a WAL record, and no row assigns none — about
+     * 0.85 ms per wrong password, accepted for now (#486).
      *
      * The lock is recorded once the row is known: call it as the transaction's
      * first account lock, as a sign-in attempt's own transaction does.

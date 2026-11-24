@@ -505,24 +505,28 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * ```typescript
      * createAuthLifecycle({
      *     signIn: {
-     *         admit: async ({ user }, call) =>
+     *         // Counted by the identifier named, or the account's own: an
+     *         // unknown identifier is counted as an account is (README).
+     *         admit: async (attempt, call) =>
      *         {
-     *             if (!user)
+     *             const identifiers = countedIdentifiers(attempt);
+     *
+     *             if (identifiers.length === 0)
      *             {
      *                 return undefined;
      *             }
      *
      *             const attempts = call === 'before-proof'
-     *                 ? await signInAttempts.add(user.id)
-     *                 : await signInAttempts.count(user.id);
+     *                 ? await signInAttempts.add(identifiers)
+     *                 : await signInAttempts.count(identifiers);
      *
      *             return attempts > 5 ? { refuse: { code: 'LOCKED' } } : undefined;
      *         },
      *         settled: async (outcome) =>
      *         {
-     *             if (outcome.result === 'succeeded' && outcome.user)
+     *             if (outcome.result === 'succeeded')
      *             {
-     *                 await signInAttempts.clear(outcome.user.id);
+     *                 await signInAttempts.clear(countedIdentifiers(outcome));
      *             }
      *         },
      *     },

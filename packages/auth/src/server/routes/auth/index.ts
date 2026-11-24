@@ -65,8 +65,10 @@ import {
 
 // NOTE: a POST /_auth/exists endpoint was removed deliberately — it answered
 // account existence directly (user enumeration). Existence is no longer exposed;
-// the login path is also timing-equalized (see loginService). Don't reintroduce
-// an existence check without revisiting that posture.
+// the login path compares a dummy hash for an unknown account (see loginService),
+// though with a sign-in guard configured an account's lock writes a commit record
+// an unknown identifier's does not (about 0.85 ms, #486). Don't reintroduce an
+// existence check without revisiting that posture.
 
 /**
  * POST /_auth/codes - Send verification code

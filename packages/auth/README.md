@@ -428,7 +428,9 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 
 There is deliberately **no account-existence endpoint**. `POST /_auth/exists` was removed
 because it answered "does this account exist" directly, which is user enumeration; the
-login path is timing-equalized for the same reason. Do not reintroduce one without
+login path is timing-equalized for the same reason — but for the commit record a configured sign-in
+guard's account lock writes for an account and not for an unknown identifier (about 0.85 ms, #486;
+see [The sign-in guard](#the-sign-in-guard-signin)). Do not reintroduce one without
 revisiting that decision.
 
 Auth uses **asymmetric, client-signed JWTs**: the client generates an ES256/RS256 keypair,
@@ -967,15 +969,41 @@ password, a sign-in history. Leave it out and nothing changes: no extra query, l
 runs on any sign-in. Both callbacks are optional.
 
 ```typescript
-import type { SignInAttempt, SignInOutcome } from '@spfn/auth/server';
+// The worked example below, shortened: its server.config.ts with the policy written in. An attempt
+// is counted by the identifier it names, whether or not an account holds it — a guard that let
+// `user: null` through would answer a locked account 403 and an unknown one 401.
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { signInAttemptsRepository, signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+import { countedIdentifiers } from './src/server/sign-in-policy';
 
-createAuthLifecycle({
+export const authLifecycle = createAuthLifecycle({
     signIn: {
-        admit: async (attempt: SignInAttempt) =>
-            attempt.user && await lockouts.isLocked(attempt.user.id) ? { refuse: { code: 'LOCKED' } } : undefined,
-        settled: (outcome: SignInOutcome) => signInHistory.record(outcome),
+        admit: async (attempt, call) =>
+        {
+            const identifiers = countedIdentifiers(attempt);
+
+            if (identifiers.length === 0)
+            {
+                return undefined;
+            }
+
+            const attempts = call === 'before-proof'
+                ? await signInAttemptsRepository.add(identifiers)
+                : await signInAttemptsRepository.count(identifiers);
+
+            return attempts > 5 ? { refuse: { code: 'LOCKED' } } : undefined;
+        },
+        settled: async (outcome) =>
+        {
+            await signInHistoryRepository.record(outcome);
+
+            if (outcome.result === 'succeeded')
+            {
+                await signInAttemptsRepository.clear(countedIdentifiers(outcome));
+            }
+        },
     },
-})
+});
 ```
 
 ```typescript
@@ -1037,9 +1065,19 @@ decides what becomes of a write it makes:
 | `settled`, `failed` for a wrong credential checked before any transaction | in a transaction of its own, under the account lock, before the answer | commits before the 401 or 403; a throw answers 500 |
 | `settled`, `failed` for a refusal decided in the session's transaction | in a transaction of its own, under the account lock, after the session's rolled back | commits before the 403; a throw, or the lock busy past its wait, loses the report and is logged |
 
-- **Under the account's lock** (`usersRepository.lockAccount`; none when `user` is null) every other
-  writer of the account waits on you, at most five seconds before it answers `AccountBusyError`:
-  database work only, and fast. No network call.
+- **Under the account's lock** (`usersRepository.lockAccount`; on `password` and `deletion-cancel`
+  taken by the identifier, so for `user: null` the lock statement is sent and holds nothing) every
+  other writer of the account waits on you, at most five seconds before it answers
+  `AccountBusyError`: database work only, and fast. No network call.
+- **The same statements are not the same work.** On `password` and `deletion-cancel` an account and
+  an unknown identifier send the same statements, but locking a row that exists assigns the
+  transaction an id, so each of an account's lock transactions (the `before-proof` one, when
+  `admit` is stated, and the failure report) writes a commit record to the WAL and flushes it; an
+  unknown identifier's lock finds no row and writes none. Measured in #486, a wrong password costs
+  about 0.85 ms more for an account than for an unknown identifier, beside a bcrypt comparison of
+  about 265 ms. Accepted for now (#486): removing it changes how every writer of an account locks
+  it. A write of yours made on both sides narrows the difference to the lock's own WAL record; a
+  write made on one side only is a larger difference than the lock's.
 - **Never lock a second account** in them — the transaction refuses it with
   `SecondAccountLockError`.
 - **Lock order.** The package locks the account row first, then your rows. Code of yours that locks
@@ -1134,8 +1172,9 @@ refused session — the report of the refusal is `settled`'s. A count of attempt
 asked before the password is compared. An account it refuses is compared against the **dummy hash**,
 never its own, and answered the refusal whatever the password was. Skipping the comparison would
 make a refused account answer faster than an unknown one; comparing its real hash would make the
-refusal answer the password. An unknown identifier reaches `admit` with `user: null` — refuse those
-too if your policy counts identifiers.
+refusal answer the password. An unknown identifier reaches `admit` with `user: null` — count and
+refuse it as an account is, by the identifier, as the worked example does: a policy that lets it
+through answers a locked account otherwise than an unknown identifier.
 
 **An account the package refuses answers as a wrong password.** On `password` and
 `deletion-cancel`, an account that is disabled, suspended, pending deletion or purged is answered
@@ -1205,9 +1244,11 @@ roll back with the refusal.
 #### Worked example — lock after five attempts, lifted by an administrator
 
 An attempt is counted at the `before-proof` call, before its password or second-factor proof is
-compared, and refused past five; a sign-in that succeeds starts the count again. The count is
-written under the account lock and committed before the comparison, so five is five comparisons
-however many requests arrive at once. The history is kept apart, from `settled`.
+compared, and refused past five; a sign-in that succeeds starts the count again. The count is kept
+by the identifier the attempt names — for an account and for an unknown identifier alike — so both
+are answered the same at the same attempt, with the same statements. It is written under the
+account lock and committed before the comparison, so five is five comparisons however many
+requests arrive at once. The history is kept apart, from `settled`.
 
 ```typescript
 // src/server/entities/sign-in-history.ts
@@ -1226,7 +1267,8 @@ export const signInHistory = pgTable('sign_in_history', {
 });
 
 export const signInAttempts = pgTable('sign_in_attempts', {
-    userId: bigint('user_id', { mode: 'number' }).primaryKey(),
+    // An email trimmed and lower-cased, as the package matches it, or a phone as given.
+    identifier: text('identifier').primaryKey(),
     attempts: integer('attempts').notNull(),
 });
 ```
@@ -1234,7 +1276,7 @@ export const signInAttempts = pgTable('sign_in_attempts', {
 ```typescript
 // src/server/repositories/sign-in-history.repository.ts
 import { BaseRepository } from '@spfn/core/db';
-import { eq, sql } from 'drizzle-orm';
+import { inArray, max, sql } from 'drizzle-orm';
 import type { SignInOutcome } from '@spfn/auth/server';
 import { signInAttempts, signInHistory } from '../entities/sign-in-history';
 
@@ -1256,31 +1298,33 @@ export class SignInHistoryRepository extends BaseRepository
 
 export class SignInAttemptsRepository extends BaseRepository
 {
-    /** Attempts since the last success or lift — read in the package's transaction, under the account lock. */
-    async count(userId: number): Promise<number>
+    /** The most attempts on any of `identifiers` since its last success or lift — read under the account lock. */
+    async count(identifiers: string[]): Promise<number>
     {
-        const [row] = await this.db.select().from(signInAttempts).where(eq(signInAttempts.userId, userId));
+        const [row] = await this.db.select({ attempts: max(signInAttempts.attempts) }).from(signInAttempts)
+            .where(inArray(signInAttempts.identifier, identifiers));
 
         return row?.attempts ?? 0;
     }
 
     /**
-     * One more attempt, in the `before-proof` call's transaction; it commits whatever `admit` answers.
-     * One statement: the increment and the count it answers are one write, with no read before it.
+     * One more attempt on each identifier, in the `before-proof` call's transaction; it commits
+     * whatever `admit` answers. One statement: the increments and the counts they answer are one
+     * write, with no read before it.
      */
-    async add(userId: number): Promise<number>
+    async add(identifiers: string[]): Promise<number>
     {
-        const [row] = await this.db.insert(signInAttempts).values({ userId, attempts: 1 })
-            .onConflictDoUpdate({ target: signInAttempts.userId, set: { attempts: sql`${signInAttempts.attempts} + 1` } })
+        const rows = await this.db.insert(signInAttempts).values(identifiers.map(identifier => ({ identifier, attempts: 1 })))
+            .onConflictDoUpdate({ target: signInAttempts.identifier, set: { attempts: sql`${signInAttempts.attempts} + 1` } })
             .returning({ attempts: signInAttempts.attempts });
 
-        return row!.attempts;
+        return Math.max(...rows.map(row => row.attempts));
     }
 
-    /** A sign-in that succeeded, or an administrator's lift: one statement, no account lock taken. */
-    async clear(userId: number): Promise<void>
+    /** A sign-in that succeeded, or an administrator's lift: one statement, under the account lock. */
+    async clear(identifiers: string[]): Promise<void>
     {
-        await this.db.delete(signInAttempts).where(eq(signInAttempts.userId, userId));
+        await this.db.delete(signInAttempts).where(inArray(signInAttempts.identifier, identifiers));
     }
 }
 
@@ -1289,75 +1333,152 @@ export const signInAttemptsRepository = new SignInAttemptsRepository();
 ```
 
 ```typescript
-// server.config.ts
-import { createAuthLifecycle } from '@spfn/auth/server';
-import { signInAttemptsRepository, signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+// src/server/sign-in-policy.ts
+import type { SignInAttempt, SignInGuardOptions, User } from '@spfn/auth/server';
+import { signInAttemptsRepository, signInHistoryRepository } from './repositories/sign-in-history.repository';
 // The app's own record of the temporary passwords it issued.
-import { temporaryPasswordsRepository } from './src/server/repositories/temporary-passwords.repository';
+import { temporaryPasswordsRepository } from './repositories/temporary-passwords.repository';
 
 const LIMIT = 5;
 
-export const authLifecycle = createAuthLifecycle({
-    signIn: {
-        admit: async ({ user, channel }, call) =>
+/** An account's own email and phone, the ones it has. */
+export function accountIdentifiers(user: User | null): string[]
+{
+    return [user?.email, user?.phone].filter((value): value is string => Boolean(value));
+}
+
+/**
+ * The counts an attempt is judged by: the identifier it names, whether or not an account holds it;
+ * on a channel that names none, the account's own email and phone.
+ */
+export function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
+{
+    if (identifier)
+    {
+        return [identifier.email ? identifier.email.trim().toLowerCase() : identifier.phone!];
+    }
+
+    return accountIdentifiers(user);
+}
+
+export const signInPolicy: SignInGuardOptions = {
+    admit: async (attempt, call) =>
+    {
+        const identifiers = countedIdentifiers(attempt);
+
+        if (identifiers.length === 0)
         {
-            if (!user)
-            {
-                return undefined;
-            }
-
-            // Counted before the comparison; every other call only reads the count.
-            const attempts = call === 'before-proof'
-                ? await signInAttemptsRepository.add(user.id)
-                : await signInAttemptsRepository.count(user.id);
-
-            if (attempts > LIMIT)
-            {
-                return { refuse: { code: 'LOCKED' } };
-            }
-
-            // An expiring temporary password: the app recorded its expiry when it issued it
-            // (with passwordChangeRequired), in a table of its own.
-            if (channel === 'password' && user.passwordChangeRequired
-                && await temporaryPasswordsRepository.hasExpired(user.id))
-            {
-                return { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } };
-            }
-
             return undefined;
-        },
-        settled: async (outcome) =>
-        {
-            await signInHistoryRepository.record(outcome);
+        }
 
-            if (outcome.result === 'succeeded' && outcome.user)
-            {
-                await signInAttemptsRepository.clear(outcome.user.id);
-            }
-        },
+        // Counted before the comparison; every other call only reads the count.
+        const attempts = call === 'before-proof'
+            ? await signInAttemptsRepository.add(identifiers)
+            : await signInAttemptsRepository.count(identifiers);
+
+        if (attempts > LIMIT)
+        {
+            return { refuse: { code: 'LOCKED' } };
+        }
+
+        // An expiring temporary password: the app recorded its expiry when it issued it
+        // (with passwordChangeRequired), in a table of its own.
+        const { user, channel } = attempt;
+
+        if (channel === 'password' && user?.passwordChangeRequired
+            && await temporaryPasswordsRepository.hasExpired(user.id))
+        {
+            return { refuse: { code: 'TEMPORARY_PASSWORD_EXPIRED' } };
+        }
+
+        return undefined;
     },
-});
+    settled: async (outcome) =>
+    {
+        await signInHistoryRepository.record(outcome);
+
+        if (outcome.result === 'succeeded')
+        {
+            await signInAttemptsRepository.clear(countedIdentifiers(outcome));
+        }
+    },
+};
 ```
 
-The `add` is one statement, the increment and its answer together. The account lock makes two
-attempts on one account take turns at it, but the lift takes no account lock: an `add` that read the
-count, then wrote it back plus one, would put back a count a `clear` removed in between, and the
-owner would stay locked out. As one statement, a `clear` lands either before the increment (the
-count restarts at 1) or after it (the count is gone).
+```typescript
+// server.config.ts
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { signInPolicy } from './src/server/sign-in-policy';
 
-An unknown identifier (`user: null`) is not counted here; count it by identifier with one statement
-(an upsert) if your policy does. The package's own statements are the same for an account and for an
-unknown identifier, but what your `admit` and `settled` do is yours: the policy above writes for an
-account and not for `user: null`, and a per-identifier count kept only for `user: null` writes for
-the unknown identifier and not for the account. Either way the work tells a caller whether the
-identifier names an account. Keep the same statements on both sides — count every attempt by
-identifier, say — if that matters to you.
+export const authLifecycle = createAuthLifecycle({ signIn: signInPolicy });
+```
+
+**Counted by identifier, not by account.** On `password` and `deletion-cancel` the count is the
+identifier's: an unknown identifier is counted and refused exactly as an account is, so six wrong
+passwords answer five 401s and a 403 `LOCKED` either way, and the statements the policy sends are
+the same. What that changes:
+
+- **The lift clears by identifier, under the account lock.** An administrator lifts an account's
+  lock with `liftSignInLock(userId)` (below), which clears the counts of the account's own email and
+  phone.
+- **An account reachable by an email and a phone has two counts.** Six wrong passwords by its
+  email lock its password step by that email only: by its phone the password is still compared, and
+  a success by its email clears only the email's count. Every step that names no identifier is
+  locked all the same (next point): those six, then the right password by its phone, answer 202 and
+  then 403 `LOCKED` at `mfa/verify`.
+- **The channels without an identifier** — `mfa/verify`, passkey, OAuth, device code and link,
+  `password-reset`, the registration channels — already hold the account, so they are judged by the
+  account's own identifiers: the highest of their counts. `mfa/verify` counts an attempt on each of
+  them, and its success clears them all.
+- **A count outlives the account's absence.** Attempts on an identifier no account holds are counted
+  all the same, and stay counted if an account later takes that identifier: its registration is
+  refused until the lift. Clear the count on the registration channels in `admit`, before reading
+  it, if a registration should start afresh.
+
+```typescript
+// src/server/services/sign-in-lock.service.ts
+import { runInTransaction } from '@spfn/core/db';
+import { usersRepository } from '@spfn/auth/server';
+import { signInAttemptsRepository } from '../repositories/sign-in-history.repository';
+import { accountIdentifiers } from '../sign-in-policy';
+
+/**
+ * An administrator's lift, called from an ops or admin route behind `requireOpsScope` (or a role
+ * check). It takes the account's lock before it clears the account's counts, as every sign-in that
+ * adds to them holds it: the two take turns, and never take the counts' rows in different orders.
+ */
+export async function liftSignInLock(userId: number): Promise<void>
+{
+    await runInTransaction(async () =>
+    {
+        const user = await usersRepository.lockAccount(userId);
+
+        if (user)
+        {
+            await signInAttemptsRepository.clear(accountIdentifiers(user));
+        }
+    });
+}
+```
+
+The lift takes the account lock first, as the [lock order](#the-sign-in-guard-signin) asks of every
+writer of yours. At `mfa/verify` the `add` takes the email's row and then the phone's, in the order
+of its values; the lift's `DELETE … WHERE identifier IN (…)` takes them in the order its plan reads
+them — an index scan in the key's collation order, which puts `+8210…` before `ada@…`, a
+sequential scan in the heap's. An `add` and a lift that each held one row would wait for each
+other, and PostgreSQL would fail one of them with a deadlock. Holding the account lock, they take
+turns instead, as every other writer of an account's counts does: `before-proof`, `settled` and a
+success's `clear` all run under it.
+
+The `add` is one statement, the increments and their answer together. For an unknown identifier the
+lock holds nothing, so concurrent attempts on it do not take turns: an `add` that read the count,
+then wrote it back plus one, would lose the attempt another made in between. The one statement is
+what keeps its count exact.
 
 Every attempt is counted, the right password's too — a password sign-in that meets a 202 counts
-once more at `mfa/verify`, and the success clears both. A locked account stays locked: its right
-password is refused at `before-proof` like any other attempt, so only the lift ends it. The lift is
-an ops or admin route calling `signInAttemptsRepository.clear(userId)` behind `requireOpsScope` (or
-a role check). Whether a password reset lifts the lock is yours to decide: a `password-reset`
+once more at `mfa/verify`, and the success clears every count it was judged by. A locked account
+stays locked: its right password is refused at `before-proof` like any other attempt, so only the
+lift ends it. Whether a password reset lifts the lock is yours to decide: a `password-reset`
 sign-in reaches the deciding `admit` like any other, so the policy above refuses it while locked —
 clear the count on `channel === 'password-reset'` in `admit`, before reading it, if a reset should. The history is the
 sign-in list a settings page shows; `ip` is what the request said, `webProxy` whether the proxy

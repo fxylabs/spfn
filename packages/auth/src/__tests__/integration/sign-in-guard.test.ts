@@ -39,15 +39,32 @@
  * 16. a limit on attempts that does not bound the comparisons (#478): eight
  *     concurrent wrong passwords, each past a first `admit` that read the
  *     count before any wrote it, all compared against the account's hash
+ * 18. the README's worked example as an existence oracle (#486): its policy
+ *     answering an account's sixth wrong password otherwise than an unknown
+ *     identifier's — and the README's printed example edited away from the
+ *     code this row runs, or given a block that names no path, so no fixture
+ *     stands for it (the text rows read no database and run without one)
+ * 19. the worked example's count of an email by each of its case spellings
+ *     (#486): the package resolves them all to one account, so a count per
+ *     spelling no longer bounds the guesses at it
+ * 20. the README's opening guard snippet edited away from code that compiles
+ *     against the worked example's exports: the account-keyed guard put back,
+ *     or `user: null` let through
+ * 21. the worked example's lift that clears nothing, or that reads the account
+ *     instead of taking its lock before it clears the counts
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
- * Its table lives in a schema of this file's own.
+ * Its table lives in a schema of this file's own — but for rows 18 and 19,
+ * which run the README's worked example from `fixtures/readme-sign-in-guard`,
+ * its tables where the README puts them.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { Hono } from 'hono';
 import postgres from 'postgres';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } from 'jose';
 
@@ -201,6 +218,46 @@ class SignInAttemptsRepository extends BaseRepository
 
 const attempts = new SignInAttemptsRepository();
 
+/**
+ * The README's worked example, "lock after five attempts": each of its blocks
+ * is one of these modules, text for text (row 18), and rows 18, 19 and 21 run
+ * it. The README's opening guard snippet is `server.config.opening.ts` (row
+ * 20). Only the temporary passwords' repository, which the README names and
+ * does not show, is not a block.
+ */
+const README_EXAMPLE = resolve(__dirname, '../fixtures/readme-sign-in-guard');
+const { signInPolicy: readmeSignInPolicy } = await import('../fixtures/readme-sign-in-guard/src/server/sign-in-policy');
+const { signInAttemptsRepository: readmeAttempts } = await import('../fixtures/readme-sign-in-guard/src/server/repositories/sign-in-history.repository');
+const { liftSignInLock } = await import('../fixtures/readme-sign-in-guard/src/server/services/sign-in-lock.service');
+// The account lock the lift takes: the fixture imports `@spfn/auth/server` as an app does, from dist.
+const { usersRepository: appUsersRepository } = await import('@spfn/auth/server');
+
+/** A fenced block of the README, and the path its first line names if it names one. */
+interface ReadmeBlock
+{
+    path: string | undefined;
+    text: string;
+}
+
+/** The fenced blocks under the README heading that starts with `heading`, up to the next `####` heading. */
+function readmeBlocks(heading: string): ReadmeBlock[]
+{
+    const readme = readFileSync(resolve(__dirname, '../../../README.md'), 'utf8');
+    const section = readme.split(`\n${heading}`)[1]!.split('\n#### ')[0]!;
+
+    return [...section.matchAll(/```\w*\n([\s\S]*?)```/g)]
+        .map(([, text]) => ({ path: /^\/\/ (\S+)\n/.exec(text!)?.[1], text: text! }));
+}
+
+/** The fixture modules that stand for a block: those whose first line names their own path. */
+function readmeExampleFixtures(): Map<string, string>
+{
+    return new Map(readdirSync(README_EXAMPLE, { recursive: true, encoding: 'utf8' })
+        .filter(path => path.endsWith('.ts'))
+        .map(path => [path, readFileSync(join(README_EXAMPLE, path), 'utf8')] as const)
+        .filter(([path, text]) => text.startsWith(`// ${path}\n`)));
+}
+
 /** What the guard does in the current row; the guard itself is stated once per row. */
 const policy: {
     admit: (attempt: SignInAttempt, call: SignInAdmitCall) => Promise<SignInAdmission>;
@@ -301,6 +358,12 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
             reason text, key_id text, ip text, web_proxy boolean not null)`);
         await getTestDb().execute(sql`create table sign_in_guard_test.attempts (user_id bigint primary key, count int not null)`);
+        // The README's worked example's tables, where its entities put them.
+        await getTestDb().execute(sql`drop table if exists sign_in_history, sign_in_attempts`);
+        await getTestDb().execute(sql`create table sign_in_history (
+            id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
+            reason text, ip text, web_proxy boolean not null, at timestamptz not null default now())`);
+        await getTestDb().execute(sql`create table sign_in_attempts (identifier text primary key, attempts integer not null)`);
 
         // `setupTestDb` points DATABASE_URL at the test database.
         observer = postgres(process.env.DATABASE_URL!, { max: 1 });
@@ -312,6 +375,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         resetSignInGuardForTests();
         await observer.end();
         await getTestDb().execute(sql`drop schema if exists sign_in_guard_test cascade`);
+        await getTestDb().execute(sql`drop table if exists sign_in_history, sign_in_attempts`);
         delete process.env.SPFN_AUTH_PASSKEY_RP_ID;
         delete process.env.SPFN_AUTH_PASSKEY_ORIGINS;
         delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
@@ -321,7 +385,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     beforeEach(async () =>
     {
         await clearTables(getTestDb());
-        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts`);
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts, sign_in_history, sign_in_attempts`);
         resetMemoryRateLimitStore();
         await initializeAuth();
         sendEmail.mockClear();
@@ -1721,7 +1785,9 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     });
 
     // ========================================================================
-    // Row 17 — a configured guard tells no account from its database work
+    // Row 17 — a configured guard sends the same statements for an account and
+    // an unknown identifier (not the same work: an account's lock writes a
+    // commit record, #486)
     // ========================================================================
 
     const IDENTIFIER_CHANNELS = [
@@ -1788,5 +1854,113 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect((await attempt('moving@test.com')).status).toBe(401);
         expect(asked).toEqual([null]);
         expect(comparedHashes()).toEqual([await getDummyPasswordHash()]);
+    });
+
+    // ========================================================================
+    // Rows 18, 19 and 21 — the README's worked example, as the README prints it
+    // ========================================================================
+
+    /** The guard is the worked example's policy, imported from its fixture. */
+    function useReadmePolicy(): void
+    {
+        policy.admit = async (attempt, call) => readmeSignInPolicy.admit!(attempt, call);
+        policy.settled = async outcome => readmeSignInPolicy.settled!(outcome);
+    }
+
+    it.each(IDENTIFIER_CHANNELS)('row 18 — $channel, the README\'s worked example: six wrong passwords for an account and six for an unknown identifier answer the same statuses (#486)', async ({ attempt }) =>
+    {
+        await seedUser('known@test.com');
+        useReadmePolicy();
+
+        const statuses = async (email: string) =>
+        {
+            const answered: number[] = [];
+
+            for (let sent = 0; sent < 6; sent += 1)
+            {
+                answered.push((await attempt(email)).status);
+            }
+
+            return answered;
+        };
+
+        expect(await statuses('known@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
+        expect(await statuses('nobody@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
+    });
+
+    it('row 19 — the README\'s worked example: wrong passwords by six case spellings of one account\'s email share one count, five 401s and then a 403 (#486)', async () =>
+    {
+        await seedUser('known@test.com');
+        useReadmePolicy();
+
+        const answered: number[] = [];
+
+        for (const email of ['known@test.com', 'KNOWN@test.com', 'Known@Test.com', 'known@TEST.COM', 'kNoWn@tEsT.cOm', 'KNOWN@TEST.COM'])
+        {
+            answered.push((await login(email, WRONG_PASSWORD)).status);
+        }
+
+        expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
+    });
+
+    it('row 21 — the README\'s lift: an account six wrong passwords locked takes the right one once liftSignInLock has taken its lock and then cleared its counts (#486)', async () =>
+    {
+        const user = await seedUser('known@test.com');
+        useReadmePolicy();
+
+        const answered: number[] = [];
+
+        for (let sent = 0; sent < 6; sent += 1)
+        {
+            answered.push((await login('known@test.com', WRONG_PASSWORD)).status);
+        }
+
+        const lockAccount = vi.spyOn(appUsersRepository, 'lockAccount');
+        const clear = vi.spyOn(readmeAttempts, 'clear');
+        onTestFinished(() =>
+        {
+            lockAccount.mockRestore();
+            clear.mockRestore();
+        });
+
+        await liftSignInLock(user.id);
+
+        const liftCalls = [
+            ...lockAccount.mock.invocationCallOrder.map(order => ({ order, call: 'lockAccount' })),
+            ...clear.mock.invocationCallOrder.map(order => ({ order, call: 'clear' })),
+        ].sort((a, b) => a.order - b.order).map(({ call }) => call);
+
+        expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
+        expect(liftCalls).toEqual(['lockAccount', 'clear']);
+        expect((await login('known@test.com', PASSWORD)).status).toBe(200);
+    });
+});
+
+// ============================================================================
+// Rows 18 and 20 — the README's guard blocks are the fixture modules, text for
+// text; they read no database, so they run without one
+// ============================================================================
+
+describe('the README\'s sign-in guard, as printed (#486)', () =>
+{
+    it('row 18 — each block of the worked example names its path on its first line and is that fixture module, text for text', () =>
+    {
+        const blocks = readmeBlocks('#### Worked example — lock after five attempts');
+        const fixtures = readmeExampleFixtures();
+
+        expect(blocks.filter(({ path }) => !path).map(({ text }) => text), 'a block that names no path').toEqual([]);
+        expect(blocks.map(({ path }) => path).sort()).toEqual([...fixtures.keys()].sort());
+
+        for (const { path, text } of blocks)
+        {
+            expect(text, `the README's ${path}`).toBe(fixtures.get(path!));
+        }
+    });
+
+    it('row 20 — the opening guard snippet is server.config.opening.ts, text for text', () =>
+    {
+        const [opening] = readmeBlocks('### The sign-in guard (`signIn`)');
+
+        expect(opening!.text).toBe(readFileSync(join(README_EXAMPLE, 'server.config.opening.ts'), 'utf8'));
     });
 });

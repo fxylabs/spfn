@@ -379,7 +379,9 @@ async function accountExists(email?: string, phone?: string): Promise<boolean>
  *    (`admitBeforeProof`), so attempts take turns at the app's count. An
  *    account it refuses is compared against the dummy hash — never its own —
  *    and answered `SignInRefusedError` whatever the password was, so the
- *    refusal is neither a password oracle nor, by timing, an account oracle;
+ *    refusal is not a password oracle and costs what a wrong password on the
+ *    account costs; an unknown identifier costs less by the commit record an
+ *    account's lock writes (about 0.85 ms, #486);
  * 2. a failure is told to `settled` in a transaction of its own, under the
  *    account lock, committed before the answer — a wrong password with
  *    `admit` asked again there, a refusal from step 1 without
@@ -422,9 +424,11 @@ export async function loginService(
     const { user, refusal } = attempt ? await admitBeforeProof(attempt) : { user: found, refusal: null };
 
     // An unknown account, one without a password and one the app refused spend
-    // the time of the real verify path against the dummy hash, so none of the
-    // three can be told apart from a wrong password by response timing. The
-    // dummy hash is computed once and reused.
+    // the time of the real verify path against the dummy hash, so the
+    // comparison tells none of the three from a wrong password. The rest is not
+    // equal: with a guard, an account's lock writes a commit record an unknown
+    // identifier's does not (about 0.85 ms, #486). The dummy hash is computed
+    // once and reused.
     const comparedHash = refusal || !user?.passwordHash ? await getDummyPasswordHash() : user.passwordHash;
     const isValid = await verifyPassword(password, comparedHash);
     const accountRefused = user && accountRefusalReason(user);
