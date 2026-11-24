@@ -636,6 +636,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `request`/`response` — reads its `path` and its raw Request's `url`, and follows a path handed as
   an argument of its own to a function of the same file into a logger call there. A log query that
   read `path` from the CSRF lines, or `provider` from the OAuth lines, reads `route` instead.
+- **@spfn/auth: a refused link mail is logged by its row, not by its recipient (#489).** The error
+  lines `@spfn/auth:email` writes when the provider refuses a signup link or a password reset link
+  (`Failed to send signup link email`, `Failed to send password reset email`) logged `email` beside
+  `error`; they now log `rowId` — the `signup_link_tokens` or `password_reset_tokens` row — and
+  `error`. `Failed to send account-exists notice` (`@spfn/auth:email` or `:sms`) logged `target`, the
+  address or phone number; it now logs `error` alone. `error` is the provider's answer as
+  `@spfn/notification` returns it, already scrubbed of addresses and phone numbers, and
+  notification logs the same refusal with the recipient masked. There is no setting. A log query
+  that read `email` from the two link lines reads `rowId` instead; the notice line has no
+  replacement. The rule — a line names a person by user id or row id, never by address — is in the
+  auth README under Logging. Held by two test rows.
 
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked

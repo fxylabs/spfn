@@ -8698,6 +8698,22 @@ you want. Only a missing queue falls back — every other enqueue failure, a dat
 all, surfaces (or, for a call inside a transaction, is logged after the commit), because falling
 back on those would hide the outage behind mail that still gets through.
 
+## Logging (`authLogger`)
+
+The package writes its lines through `authLogger` (`@spfn/auth/server`), one child of
+`@spfn/core`'s logger per module: `@spfn/auth:service`, `:middleware`, `:email`, `:sms`, `:session`,
+`:setup`, `:plugin` and `:interceptor:*`. `SPFN_LOG_LEVEL` and core's transports apply to them as to
+any other line.
+
+**A line names a person by user id or row id, never by address.** No e-mail address, phone number
+or name is written to a line — not as a recipient, not as the account a request was made for.
+`userId` finds the account, as on the `API access` line; a link mail's `rowId` finds its
+`signup_link_tokens` or `password_reset_tokens` row, and so the address, for whoever may read the
+table. A send the provider refused is also logged by `@spfn/notification`, with the recipient
+masked; the auth line beside it names only what auth adds — which message, and which row.
+One set of lines predates the rule: admin seeding's boot lines on `@spfn/auth:setup` still name
+the address configured in `SPFN_AUTH_ADMIN_*`.
+
 ## FAQ
 
 **How do I add one social provider?**

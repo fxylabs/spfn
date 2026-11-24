@@ -16,6 +16,10 @@
  * the request that wrote the row. That is the whole point of the queue carrying
  * a row id: the plaintext credential exists in the mail and nowhere else — not
  * in `pgboss.job`, not in a log line. Nothing in this file logs a URL or a token.
+ *
+ * Nor a recipient: a refused send is logged by its row. `@spfn/notification`
+ * logs the provider's refusal itself, with the recipient masked, and hands
+ * `result.error` back scrubbed of addresses and phone numbers.
  */
 
 import { env } from '@spfn/auth/config';
@@ -67,7 +71,7 @@ export async function issueSignupLink(rowId: number): Promise<void>
 
     if (!result.success)
     {
-        authLogger.email.error('Failed to send signup link email', { email: row.email, error: result.error });
+        authLogger.email.error('Failed to send signup link email', { rowId, error: result.error });
 
         throw new Error(`[auth.link-mail] signup-link row ${rowId} could not be sent`);
     }
@@ -103,7 +107,7 @@ export async function issuePasswordResetLink(rowId: number): Promise<void>
 
     if (!result.success)
     {
-        authLogger.email.error('Failed to send password reset email', { email: row.email, error: result.error });
+        authLogger.email.error('Failed to send password reset email', { rowId, error: result.error });
 
         throw new Error(`[auth.link-mail] password-reset row ${rowId} could not be sent`);
     }
@@ -129,7 +133,7 @@ export async function sendAccountExistsNotice(
     if (!result.success)
     {
         const log = targetType === 'email' ? authLogger.email : authLogger.sms;
-        log.error('Failed to send account-exists notice', { target, error: result.error });
+        log.error('Failed to send account-exists notice', { error: result.error });
     }
 }
 
