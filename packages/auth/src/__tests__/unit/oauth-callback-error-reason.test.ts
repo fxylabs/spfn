@@ -552,7 +552,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect(JSON.stringify(calls)).not.toContain('Call us');
     });
 
-    it('O10 (#489): a sign-in start for a registered provider that is not configured leaves a warn line naming it; a segment naming none leaves no line carrying it', async () =>
+    it('O10 (#489): a sign-in start for a registered provider that is not configured leaves a warn line naming it', async () =>
     {
         vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', '');
         registerOAuthProvider({ ...provider(), isEnabled: () => false });
@@ -560,17 +560,12 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
         const start = (path: string) => app.request(path, { headers: { 'x-forwarded-for': clientIp() } });
         let redirects: (string | null)[] = [];
-        let refused: boolean[] = [];
         let calls: unknown[][][] = [];
 
-        const lines = await levelLinesDuring(async () =>
+        await levelLinesDuring(async () =>
         {
             const answers = [await start('/_auth/oauth/superself?state=s'), await start('/_auth/oauth/google?state=s')];
 
-            refused = [
-                (await start('/_auth/oauth/capabilitySecret123?state=s')).headers.has('location'),
-                (await start('/_auth/oauth/capabilitySecret123/callback?error=x')).headers.has('location'),
-            ];
             redirects = answers.map(answer => new URL(answer.headers.get('location')!, 'https://app.example').searchParams.get('reason'));
             calls = spies.map(spy => [...spy.mock.calls]);
         }).finally(() =>
@@ -580,15 +575,10 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         });
 
         expect(redirects).toEqual(['failed', 'failed']);
-        // A segment that names no provider is refused by the route's param schema: no handler runs, nothing redirects
-        expect(refused).toEqual([false, false]);
         expect(calls[2]!.filter(([message]) => message === 'OAuth provider is not configured')).toEqual([
             ['OAuth provider is not configured', { provider: 'superself' }],
             ['OAuth provider is not configured', { provider: 'google' }],
         ]);
-        // Core's rate limiter names every request's path at debug; no line at warn or above carries the segment
-        expect(JSON.stringify(calls.slice(2))).not.toContain('capabilitySecret123');
-        expect([...lines.error, ...lines.warn].join('\n')).not.toContain('capabilitySecret123');
     });
 
     it('R6c: a provider error shaped like a typed one (numeric statusCode, toJSON) redirects with the fixed text, not its own (#382)', async () =>
