@@ -16,7 +16,7 @@ export function accountIdentifiers(user: User | null): string[]
  * The counts an attempt is judged by: the identifier it names, whether or not an account holds it;
  * on a channel that names none, the account's own email and phone.
  */
-function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
+export function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
 {
     if (identifier)
     {

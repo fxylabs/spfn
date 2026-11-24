@@ -969,10 +969,14 @@ password, a sign-in history. Leave it out and nothing changes: no extra query, l
 runs on any sign-in. Both callbacks are optional.
 
 ```typescript
-// The worked example below, shortened: `countedIdentifiers`, `signInAttempts` and `signInHistory`
-// are its. An attempt is counted by the identifier it names, whether or not an account holds it — a
-// guard that let `user: null` through would answer a locked account 403 and an unknown one 401.
-createAuthLifecycle({
+// The worked example below, shortened: its server.config.ts with the policy written in. An attempt
+// is counted by the identifier it names, whether or not an account holds it — a guard that let
+// `user: null` through would answer a locked account 403 and an unknown one 401.
+import { createAuthLifecycle } from '@spfn/auth/server';
+import { signInAttemptsRepository, signInHistoryRepository } from './src/server/repositories/sign-in-history.repository';
+import { countedIdentifiers } from './src/server/sign-in-policy';
+
+export const authLifecycle = createAuthLifecycle({
     signIn: {
         admit: async (attempt, call) =>
         {
@@ -984,22 +988,22 @@ createAuthLifecycle({
             }
 
             const attempts = call === 'before-proof'
-                ? await signInAttempts.add(identifiers)
-                : await signInAttempts.count(identifiers);
+                ? await signInAttemptsRepository.add(identifiers)
+                : await signInAttemptsRepository.count(identifiers);
 
             return attempts > 5 ? { refuse: { code: 'LOCKED' } } : undefined;
         },
         settled: async (outcome) =>
         {
-            await signInHistory.record(outcome);
+            await signInHistoryRepository.record(outcome);
 
             if (outcome.result === 'succeeded')
             {
-                await signInAttempts.clear(countedIdentifiers(outcome));
+                await signInAttemptsRepository.clear(countedIdentifiers(outcome));
             }
         },
     },
-})
+});
 ```
 
 ```typescript
@@ -1347,7 +1351,7 @@ export function accountIdentifiers(user: User | null): string[]
  * The counts an attempt is judged by: the identifier it names, whether or not an account holds it;
  * on a channel that names none, the account's own email and phone.
  */
-function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
+export function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
 {
     if (identifier)
     {

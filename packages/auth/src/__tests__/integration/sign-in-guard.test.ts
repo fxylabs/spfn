@@ -47,6 +47,9 @@
  * 19. the worked example's count of an email by each of its case spellings
  *     (#486): the package resolves them all to one account, so a count per
  *     spelling no longer bounds the guesses at it
+ * 20. the README's opening guard snippet edited away from code that compiles
+ *     against the worked example's exports: the account-keyed guard put back,
+ *     or `user: null` let through
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -215,9 +218,10 @@ const attempts = new SignInAttemptsRepository();
 
 /**
  * The README's worked example, "lock after five attempts": each of its blocks
- * is one of these modules, text for text (row 18), and rows 18 and 19 run its
- * policy. Only the temporary passwords' repository, which the README names
- * and does not show, is not a block.
+ * is one of these modules, text for text (row 18), and rows 18 and 19 run
+ * it. The README's opening guard snippet is `server.config.opening.ts` (row
+ * 20). Only the temporary passwords' repository, which the README names and
+ * does not show, is not a block.
  */
 const README_EXAMPLE = resolve(__dirname, '../fixtures/readme-sign-in-guard');
 const { signInPolicy: readmeSignInPolicy } = await import('../fixtures/readme-sign-in-guard/src/server/sign-in-policy');
@@ -1896,8 +1900,8 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
 });
 
 // ============================================================================
-// Row 18 — the README's worked example's blocks are the fixture modules, text
-// for text; it reads no database, so it runs without one
+// Rows 18 and 20 — the README's guard blocks are the fixture modules, text for
+// text; they read no database, so they run without one
 // ============================================================================
 
 describe('the README\'s sign-in guard, as printed (#486)', () =>
@@ -1914,5 +1918,12 @@ describe('the README\'s sign-in guard, as printed (#486)', () =>
         {
             expect(text, `the README's ${path}`).toBe(fixtures.get(path!));
         }
+    });
+
+    it('row 20 — the opening guard snippet is server.config.opening.ts, text for text', () =>
+    {
+        const [opening] = readmeBlocks('### The sign-in guard (`signIn`)');
+
+        expect(opening!.text).toBe(readFileSync(join(README_EXAMPLE, 'server.config.opening.ts'), 'utf8'));
     });
 });
