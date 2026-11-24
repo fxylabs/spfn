@@ -5,6 +5,7 @@
  */
 
 import { onAfterCommit } from '@spfn/core/db';
+import { authLogger } from '../logger';
 import type { InvitationSummary } from '@spfn/auth';
 import {
     invitationsRepository,
@@ -692,7 +693,7 @@ export async function cancelInvitation(
             throw new InvitationChangedError();
         }
 
-        console.log(`[Auth] ⚠️  Invitation cancelled: ${invitation.email} (reason: ${reason || 'none'})`);
+        onAfterCommit(() => authLogger.service.info('Invitation cancelled', { invitationId: id, cancelledBy }));
     }, { context: 'auth:invitation-cancel' });
 }
 
@@ -707,7 +708,7 @@ export async function deleteInvitation(id: number)
 {
     await invitationsRepository.deleteById(id);
 
-    console.log(`[Auth] 🗑️  Invitation deleted: ${id}`);
+    onAfterCommit(() => authLogger.service.info('Invitation deleted', { invitationId: id }));
 }
 
 /**
@@ -723,7 +724,7 @@ export async function expireOldInvitations()
 
     if (count > 0)
     {
-        console.log(`[Auth] ⏰ Expired ${count} old invitations`);
+        onAfterCommit(() => authLogger.service.info('Invitations expired', { count }));
     }
 
     return count;
