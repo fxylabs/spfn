@@ -19,7 +19,7 @@
 
 import { PURGE_STRATEGIES, type PurgeStrategy } from '../types';
 import { isChannelEnabled } from './channels-config';
-import { OPTION_TERMS, optionKeys, readOptions, type OptionTerms } from './stated-options';
+import { OPTION_TERMS, optionKeys, readOptions, type OptionTerms } from '@spfn/core/options';
 
 export interface AccountDeletionPurgeUser
 {

@@ -54,7 +54,7 @@ import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JWTPayload }
 import { defineMiddlewareFactory } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { authLogger } from '../logger';
-import { optionKeys, readOptions } from '../lib/stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /** How long an unknown `kid` waits before the key set is read again. */
 const KEY_SET_COOLDOWN_MS = 60_000;

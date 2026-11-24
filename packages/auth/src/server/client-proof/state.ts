@@ -32,7 +32,7 @@ import {
 } from './proof';
 import { ClientProofRefusal, newHexId } from './refusal';
 import { MemoryReplayLedger } from './replay-store';
-import { optionKeys, readEntries, readOptions } from '../lib/stated-options';
+import { optionKeys, readEntries, readOptions } from '@spfn/core/options';
 
 /** Millisecond clock. Injectable so expiry paths are testable without waiting. */
 export interface ClientProofClock

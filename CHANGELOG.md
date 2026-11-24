@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/core: `@spfn/core/options`, the rule for reading an application's options, where every
+  reader can reach it (#492).** The rule of #477 (`readOptions`, `optionKeys`, `readEntries`,
+  `readList`, `readRecords`, `OptionTerms`, `OPTION_TERMS`) lived in `@spfn/auth`'s server code,
+  which core's readers cannot import and auth's browser entries must not, and it imported
+  `node:util`, which a browser bundle replaces with a `util` whose `types.isProxy` throws. It is
+  now a public, isomorphic subpath of core, wording unchanged: for packages; an application may
+  use it. The Proxy test is taken from the running host (`process.getBuiltinModule`), so the module
+  imports no Node module: a Proxy is refused on Node and read like any object where the host
+  cannot tell (a browser or edge bundle). `@spfn/auth`'s server readers import it and behave as
+  before. Release core before auth: auth's peer-dependency floor on core is raised by the release.
+  No reader outside auth's server code is converted yet.
 - **@spfn/auth: a seat for the app inside a passkey's enrolment and revocation —
   `createAuthLifecycle({ passkey: { enrolled, revoked } })` (#493).** A passkey was written and
   revoked inside the package's transactions and the app was told only after the commit

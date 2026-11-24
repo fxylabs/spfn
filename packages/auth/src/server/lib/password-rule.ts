@@ -11,7 +11,7 @@
  * Where it is asked, and why there, is `services/password-rule.service.ts`.
  */
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /**
  * Which path is writing the password:

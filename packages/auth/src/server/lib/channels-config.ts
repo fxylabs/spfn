@@ -25,7 +25,7 @@
 
 import { ChannelDisabledError } from '@spfn/auth/errors';
 
-import { readOptions, type OptionTerms } from './stated-options';
+import { readOptions, type OptionTerms } from '@spfn/core/options';
 
 /** The channels an application can turn on or off. */
 export const AUTH_CHANNELS = [

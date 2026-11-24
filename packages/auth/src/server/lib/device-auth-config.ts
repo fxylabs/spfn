@@ -11,7 +11,7 @@
  * served, not read from an environment variable at each use.
  */
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 export interface AuthDeviceAuthConfig
 {

@@ -10,7 +10,7 @@
  * only be two chances to get it wrong.
  */
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 export interface AuthDeviceLinkConfig
 {

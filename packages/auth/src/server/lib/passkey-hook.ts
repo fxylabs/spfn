@@ -13,7 +13,7 @@
 
 import type { PasskeyEnrolledPayload, PasskeyRevokedPayload } from '../events';
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /**
  * How the passkey was revoked, as `auth.passkey.revoked` says it:

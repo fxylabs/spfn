@@ -9,7 +9,7 @@
 import { CloneType, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 
-import { optionKeys, readRecords } from './stated-options';
+import { optionKeys, readRecords } from '@spfn/core/options';
 
 export const DECLARED_KEY_PATTERN = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)*$/;
 

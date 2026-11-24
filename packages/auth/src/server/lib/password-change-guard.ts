@@ -13,7 +13,7 @@
 
 import type { User } from '../entities/users';
 
-import { optionKeys, readOptions } from './stated-options';
+import { optionKeys, readOptions } from '@spfn/core/options';
 
 /**
  * How the person set the password:

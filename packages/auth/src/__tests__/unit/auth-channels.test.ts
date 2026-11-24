@@ -16,8 +16,9 @@
  *
  * `channels` is read by the shared reader (#477): the rows for a value that is
  * not a plain object, a prototype posing as `Object.prototype` and a
- * non-enumerable misspelling are its own, in stated-options.test.ts, with the
- * row proving `configureChannels` reads through it.
+ * non-enumerable misspelling are its own, in `@spfn/core/options`' suite
+ * (#492); the row proving `configureChannels` reads through it is in
+ * stated-options.test.ts.
  */
 
 import { describe, it, expect, afterEach, onTestFinished } from 'vitest';
