@@ -292,6 +292,26 @@ describe('the gate port', () =>
         expect(calls[0].args).toEqual(['exec', 'tsc', '--noEmit']);
     });
 
+    it('runs the typecheck fallback through the install\'s binary', async () =>
+    {
+        withScripts({});
+
+        await new CommandGatePort({ database, packageManagerBinary: '/opt/pnpm-pinned', run: recording([ok()]) })
+            .run('typecheck', { cwd: root });
+
+        expect(calls[0].file).toBe('/opt/pnpm-pinned');
+    });
+
+    it('runs the script gate through the install\'s binary, not through bare pnpm', async () =>
+    {
+        withScripts({ build: 'next build' });
+
+        await new CommandGatePort({ database, packageManagerBinary: '/opt/pnpm-pinned', run: recording([ok()]) })
+            .run('build', { cwd: root });
+
+        expect(calls[0].file).toBe('/opt/pnpm-pinned');
+    });
+
     it('fails a gate the project has no way to run, rather than passing it', async () =>
     {
         withScripts({});

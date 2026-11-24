@@ -29,6 +29,8 @@ import { runResume } from '../../src/kit/operations/resume.js';
 import { createKitRemotePorts } from '../../src/kit/http/index.js';
 import { createKitLocalPorts } from '../../src/kit/local/index.js';
 import { SpfnDatabasePort } from '../../src/kit/local/database.js';
+import { CommandGatePort } from '../../src/kit/local/gates.js';
+import { runCommand } from '../../src/kit/local/process.js';
 import { HttpLicensePort } from '../../src/kit/http/control-plane.js';
 import { newCandidateCredential } from '../../src/kit/credentials.js';
 import { createChildEnv, registryNpmrc } from '../../src/kit/child-env.js';
@@ -134,10 +136,15 @@ function isolatedNpmEnv(): Record<string, string>
  *
  * The store travels with the binary rather than as the port's `--store-dir`,
  * because the release's gate runs `pnpm run build` through the same binary and
- * sees none of the install's options. pnpm 12 installs before it runs a script,
- * and against a store other than the one the install used it recreates
- * `node_modules` — with no registry session, so it empties it, warns, and runs
- * the script anyway.
+ * sees none of the install's options. Asked with `verify-deps-before-run=error`,
+ * pnpm 12.23 names why it would install before that script: "The value of the
+ * registryRoutes setting has changed" — the install's `pnpm_config__auth`
+ * routes the release's scopes, the gate's environment routes nothing — and it
+ * names that reason whether the store is the install's or another. The store
+ * decides only how that install ends: on the install's store it left the graph
+ * in place; on another (rv483) it had to fetch with no registry session, and
+ * emptied `node_modules`, warned and ran the script anyway. The kit's gates now
+ * run with that install turned off.
  *
  * Node rather than a shell script: dash drops every variable whose name is not
  * a shell identifier, and `npm_config_//host/npm/:_authToken` is one of the
@@ -334,6 +341,69 @@ function graphEmptyingBuild(marker: string): string
     return `node -e ${JSON.stringify(script)}`;
 }
 
+/**
+ * Install the release, then declare a dependency the install never saw: a
+ * local `link:` directory, so a package manager that installs before a gate
+ * can do so with no registry and no network.
+ *
+ * Two settings in the project's own configuration hold that premise wherever
+ * the file runs, so that `late` is absent only because the kit's gate installs
+ * nothing first — and the control below shows pnpm otherwise would link it:
+ *
+ * - `trustLockfile: true`. Otherwise pnpm 12 first checks the lockfile against
+ *   its supply-chain policies, which fetches registry metadata the gate holds
+ *   no session for: that install fails, warns and runs the script anyway.
+ * - `frozenLockfile: false`. The gate passes `CI` through, and under `CI` pnpm
+ *   installs with a frozen lockfile, which refuses the manifest `late` was just
+ *   added to (ERR_PNPM_OUTDATED_LOCKFILE) — and again warns and runs the
+ *   script anyway. CI sets `CI=true` for the whole job.
+ */
+async function installThenDeclareLate(): Promise<void>
+{
+    publish(await seedLockfile());
+
+    expect((await install()).status).toBe('completed');
+
+    const manifestPath = join(target, 'package.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> };
+
+    mkdirSync(join(target, 'late'));
+    writeFileSync(join(target, 'late', 'package.json'), `${JSON.stringify({ name: 'late', version: '0.0.0' })}\n`, 'utf8');
+    manifest.dependencies.late = 'link:./late';
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`, 'utf8');
+    writeFileSync(join(target, 'pnpm-workspace.yaml'), 'trustLockfile: true\nfrozenLockfile: false\n', 'utf8');
+}
+
+/** The gate port the kit runs, on the binary the install ran. */
+function pinnedGatePort(): CommandGatePort
+{
+    return new CommandGatePort({
+        database: settledDatabase,
+        packageManagerBinary: pinnedPnpmBinary(E2E_PNPM),
+        timeoutMs: 120_000,
+    });
+}
+
+/**
+ * The same gate port, but with the install guard the kit sets
+ * (`pnpm_config_verify_deps_before_run`) stripped from every call: the control
+ * for the two rows below. Each of those rows claims `late` is missing only
+ * because the kit's gate installs nothing before it runs — a claim that is
+ * only true if pnpm, left to its own `verify-deps-before-run`, really would
+ * have installed `late` here. Without this control, a premise that stopped
+ * holding (the project untrusted, the lockfile stale, the registry
+ * unreachable) would make the row's own assertion pass for the wrong reason.
+ */
+function pinnedGatePortWithoutInstallGuard(): CommandGatePort
+{
+    return new CommandGatePort({
+        database: settledDatabase,
+        packageManagerBinary: pinnedPnpmBinary(E2E_PNPM),
+        timeoutMs: 120_000,
+        run: request => runCommand({ ...request, extraEnv: undefined }),
+    });
+}
+
 function install(): ReturnType<typeof runInstall>
 {
     return runInstall({
@@ -425,6 +495,32 @@ describe.runIf(corepackCanRun(E2E_PNPM))('an install with the local ports actual
         expect(existsSync(join(target, 'node_modules', CORE.name, 'package.json'))).toBe(true);
         expect(execFileSync('git', ['log', '-1', '--format=%s'], { cwd: target }).toString().trim())
             .toBe(`chore: install ${KIT_ID} ${KIT.version}`);
+    }, 300_000);
+
+    it('installs nothing before a script gate, though the project declares a dependency the graph lacks', async () =>
+    {
+        await installThenDeclareLate();
+
+        await pinnedGatePort().run('build', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
+
+        await pinnedGatePortWithoutInstallGuard().run('build', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late')), 'control: pnpm installs before a run here').toBe(true);
+    }, 300_000);
+
+    it('installs nothing before the typecheck fallback, though the project declares a dependency the graph lacks', async () =>
+    {
+        await installThenDeclareLate();
+
+        await pinnedGatePort().run('typecheck', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late'))).toBe(false);
+
+        await pinnedGatePortWithoutInstallGuard().run('typecheck', { cwd: target });
+
+        expect(existsSync(join(target, 'node_modules', 'late')), 'control: pnpm installs before a run here').toBe(true);
     }, 300_000);
 
     it('refuses rather than resolving when the release ships a lockfile for another graph', async () =>

@@ -1889,6 +1889,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   primary; under a caller's transaction — the routes keep `Transactional()` — it is a savepoint, so
   a throw the caller catches rolls back the service's own writes. Recovery codes are still hashed
   before the transaction. No signature, route or wire change.
+- **spfn: a kit gate runs on the graph the kit installed, not on one pnpm installs before it
+  (#484).** pnpm 11 and later install before `pnpm run` and `pnpm exec` when their up-to-date
+  check says so, under the gate's configuration rather than the install's, and from 12.9.0 a
+  failed install there warns and runs the script anyway. Under pnpm 12.23 the gate after a kit
+  install did that (observed in the end-to-end test): the install's `pnpm_config__auth` routes the
+  release's scopes and the gate's environment routes nothing, which pnpm reports as "The value of
+  the registryRoutes setting has changed". Every gate
+  the package manager runs now gets `pnpm_config_verify_deps_before_run=false` in its environment
+  (`npm_config_…` is ignored by pnpm 12; a pnpm without the setting ignores it). The `typecheck`
+  gate's fallback, `pnpm exec tsc --noEmit`, now runs the configured package-manager binary — the
+  one the install ran — instead of whatever `pnpm` is on `PATH`. A release whose gate relied on
+  pnpm installing first now runs that gate on the kit's install, which every kit operation makes
+  before its gates.
 - **spfn: a kit gate's success says the release's graph was installed, and a lost graph is
   reinstalled by `spfn kit resume` (#484).** A gate is a script about the project; it exits 0 on
   an emptied `node_modules` as readily as on the release's, and nothing read the installed graph
