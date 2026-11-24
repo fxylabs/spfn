@@ -596,11 +596,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error`; they now log `rowId` — the `signup_link_tokens` or `password_reset_tokens` row — and
   `error`. `Failed to send account-exists notice` (`@spfn/auth:email` or `:sms`) logged `target`, the
   address or phone number; it now logs `error` alone. `error` is the provider's answer as
-  `@spfn/notification` returns it, already scrubbed of addresses and phone numbers, and
-  notification logs the same refusal with the recipient masked. There is no setting. A log query
-  that read `email` from the two link lines reads `rowId` instead; the notice line has no
-  replacement. The rule — a line names a person by user id or row id, never by address — is in the
-  auth README under Logging. Held by two test rows.
+  `@spfn/notification` returns it, already scrubbed of addresses and phone numbers — also when the
+  provider threw it (below) — and notification logs the same refusal with the recipient masked.
+  There is no setting. A log query that read `email` from the two link lines reads `rowId` instead;
+  the notice line has no replacement. The rule — a line names a person by an id, never by address —
+  is in the auth README under Logging, with the one set of lines that predates it (admin seeding's
+  boot lines). Held by test rows that read every `authLogger` child with `util.inspect`, so an
+  address inside a logged `Error` is seen too.
 - **@spfn/notification: a provider that throws is answered at the channel's provider boundary like
   one that returns its refusal (#489).** `sendEmail`, `sendSMS`, `sendEmailBulk` and `sendSMSBulk`
   scrubbed the error a provider *returned* but let one it *threw* pass untouched: the send rejected

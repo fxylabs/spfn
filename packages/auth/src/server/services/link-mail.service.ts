@@ -18,8 +18,8 @@
  * in `pgboss.job`, not in a log line. Nothing in this file logs a URL or a token.
  *
  * Nor a recipient: a refused send is logged by its row. `@spfn/notification`
- * logs the provider's refusal itself, with the recipient masked, and hands
- * `result.error` back scrubbed of addresses and phone numbers.
+ * logs the provider's refusal itself — returned or thrown — with the recipient
+ * masked, and hands `result.error` back scrubbed of addresses and phone numbers.
  */
 
 import { env } from '@spfn/auth/config';

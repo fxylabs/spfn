@@ -8703,16 +8703,20 @@ back on those would hide the outage behind mail that still gets through.
 The package writes its lines through `authLogger` (`@spfn/auth/server`), one child of
 `@spfn/core`'s logger per module: `@spfn/auth:service`, `:middleware`, `:email`, `:sms`, `:session`,
 `:setup`, `:plugin` and `:interceptor:*`. `SPFN_LOG_LEVEL` and core's transports apply to them as to
-any other line.
+any other line. Two Next.js modules — the OAuth callback handler and the session-cookie helpers —
+write through `@spfn/core`'s root logger instead, under the same rule.
 
-**A line names a person by user id or row id, never by address.** No e-mail address, phone number
-or name is written to a line — not as a recipient, not as the account a request was made for.
-`userId` finds the account, as on the `API access` line; a link mail's `rowId` finds its
-`signup_link_tokens` or `password_reset_tokens` row, and so the address, for whoever may read the
-table. A send the provider refused is also logged by `@spfn/notification`, with the recipient
-masked; the auth line beside it names only what auth adds — which message, and which row.
-One set of lines predates the rule: admin seeding's boot lines on `@spfn/auth:setup` still name
-the address configured in `SPFN_AUTH_ADMIN_*`.
+**A line names a person by an id, never by address.** No e-mail address, phone number or name is
+written to a line — not as a recipient, not as the account a request was made for. `userId` finds
+the account, as on the `API access` line; a link mail's `rowId` finds its `signup_link_tokens` or
+`password_reset_tokens` row, and so the address, for whoever may read the table; an admin action
+names its invitation or role by id (`Invitation cancelled { invitationId, cancelledBy }`); the
+Kakao and Naver warnings about an access token that belongs to another user name that user by the
+provider's `subject`. A send the provider refused — whether it returned the refusal or threw it —
+is also logged by `@spfn/notification`, with the recipient masked, and its error text reaches auth
+scrubbed of addresses and phone numbers; the auth line beside it names only what auth adds — which
+message, and which row. One set of lines predates the rule: admin seeding's boot lines on
+`@spfn/auth:setup` still name the address configured in `SPFN_AUTH_ADMIN_*`.
 
 ## FAQ
 
