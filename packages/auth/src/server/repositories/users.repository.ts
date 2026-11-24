@@ -18,7 +18,7 @@ import { normalizeEmail, normalizeOptionalEmail } from '../helpers/email';
 import { AccountBusyError } from '@spfn/auth/errors';
 import { isLockTimeout } from '../lib/lock-timeout';
 import type { AdmittedPasswordHash } from '../lib/password-rule';
-import { recordAccountLock } from './account-lock';
+import { lockingRoot, recordAccountLock, type AccountLockMethod } from './account-lock';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
 /**
@@ -262,6 +262,12 @@ export class UsersRepository extends AccountStateRepository
      * typed, retryable refusal — rather than meeting `statement_timeout` as a
      * connection error.
      *
+     * **Only inside a transaction.** Called with none open it throws
+     * `AccountLockOutsideTransactionError` before any statement, in every run:
+     * outside a transaction the lock would end with its own statement and its
+     * bounded wait would not apply. Wrap the call and the writes it protects in
+     * `runInTransaction` (`@spfn/core/db`).
+     *
      * **One account per transaction.** The lock is recorded on the transaction,
      * and a second account's lock in it throws `SecondAccountLockError` before
      * its statement runs — in every run, not only under test. Under test every
@@ -272,9 +278,7 @@ export class UsersRepository extends AccountStateRepository
      */
     async lockAccount(id: number): Promise<User | null>
     {
-        recordAccountLock(id);
-
-        return await this.lockAccountWhere(eq(users.id, id));
+        return await this.lockAccountWhere('lockAccount', eq(users.id, id), id);
     }
 
     /**
@@ -283,7 +287,8 @@ export class UsersRepository extends AccountStateRepository
      * the same row, the same bounded wait, the same three statements. An
      * identifier that names no account sends them too, locks nothing and
      * answers null, so a sign-in attempt does the same database work whether
-     * or not its identifier is an account's.
+     * or not its identifier is an account's — and, with no transaction open,
+     * is refused as a known one is, before any statement.
      *
      * The lock is recorded once the row is known: call it as the transaction's
      * first account lock, as a sign-in attempt's own transaction does.
@@ -292,19 +297,25 @@ export class UsersRepository extends AccountStateRepository
      */
     async lockAccountByEmailOrPhone(email?: string, phone?: string): Promise<User | null>
     {
-        const user = await this.lockAccountWhere(emailOrPhoneEquals(email, phone));
-
-        if (user)
-        {
-            recordAccountLock(user.id);
-        }
-
-        return user;
+        return await this.lockAccountWhere('lockAccountByEmailOrPhone', emailOrPhoneEquals(email, phone));
     }
 
-    /** `lockAccount`'s statements: the row `where` names, locked under the bounded `lock_timeout`. */
-    private async lockAccountWhere(where: SQL): Promise<User | null>
+    /**
+     * `lockAccount`'s statements: the row `where` names, locked under the
+     * bounded `lock_timeout`. Refused before the first of them when no
+     * transaction is open. The lock is recorded before them when the caller
+     * names the account (`id`), so a second account is refused before its
+     * statement; otherwise once the row is known.
+     */
+    private async lockAccountWhere(method: AccountLockMethod, where: SQL, id?: number): Promise<User | null>
     {
+        const root = lockingRoot(method, id);
+
+        if (id !== undefined)
+        {
+            recordAccountLock(root, id);
+        }
+
         const [setting] = await this.db.execute<{ previous: string }>(
             sql`select current_setting('lock_timeout') as previous, set_config('lock_timeout', ${String(ACCOUNT_LOCK_TIMEOUT_MS)}, true)`,
         );
@@ -317,7 +328,14 @@ export class UsersRepository extends AccountStateRepository
 
         await this.db.execute(sql`select set_config('lock_timeout', ${setting!.previous}, true)`);
 
-        return result[0] ?? null;
+        const user = result[0] ?? null;
+
+        if (user && id === undefined)
+        {
+            recordAccountLock(root, user.id);
+        }
+
+        return user;
     }
 
     /**

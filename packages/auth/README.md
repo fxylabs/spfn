@@ -4675,7 +4675,8 @@ against: the TOTP step newer than the last spent, the recovery code unused, the 
 unconfirmed, the WebAuthn challenge unspent; and the budget is asked again there.
 
 An app route that takes a second-factor proof calls it the same way, outside a transaction, then
-spends what it answers under the account lock in its own:
+spends what it answers under the account lock in its own — `usersRepository.lockAccount` and
+`spend()` refuse to run with none open (`AccountLockOutsideTransactionError`):
 
 ```typescript
 import { runInTransaction } from '@spfn/core/db';
@@ -6990,7 +6991,8 @@ service called from application code with no transaction open is as atomic as th
 the TOTP enrolment's start, recovery-code regeneration, a passkey's second-factor mark, an OAuth
 unlink, the device-code poll and the device link's redeem, deny, cancel and poll among them.
 `assertNotLastListedFactor` and a passkey proof's `spend()` are the exception: they lock on behalf
-of the caller's write and open nothing, so call them inside the transaction that writes.
+of the caller's write and open nothing, so call them inside the transaction that writes — with
+none open they refuse, as the lock does.
 
 Which writers those are is derived, not listed: every repository over a table that holds an
 account's credential state extends `AccountStateRepository`, whose `accountWrites` classifies
@@ -7003,9 +7005,32 @@ not a connection error. **`usersRepository.lockAccount(id)` can therefore reject
 `AccountBusyError`** — an application calling it in its own transaction lets that error reach
 the error handler, or answers it as a retry. A transaction holds one account's lock at most: a
 second account's lock throws `SecondAccountLockError` (an internal error, in every run, not only
-under test). An OAuth sign-in whose link moved between its read and its lock runs again (a second
+under test). **The lock is taken only inside a transaction:** `usersRepository.lockAccount` and
+`lockAccountByEmailOrPhone` called with none open throw `AccountLockOutsideTransactionError`
+(exported from `@spfn/auth/server`; an internal error, answered 500, in every run) before any
+statement — a known account and an unknown identifier alike — because outside a transaction the
+lock would end with its own statement and its bounded wait would not apply. The message names the
+method and, for `lockAccount(id)`, the account id; never an email or a phone. An OAuth sign-in whose link moved between its read and its lock runs again (a second
 time answers `OAuthSignInContendedError`). `renewSession()` answers a 503 as
 `{ ok: false, reason: 'busy' }` — retry, the session is not over.
+
+> **BREAKING — the account lock refuses outside a transaction (#494).** Application code that calls
+> `usersRepository.lockAccount`, `usersRepository.lockAccountByEmailOrPhone`,
+> `assertNotLastListedFactor` (while the policy requires a second factor) or a passkey proof's
+> `spend()` with no transaction open now throws `AccountLockOutsideTransactionError`; before, the
+> call went ahead and locked nothing past its own statement. Migration: wrap the call and the
+> writes it protects in `runInTransaction` from `@spfn/core/db`:
+>
+> ```typescript
+> import { runInTransaction } from '@spfn/core/db';
+> import { usersRepository } from '@spfn/auth/server';
+>
+> await runInTransaction(async () =>
+> {
+>     await usersRepository.lockAccount(userId);
+>     // ...the writes the lock protects
+> });
+> ```
 
 The tables in that set include the OAuth 2.1 grants, codes and tokens and the WebAuthn
 challenges. A consent locks the account and admits the approving session again under the lock
@@ -7043,7 +7068,8 @@ lock never waits behind a table-wide rewrite.
 > `approveOAuth2AuthorizeService(params, { userId, credential })`;
 > `mfaChallengesRepository.findAccountsWithFinished` and
 > `mfaTotpRepository.findAccountsUnconfirmedBefore` take a `limit`. Call the writers under
-> `usersRepository.lockAccount` in a transaction.
+> `usersRepository.lockAccount` in a transaction (outside one the lock throws
+> `AccountLockOutsideTransactionError`).
 
 > **BREAKING — `updateUserService` no longer takes `status`.** It is removed from the type
 > (`UserUpdate` = `Omit<Partial<NewUser>, 'status'>`), and `usersRepository.updateById` refuses
