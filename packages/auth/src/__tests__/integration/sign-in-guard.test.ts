@@ -1033,6 +1033,26 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(locks.seen).toHaveLength(1);
     });
 
+    /**
+     * Until a statement on this database waits on a lock: asked back to back,
+     * no clock between the questions.
+     */
+    async function untilAStatementWaitsOnALock(): Promise<void>
+    {
+        for (let asked = 0; asked < 1_000; asked++)
+        {
+            const [row] = await getTestDb().execute(sql`select count(*)::int as waiting from pg_stat_activity
+                where datname = current_database() and wait_event_type = 'Lock'`) as unknown as Array<{ waiting: number }>;
+
+            if (row!.waiting > 0)
+            {
+                return;
+            }
+        }
+
+        expect.fail('no statement waited on a lock');
+    }
+
     it('row 6c — a refusal report that cannot be written after the rollback: the 403 stands, and the package logs the attempt', async () =>
     {
         const owner = await seedUser('lost@test.com');
@@ -1040,10 +1060,13 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         const busy = deviceKeyBody();
         const throwing = deviceKeyBody();
         const logged = vi.spyOn(authLogger.service, 'error');
+        const release = deferred();
         let holder: Promise<unknown> | null = null;
 
-        // Another writer takes the account's lock while the session's
-        // transaction decides, and holds it past the report's five seconds.
+        // Another writer queues for the account's lock while the session's
+        // transaction decides — ahead of the report, which asks only after the
+        // rollback — and holds it until the refusal is answered: the report's
+        // wait runs out first, whatever the clocks do.
         policy.admit = async () =>
         {
             if (getTransactionContext() && !holder)
@@ -1051,14 +1074,23 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
                 holder = observer.begin(async (tx) =>
                 {
                     await tx`select id from spfn_auth.users where id = ${owner.id} for update`;
-                    await new Promise(resolve => setTimeout(resolve, 6_500));
+                    await release.promise;
                 });
+                await untilAStatementWaitsOnALock();
             }
 
             return LOCKED;
         };
-        await expectRefused(await passkeyLogin(authenticator, ORIGIN, busy));
-        await holder;
+
+        try
+        {
+            await expectRefused(await passkeyLogin(authenticator, ORIGIN, busy));
+        }
+        finally
+        {
+            release.resolve();
+            await holder;
+        }
 
         policy.settled = async () =>
         {
