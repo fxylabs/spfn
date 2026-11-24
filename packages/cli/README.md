@@ -1519,6 +1519,9 @@ step with `KIT_GATE_FAILED` (exit 3), `evidence.gate: "installed-graph"`, `when`
 `after`), and the first such package with its `expected` and `actual` version; nothing is
 committed. `kit install`, `kit update` and `kit restore` also read it right after
 `pnpm install`, and refuse a graph the release does not pin with `KIT_UNSUPPORTED_RESOLUTION`.
+Every gate pnpm runs — `pnpm run <script>`, and `pnpm exec tsc --noEmit` through the same pnpm
+binary the install used — gets `pnpm_config_verify_deps_before_run=false`, so pnpm 11 and later
+do not install again before the script: the graph a gate checks is the one the kit installed.
 
 **A lost graph is reinstalled by a resume.** On `spfn kit resume` the install step re-reads
 that same graph. When every package that differs is absent, the graph is the step's own effect

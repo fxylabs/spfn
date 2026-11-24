@@ -134,10 +134,15 @@ function isolatedNpmEnv(): Record<string, string>
  *
  * The store travels with the binary rather than as the port's `--store-dir`,
  * because the release's gate runs `pnpm run build` through the same binary and
- * sees none of the install's options. pnpm 12 installs before it runs a script,
- * and against a store other than the one the install used it recreates
- * `node_modules` — with no registry session, so it empties it, warns, and runs
- * the script anyway.
+ * sees none of the install's options. Asked with `verify-deps-before-run=error`,
+ * pnpm 12.23 names why it would install before that script: "The value of the
+ * registryRoutes setting has changed" — the install's `pnpm_config__auth`
+ * routes the release's scopes, the gate's environment routes nothing — and it
+ * names that reason whether the store is the install's or another. The store
+ * decides only how that install ends: on the install's store it left the graph
+ * in place; on another (rv483) it had to fetch with no registry session, and
+ * emptied `node_modules`, warned and ran the script anyway. The kit's gates now
+ * run with that install turned off.
  *
  * Node rather than a shell script: dash drops every variable whose name is not
  * a shell identifier, and `npm_config_//host/npm/:_authToken` is one of the
