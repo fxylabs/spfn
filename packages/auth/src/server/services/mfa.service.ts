@@ -767,6 +767,15 @@ export async function startTotpEnrolmentService(
     credential: PrincipalCredential,
 ): Promise<TotpEnrolmentResult>
 {
+    return await runInTransaction(
+        () => startLockedTotpEnrolment(userId, credential),
+        { context: 'auth:mfa-totp-enrol' },
+    );
+}
+
+/** The enrolment's start, run in `startTotpEnrolmentService`'s transaction. */
+async function startLockedTotpEnrolment(userId: number, credential: PrincipalCredential): Promise<TotpEnrolmentResult>
+{
     const account = await usersRepository.lockAccount(userId);
     const existing = await mfaTotpRepository.findByUserId(userId);
 
@@ -965,16 +974,20 @@ async function issueRecoveryCodes(userId: number, minted: MintedRecoveryCode[]):
  */
 export async function regenerateRecoveryCodesService(userId: number): Promise<{ recoveryCodes: string[] }>
 {
+    // Hashed before the transaction: no password hash runs under the lock.
     const minted = await generateRecoveryCodes();
 
-    await usersRepository.lockAccount(userId);
-
-    if (!await mfaEnrolledForUser(userId))
+    return await runInTransaction(async () =>
     {
-        throw new MfaNotEnrolledError();
-    }
+        await usersRepository.lockAccount(userId);
 
-    return { recoveryCodes: await issueRecoveryCodes(userId, minted) };
+        if (!await mfaEnrolledForUser(userId))
+        {
+            throw new MfaNotEnrolledError();
+        }
+
+        return { recoveryCodes: await issueRecoveryCodes(userId, minted) };
+    }, { context: 'auth:recovery-regenerate' });
 }
 
 /**
@@ -1082,6 +1095,15 @@ export interface MarkPasskeyParams
  * @throws SecondFactorRequiredError when unmarking would leave no listed factor under a required policy
  */
 export async function markPasskeySecondFactorService(params: MarkPasskeyParams): Promise<MfaStatus>
+{
+    return await runInTransaction(
+        () => markLockedPasskey(params),
+        { context: 'auth:mfa-passkey-mark' },
+    );
+}
+
+/** The mark, run in `markPasskeySecondFactorService`'s transaction. */
+async function markLockedPasskey(params: MarkPasskeyParams): Promise<MfaStatus>
 {
     await usersRepository.lockAccount(params.userId);
 

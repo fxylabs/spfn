@@ -404,6 +404,15 @@ async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResu
  */
 export async function redeemDeviceLinkService(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLinkResult>
 {
+    return await runInTransaction(
+        () => parkKey(params),
+        { context: 'auth:device-link-redeem' },
+    );
+}
+
+/** The redeem, run in `redeemDeviceLinkService`'s transaction. */
+async function parkKey(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLinkResult>
+{
     // Checked now, as `startDeviceAuthService` does: the fingerprint prefix is
     // what the issuer recognises the device by, and a key that cannot sign for
     // its declared algorithm must not reach the issuer's screen at all.
@@ -540,11 +549,14 @@ async function approve(record: DeviceLinkRecord, linkId: string): Promise<Device
 /** The issuer refused the device, so it is told no instead of timing out. */
 export async function denyDeviceLinkService(params: DeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
-    const record = await lockIssuedLink(params);
+    return await runInTransaction(async () =>
+    {
+        const record = await lockIssuedLink(params);
 
-    assertAwaitingDecision(record);
+        assertAwaitingDecision(record);
 
-    return describeLink(await refuse(record, 'refused'));
+        return describeLink(await refuse(record, 'refused'));
+    }, { context: 'auth:device-link-deny' });
 }
 
 async function refuse(record: DeviceLinkRecord, reason: DeviceLinkDeniedReason): Promise<DeviceLink>
@@ -568,6 +580,15 @@ async function refuse(record: DeviceLinkRecord, reason: DeviceLinkDeniedReason):
  * a device holding its code — or already showing a match number — is told so.
  */
 export async function cancelDeviceLinkService(params: DeviceLinkParams): Promise<DeviceLinkStatusResult>
+{
+    return await runInTransaction(
+        () => cancelIssuedLink(params),
+        { context: 'auth:device-link-cancel' },
+    );
+}
+
+/** The cancel, run in `cancelDeviceLinkService`'s transaction. */
+async function cancelIssuedLink(params: DeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
     const record = await lockIssuedLink(params);
 
@@ -599,6 +620,18 @@ export async function cancelDeviceLinkService(params: DeviceLinkParams): Promise
  * nothing — and of two polls arriving together exactly one registers the key.
  */
 export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promise<PollDeviceAuthResult>
+{
+    return await runInTransaction(
+        () => judgeLinkPoll(params),
+        { context: 'auth:device-link-poll' },
+    );
+}
+
+/**
+ * The poll, run in `pollDeviceLinkService`'s transaction: the spend and the key
+ * it registers commit together, or neither does.
+ */
+async function judgeLinkPoll(params: PollDeviceLinkParams): Promise<PollDeviceAuthResult>
 {
     const deviceCodeHash = hashDeviceCode(params.deviceCode);
     const record = assertReachable(await deviceLinksRepository.findByDeviceCodeHash(deviceCodeHash));

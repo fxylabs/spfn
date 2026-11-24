@@ -3378,7 +3378,10 @@ two ways in are indistinguishable.
 - **A long poll holds no transaction.** The wait is route middleware in front of the poll's
   `Transactional()`, so a waiting device does not pin a pooled connection, and the answer is
   judged inside the transaction exactly as a poll without `waitMillis` is — same atomicity,
-  same database-error answers. Approve, deny and a global revocation wake a poll parked in the
+  same database-error answers. The poll services (`pollDeviceAuthService`,
+  `pollDeviceLinkService`) open their own transaction around the judgement, a savepoint under the
+  route's: called from application code with no transaction open, the spent record and the
+  registered key still commit together, or neither does. Approve, deny and a global revocation wake a poll parked in the
   same process after they commit. A poll parked on another instance re-reads its record every
   second, so an approval committed elsewhere reaches it within about a second. A device that
   hangs up mid-wait is not judged, so an approval it can no longer hear waits for its next poll;
@@ -6981,7 +6984,13 @@ locks the account row, asks the account half of the admission, and takes the key
 from that same read. A suspension committing meanwhile waits for the key and then revokes it, or
 the key is refused with the answer the channel gives a non-active account. The account row is
 the one lock every writer of an account's credential state takes first — see
-`usersRepository.lockAccount`.
+`usersRepository.lockAccount`. Every exported service that takes it opens its own transaction
+around the whole act — a savepoint under a caller's, the route's `Transactional()` included — so a
+service called from application code with no transaction open is as atomic as through its route:
+the TOTP enrolment's start, recovery-code regeneration, a passkey's second-factor mark, an OAuth
+unlink, the device-code poll and the device link's redeem, deny, cancel and poll among them.
+`assertNotLastListedFactor` and a passkey proof's `spend()` are the exception: they lock on behalf
+of the caller's write and open nothing, so call them inside the transaction that writes.
 
 Which writers those are is derived, not listed: every repository over a table that holds an
 account's credential state extends `AccountStateRepository`, whose `accountWrites` classifies
