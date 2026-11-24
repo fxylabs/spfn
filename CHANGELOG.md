@@ -1837,6 +1837,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `concurrency` group with `queue: max`: runs of one package never overlap, and a waiting run is
   queued, not cancelled as under the default `queue: single`. The workflow's `create_tag` check asks the per-version document instead of
   `npm view`, whose packument npmjs's CDN keeps for 300 s.
+- **Release: the npmjs republish publishes under one constant temporary dist-tag, `publishing`, and
+  removes nothing (#487).** #474 published each version under `publishing-<version>` and deleted that
+  tag once the channel tag and `latest` had moved; npmjs refuses a dist-tag delete to the publishing
+  credential, which adds and moves tags in the same run. All eight 0.4.0-beta.6 runs therefore ended
+  red after an otherwise complete release (published, served, integrity the same as Gitea's, channel
+  tag and `latest` moved):
+
+  ```
+  npm error code E403
+  npm error 403 403 Forbidden - DELETE https://registry.npmjs.org/-/package/@spfn%2fcore/dist-tags/publishing-0.4.0-beta.6
+  ```
+
+  Every publish now goes out with `--tag publishing`, the same name for every version of a package;
+  each publish moves it, and the run never deletes it. The channel tag and `latest` still move only
+  after npmjs serves the version, by the forward-only rule, which neither reads nor moves `publishing`.
+  The per-package queue keeps runs of one package from overlapping; two versions can still be
+  processing at once (a run that ended `not-served`, then the next queued run), and npmjs then moves
+  `publishing` twice in an order nothing controls — harmless, since it is not a channel tag and
+  nothing reads it. A re-dispatch of a version npmjs already has goes through the already-published
+  path and ends green. Removed from `scripts/lib/republish.mjs`: the export `publishTagOf(version)`,
+  the removal step and its fresh read after a failed `npm dist-tag rm`, and the "Only the temporary
+  dist-tag … is left" error; new export `PUBLISH_TAG = "publishing"`. The eight `publishing-<version>`
+  tags 0.4.0-beta.6 left on npmjs are harmless and can be removed only by a login allowed to delete
+  dist-tags. Push runs never create a git tag (`create_tag` is a dispatch input), so no version has
+  ever had one. Backfilling the beta.6 tags is optional and the owner's choice: a dispatch from `main`
+  with `create_release=true` per package (`.github/PUBLISHING.md`), which also publishes eight GitHub
+  prereleases. If done, run it before any of the eight packages moves version again
+  (`scripts/version-commit.mjs` resolves the commit at run time, from the version on `main`), check
+  afterwards that the eight tags exist, and note that a tag that exists only on GitHub may be removed
+  by the Gitea mirror sync (not verified).
+- **Release: `Create GitHub release` fails when it creates nothing (#487).** It ran
+  `gh release create … || echo "::warning::…"` (since 526c8d70, so that a failed release would not
+  redden a publish that had succeeded), so a dispatch asked for a release that made neither the
+  release nor the tag ended green. It now reads first: a published release on the version's tag, with
+  the tag on the commit that set the version, counts as done; a tag on another commit fails the step
+  (GitHub ignores `--target` for an existing tag); every other failure of `gh release create` fails
+  the step.
 
 - **@spfn/core, @spfn/mcp: a stream says no intermediary may transform it — `Cache-Control: no-cache,
   no-transform` (spfn/spfn#174).** The Next.js server (`next start`, `next dev`) runs the `compression`

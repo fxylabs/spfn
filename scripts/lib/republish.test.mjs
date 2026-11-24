@@ -13,7 +13,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GITEA_POLL_MS, GITEA_WAIT_MS, NOT_SERVED, NPMJS_POLL_MS, NPMJS_WAIT_MS, publishTagOf, republish, runDependencies } from "./republish.mjs";
+import { GITEA_POLL_MS, GITEA_WAIT_MS, NOT_SERVED, NPMJS_POLL_MS, NPMJS_WAIT_MS, PUBLISH_TAG, republish, runDependencies } from "./republish.mjs";
 
 const NAME = "@spfn/core";
 const VERSION = "1.0.0-beta.1";
@@ -131,7 +131,8 @@ const CANNOT_PUBLISH_OVER = "npm error code E403\nnpm error 403 403 Forbidden - 
  * would: `publish` is accepted into processing (`state.pollsUntilServed`
  * asks before it is served) or refused with `state.refusal` while the version
  * is there or processing; `dist-tag add` works on a version still processing,
- * as npm documents, and `dist-tag rm` fails on a tag that is not there, as npm's does.
+ * as npm documents, and `dist-tag rm` is refused, as npmjs refuses it to the
+ * publishing credential (#487).
  */
 function fakeNpm(state, npmCalls)
 {
@@ -152,7 +153,7 @@ function fakeNpm(state, npmCalls)
         }
         if (args[0] === "dist-tag" && args[1] === "rm")
         {
-            return removeTag(state, args[3]);
+            return { status: 1, stderr: `npm error code E403\nnpm error 403 403 Forbidden - DELETE ${args[3]}` };
         }
         if (args[0] === "dist-tag")
         {
@@ -162,20 +163,6 @@ function fakeNpm(state, npmCalls)
 
         return { status: 0, stderr: "" };
     };
-}
-
-function removeTag(state, tag)
-{
-    if (!state.tags?.[tag])
-    {
-        return { status: 1, stderr: `npm error ${tag} is not a dist-tag on ${NAME}` };
-    }
-
-    const { [tag]: _removed, ...rest } = state.tags;
-
-    state.tags = rest;
-
-    return { status: 0, stderr: "" };
 }
 
 function deps(t, origin, state, overrides = {})
@@ -358,7 +345,7 @@ test("a version finishing after a newer one leaves latest and its channel tag on
     const d = deps(t, origin, state, { version: "1.0.0-beta.9" });
 
     assert.equal(await republish(d), "published");
-    assert.deepEqual(state.tags, { beta: newer, latest: newer });
+    assert.deepEqual(state.tags, { beta: newer, latest: newer, [PUBLISH_TAG]: "1.0.0-beta.9" });
 });
 
 // Unnoticed without it: a version published under its channel's tag gets
@@ -384,13 +371,12 @@ test("a version served after a newer one took its channel tag leaves the channel
     });
 
     assert.equal(await republish(d), "published");
-    assert.deepEqual(state.tags, { beta: newer, latest: newer });
+    assert.deepEqual(state.tags, { beta: newer, latest: newer, [PUBLISH_TAG]: "1.0.0-beta.9" });
 });
 
 // Unnoticed without it: `npm publish` succeeds and `npm dist-tag add … latest`
 // fails; "Re-run failed jobs" replays the push, finds the same bytes on npmjs
-// and would end green with `latest` never moved, and with the run's publish
-// tag left on the version for good.
+// and would end green with `latest` never moved.
 test("a re-run after a failed dist-tag moves latest on a version npmjs already has", async (t) =>
 {
     const state = { tags: { beta: "1.0.0-beta.0", latest: "1.0.0-beta.0" } };
@@ -402,10 +388,10 @@ test("a re-run after a failed dist-tag moves latest on a version npmjs already h
 
     failing.npm = (args) => args[3] === "latest" ? { status: 1, stderr: "npm error code E403" } : recorder(args);
     await assert.rejects(republish(failing), /npm dist-tag for @spfn\/core@1\.0\.0-beta\.1 exited with 1/);
-    assert.deepEqual(state.tags, { beta: VERSION, latest: "1.0.0-beta.0", [publishTagOf(VERSION)]: VERSION });
+    assert.deepEqual(state.tags, { beta: VERSION, latest: "1.0.0-beta.0", [PUBLISH_TAG]: VERSION });
 
     assert.equal(await republish(deps(t, origin, state)), "already-published");
-    assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
+    assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION, [PUBLISH_TAG]: VERSION });
 });
 
 // Unnoticed without it: Gitea's metadata without a sha512 and npmjs's
@@ -535,7 +521,7 @@ test("a version npmjs serves only after processing is waited for, compared, and 
 
     assert.equal(await republish(d), "published");
     assert.equal(d.clock.now(), 3 * NPMJS_POLL_MS);
-    assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
+    assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION, [PUBLISH_TAG]: VERSION });
     assert.equal(state.taggedWhileProcessing, false);
     assert.equal(published(d).length, 1);
 });
@@ -582,10 +568,10 @@ for (const [answer, refusal] of [
         state.gitea = giteaDist(origin);
         const d = deps(t, origin, state);
 
-        state.processing = { dist: { integrity: integrity(TARBALL) }, tag: publishTagOf(VERSION), polls: 2 };
+        state.processing = { dist: { integrity: integrity(TARBALL) }, tag: PUBLISH_TAG, polls: 2 };
         assert.equal(await republish(d), "already-published");
         assert.equal(d.clock.now(), NPMJS_POLL_MS);
-        assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION });
+        assert.deepEqual(state.tags, { beta: VERSION, latest: VERSION, [PUBLISH_TAG]: VERSION });
         assert.equal(state.taggedWhileProcessing, false);
         assert.equal(published(d).length, 1);
     });

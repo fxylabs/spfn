@@ -98,21 +98,28 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 - npmjs 에 그 버전이 이미 있으면 integrity 를 비교한다. 같으면 아래 dist-tag 규칙만 다시
   적용하고 초록, **다르면 빨강** — 한 버전이 두 tarball 로 갈라진 상태이고, 어느 레지스트리에서도
   버전을 바꿔 올릴 수 없으므로 그 버전은 고칠 수 없다. 다음 버전부터 하나로 맞는다.
-- 없으면 `npm publish <파일> --access public --tag publishing-<version> --registry https://registry.npmjs.org/ --provenance`
+- 없으면 `npm publish <파일> --access public --tag publishing --registry https://registry.npmjs.org/ --provenance`
   로 올린다. **채널 tag 로 올리지 않는다**: `npm publish` 의 `--tag` 는 npmjs 가 처리를 마칠 때 —
   몇 분 뒤, 아래 규칙 밖에서 — 붙이므로, 채널 tag 로 올리면 더 새 버전이 먼저 처리를 마친 경우 그
   tag 가 뒤로 간다. npm 은 tag 없이 올릴 수 없으니(`--tag` 를 빼면 `latest`) 규칙이 다루지 않는
-  **버전마다 다른** 임시 tag `publishing-<version>`(예: `publishing-0.4.0-beta.6`)으로 올리고, 채널
-  tag 와 `latest` 는 npmjs 가 버전을 내준 뒤 스크립트가 규칙대로 옮긴 다음 그 임시 tag 를 지운다.
-  npm 이 tag 이름으로 거절하는 것은 SemVer range 로 읽히는 이름과 `encodeURIComponent` 가 바꾸는
-  글자가 든 이름이다(npm 12.2.3 `publish`·`dist-tag add`·npm-package-arg) — alpha·beta·안정 버전
-  모두 해당하지 않는다(`+build` 접미사는 걸리지만 쓰는 패키지가 없다). 이름이 버전마다 달라서 실행은
-  자기 버전의 tag 만 지운다. 죽은 실행이 남긴 tag 도 이름에 버전이 있고, 그 버전의 재실행(이미 있는
-  버전 경로 포함)이 지운다. `npm dist-tag rm` 은 이미 없는 tag 에 실패하므로, 실패하면 dist-tag 를
-  다시 읽어 그 tag 가 없으면 지운 것으로 친다(같은 버전의 다른 실행이 먼저 지운 경우). 그 밖의 실패
-  (인증, 레지스트리, 네트워크)는 실패로 남고, 메시지가 "릴리스는 나머지가 다 끝났고 임시 tag
-  `publishing-<version>` 만 남았다" 고, 지우는 방법(`npm dist-tag rm <name> publishing-<version>` 또는
-  재실행)과 함께 말한다.
+  **패키지마다 하나뿐인 고정** 임시 tag `publishing`(`PUBLISH_TAG`)으로 올리고, 채널 tag 와 `latest` 는
+  npmjs 가 버전을 내준 뒤 스크립트가 규칙대로 옮긴다. `publishing` 은 **아무도 지우지 않는다** —
+  npmjs 는 배포 토큰의 dist-tag 삭제를 거절하고(아래 "0.4.0-beta.6"), 다음 publish 가 어차피
+  옮긴다. npm 이 tag 이름으로 거절하는 것은 SemVer range 로 읽히는 이름과 `encodeURIComponent` 가
+  바꾸는 글자가 든 이름이다(npm 12.2.3 `publish`·`dist-tag add`·npm-package-arg) — `publishing` 은
+  어느 쪽도 아니다.
+- **`publishing` 이 어느 버전을 가리키든 설치는 달라지지 않는다.** 채널 tag 가 아니고, 규칙은 이
+  tag 를 읽지도 옮기지도 않으며(`tagsToMove` 는 채널 tag 와 `latest` 만 본다), 워크플로우·스크립트
+  어디서도 읽지 않는다. 맨 `npm install` 은 `latest` 만 쓰고, `<pkg>@publishing` 을 일부러 적지 않는 한
+  아무 설치도 이 tag 를 거치지 않는다. 한 패키지의 실행은 겹치지 않지만(아래 `concurrency`), 두 버전이
+  동시에 처리 중일 수는 있다: v9 의 실행이 15분 안에 내주지 않아 `not-served` 로 끝나고, 대기열의
+  다음 실행이 v10 을 publish 하는데 v9 가 아직 처리 중인 경우다. 그러면 npmjs 가 처리를 마칠 때마다
+  `publishing` 을 옮기므로 두 번 옮기고, 그 순서는 우리가 정하지 않는다 — v9 가 나중에 끝나면
+  `publishing` 은 v9 에 남는다. 그래도 v10 의 실행은 v10 을 내준 뒤 채널 tag 와 `latest` 를 규칙대로
+  v10 에 두고, v9 의 처리 끝은 `publishing` 만 건드린다. 나중에 v9 를 재실행하면 이미 있는 버전 경로로
+  가서 v10 에 있는 tag 를 뒤로 옮기지 않고("left npmjs's … dist-tag on 1.0.0-beta.10") 초록으로
+  끝난다. (v9 처리 중이라 npmjs 가 v10 의 publish 를 E409 로 거절하면 — 알려져 있으나 측정하지
+  않았다 — v10 의 실행은 기다리다 `not-served` 로 끝나고, 재실행이 publish 한다.)
 - **npmjs 는 publish 를 받은 뒤 처리하고 나서야 그 버전을 내준다.** `npm publish` 는 버전·tarball·
   `--tag` 를 PUT 한 번에 보내고 레지스트리가 받았다고(2xx) 답하면 끝난다 — 로그의 "Your package is
   being processed and may take a few minutes to become available." 는 그 응답의 `npm-notice`
@@ -188,14 +195,20 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
   `GITEA_PACKAGES_READ_TOKEN=… node scripts/republish-from-gitea.mjs packages/core --dry-run`.
 - **git tag `<name>@<version>` 은 그 버전을 정한 커밋에 붙는다** — 실행이 도는 커밋이 아니다.
   `scripts/version-commit.mjs` 가 `package.json` 의 first-parent 이력을 거슬러 `version` 이
-  지금 값으로 마지막으로 바뀐 커밋을 찾는다. tag 는 그 커밋의 실행만 만든다: 버전을 움직인
-  push(그 push 에 뒤 커밋이 더 있어도), 그 커밋에서 시작한 workflow_dispatch, 그리고 그 둘의
-  재실행. 뒤의 `main` head 에서 돌린 workflow_dispatch 는 `create_tag` 를 켜도 tag 를 만들지
-  않고, 로그와 요약에 "Not tagging …: the version was set in <커밋> and this run is at <커밋>" 이라고
-  남긴다.
+  지금 값으로 마지막으로 바뀐 커밋을 찾는다. **tag 는 그걸 요청한 workflow_dispatch 만 만든다**:
+  그 커밋에서 시작해 `create_tag` 를 켠 실행(과 그 재실행), 또는 `create_release` 를 켠 실행(아래
+  Release 단계가 tag 가 없으면 그 커밋에 만든다). 뒤의 `main` head 에서 돌린 workflow_dispatch 는
+  `create_tag` 를 켜도 tag 를 만들지 않고, 로그와 요약에 "Not tagging …: the version was set in
+  <커밋> and this run is at <커밋>" 이라고 남긴다. **push 실행은 tag 를 만든 적이 없다**:
+  `create_tag` 는 workflow_dispatch 의 입력이고 열네 caller 는 push 에 `inputs.create_tag || false`,
+  곧 `false` 를 넘긴다(#463 이전부터 그랬다). 지금까지 어느 버전도 git tag 가 없는 이유다.
 - GitHub Release 는 자동으로 만들지 않는다. workflow_dispatch 의 `create_release` 를 켜면
   그 버전 태그로 Release 를 만든다 — 노트는 자동 생성이고, alpha/beta 는 prerelease 다. tag 가
-  아직 없으면 gh 가 그 버전을 정한 커밋에 만든다.
+  아직 없으면 gh 가 그 버전을 정한 커밋에 만든다. tag 가 다른 커밋에 있으면 실패한다(GitHub 은
+  이미 있는 tag 에는 `--target` 을 쓰지 않는다). 그 커밋의 tag 에 이미 게시된 Release 가 있으면
+  앞 실행이 끝낸 것으로 보고 넘어가고 — 만들기 전에 `gh release view` 와 `git ls-remote` 로
+  확인한다 — 그 밖의 실패는 모두 단계를 실패시킨다. 이 수정(#487) 전에는 `gh release create … || echo
+  "::warning::…"` 라서, Release 도 tag 도 못 만든 실행이 초록으로 끝났다.
 - unscoped `spfn` CLI 의 tarball 에는 `publishConfig.registry`(Gitea) 가 들어 있다 — 로컬
   `npm run publish:*` 가 npmjs 로 새지 않게 하는 핀이다. 예전 워크플로우는 publish 전에 이
   키를 지웠고, 그래서 `spfn` 의 npmjs tarball 은 Gitea 것과 항상 달랐다. 이제 tarball 을 건드리지
@@ -242,6 +255,54 @@ curl -s https://registry.npmjs.org/@spfn%2Fauth
 않는다. 남은 구멍은 하나 — 로컬 publish 가 Gitea 가 아니라 npmjs 로 나가는 경우(`~/.npmrc` 에
 `@spfn:registry` 가 없을 때) 다. 그러면 npmjs 워크플로우가 integrity 불일치로 빨갛게 끝나서
 드러나지만, 그 버전은 갈라진 채로 남는다.
+
+### 0.4.0-beta.6 — npmjs 가 임시 tag 삭제를 거절했다 (#487)
+
+#474 는 버전마다 다른 임시 tag `publishing-<version>` 으로 올리고, 채널 tag 와 `latest` 를 옮긴 뒤
+그 tag 를 `npm dist-tag rm` 으로 지웠다. 그 흐름을 처음 탄 0.4.0-beta.6 (여덟 패키지, push
+2026-11-24 04:48Z) 에서 여덟 실행 모두 publish·대기·integrity 비교(Gitea 와 같음)·채널 tag 와
+`latest` 이동까지 마친 뒤 마지막 삭제에서 실패했다:
+
+```
+npm error code E403
+npm error 403 403 Forbidden - DELETE https://registry.npmjs.org/-/package/@spfn%2fcore/dist-tags/publishing-0.4.0-beta.6
+```
+
+같은 토큰이 같은 실행에서 dist-tag 를 붙이고 옮겼는데 삭제만 거절됐다 — 배포 토큰에 dist-tag 삭제
+권한이 없다. review 는 publish 할 수 없어서 첫 릴리스 전에는 아무것도 이 경로를 타지 않았다. 그래서
+임시 tag 는 이제 패키지마다 하나, `publishing` 이고 아무도 지우지 않는다(위). `publishTagOf` 는
+없어졌다(`PUBLISH_TAG` 가 대신한다).
+
+- **남은 `publishing-<version>` tag 여덟 개** — `@spfn/auth`·`spfn`·`@spfn/cms`·`@spfn/core`·`@spfn/mcp`
+  의 `publishing-0.4.0-beta.6`, `@spfn/monitor`·`@spfn/notification` 의 `publishing-0.3.0-beta.6`,
+  `@spfn/workflow` 의 `publishing-0.3.0-alpha.6` — 는 무해하다. 각각 자기 버전을 가리키고, 채널 tag 가
+  아니며, 아무것도 읽지 않는다. 지울 수 있는 건 dist-tag 삭제가 허락된 로그인뿐이다
+  (`npm dist-tag rm <name> publishing-<version>`); 워크플로우는 지우지 않는다.
+- **beta.6 의 git tag 백필 — 하지 않아도 된다. 할지는 owner 가 정한다.** 지금까지 어느 버전에도 git
+  tag 가 있었던 적이 없고, 백필은 tag 여덟 개와 함께 GitHub prerelease 여덟 개도 게시한다. 하기로
+  하면 이렇게 한다. npmjs 에 이미 있는 버전의 workflow_dispatch 는 이미 있는 버전 경로로 간다:
+  아무것도 뒤로 옮기지 않고 초록으로 끝난다. 이 수정이 `main` 에 들어간 뒤 `main` 에서 돌리므로
+  실행 커밋은 그 버전을 정한 커밋(`b26a1b34`, #485)이 아니고, `Create git tag` 는 `create_tag` 를 켜도
+  "Not tagging …" 으로 넘어간다. 그 커밋의 실행으로 돌리면 #474 의 코드가 돌아 다시 403 이다. tag 를
+  만드는 건 `create_release=true` 다: `Create GitHub release` 가 `gh release create <name>@<version>
+  --target <그 버전을 정한 커밋>` 으로 tag 와 prerelease 를 함께 만든다. 패키지마다 한 번:
+
+  ```bash
+  for pkg in auth cli cms core mcp monitor notification workflow; do
+      gh workflow run "publish-$pkg.yml" --repo fxylabs/spfn --ref main -f create_release=true
+  done
+  ```
+
+  만들어지는 tag: `@spfn/auth@0.4.0-beta.6`, `spfn@0.4.0-beta.6`, `@spfn/cms@0.4.0-beta.6`,
+  `@spfn/core@0.4.0-beta.6`, `@spfn/mcp@0.4.0-beta.6`, `@spfn/monitor@0.3.0-beta.6`,
+  `@spfn/notification@0.3.0-beta.6`, `@spfn/workflow@0.3.0-alpha.6`. 주의할 점:
+  - **여덟 패키지 중 어느 것이든 버전이 다시 움직이기 전에** 돌린다. 실행은 `main` head 의
+    `package.json` 버전을 읽고 `scripts/version-commit.mjs` 가 그 버전을 정한 커밋을 실행 때 찾으므로,
+    버전이 움직인 패키지는 beta.6 이 아니라 새 버전의 tag 와 Release 를 만든다.
+  - 끝난 뒤 tag 가 있는지 확인한다 — 여덟 줄이어야 한다:
+    `git ls-remote --tags https://github.com/fxylabs/spfn | grep -E '@0\.(4\.0-beta|3\.0-beta|3\.0-alpha)\.6$'`.
+  - 이 tag 는 GitHub 에만 생긴다. GitHub 은 Gitea 의 미러라, 다음 미러 동기화가 Gitea 에 없는 tag 를
+    지울 수 있다(**확인하지 않았다**).
 
 ### 이미 갈라진 버전
 

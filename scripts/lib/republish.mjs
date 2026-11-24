@@ -222,22 +222,23 @@ function splitVersionError(deps, giteaIntegrity, npmjsIntegrity)
 }
 
 /**
- * The tag a version is published under, its own. `npm publish` always sets
- * one, and npmjs applies it when processing ends, minutes later and outside
- * the rule below: published under its channel's tag, a version served after a
+ * The tag every version is published under. `npm publish` always sets one,
+ * and npmjs applies it when processing ends, minutes later and outside the
+ * rule below: published under its channel's tag, a version served after a
  * newer one would move that tag backwards. So no version is published under a
  * tag the rule governs; the run moves those itself once npmjs serves the
- * version, then removes this one. One tag per version, so a run removes only
- * its own, and one a killed run left is removed by its version's re-run.
+ * version. This tag is one per package and nothing removes it: npmjs refuses
+ * a dist-tag delete to the publishing credential (#487), and each publish
+ * moves it anyway. Runs of one package do not overlap (`tagsToMove`), yet two
+ * versions can still be processing at once — a run that ended `not-served`
+ * and the next one in the queue — and npmjs then sets this tag twice, in an
+ * order nothing here controls. Whichever version it names, it is not a
+ * channel tag, the rule never reads or moves it, and no install resolves it.
  * npm refuses a tag that is a valid SemVer range or holds a character
  * `encodeURIComponent` encodes (npm 12.2.3: `publish`, `dist-tag add`,
- * npm-package-arg); `publishing-<version>` is neither for an alpha, beta or
- * stable version. A `+build` suffix would be refused, and no package has one.
+ * npm-package-arg); `publishing` is neither.
  */
-export function publishTagOf(version)
-{
-    return `publishing-${version}`;
-}
+export const PUBLISH_TAG = "publishing";
 
 /**
  * npmjs answers 401, not 404, for the dist-tags of a scoped package it has
@@ -329,60 +330,6 @@ function moveTags(deps, tags)
 }
 
 /**
- * Remove this version's `publishTagOf` tag when the dist-tags the run read
- * hold it: npmjs set it when it served the version, after this run's publish
- * or a killed run's. `npm dist-tag rm` fails on a tag that is already gone,
- * and another run of this version may have removed it since that read; so on
- * a failure the tags are read again, and the tag being gone is the removal
- * done. Any other failure stays one (`publishTagLeftError`).
- */
-async function removePublishTag(deps, current)
-{
-    const tag = publishTagOf(deps.version);
-
-    if (!current[tag])
-    {
-        return;
-    }
-    if (deps.dryRun)
-    {
-        deps.log(`dry run: would remove npmjs's ${tag} dist-tag from ${deps.name}`);
-
-        return;
-    }
-
-    const { status } = deps.npm(["dist-tag", "rm", deps.name, tag, "--registry", deps.npmjsRegistry]);
-
-    if (status !== 0 && await isPublishTagStillThere(deps, tag))
-    {
-        throw publishTagLeftError(deps, tag, status);
-    }
-}
-
-/** A fresh read of the dist-tags; one that fails is logged and counts as the tag still there. */
-async function isPublishTagStillThere(deps, tag)
-{
-    const tags = await npmjsDistTags(deps).catch((error) =>
-    {
-        deps.log(error.message);
-
-        return { [tag]: deps.version };
-    });
-
-    return Boolean(tags[tag]);
-}
-
-/** Cleanup is the only step left: the message says so, and how to finish it. */
-function publishTagLeftError(deps, tag, status)
-{
-    return new Error(`npm dist-tag rm for ${deps.name}@${deps.version} exited with ${status} (npm's error is above), `
-        + `and npmjs's dist-tags, read again, still hold ${tag} or could not be read. The release is otherwise `
-        + "complete: npmjs serves the version with the Gitea bytes and the dist-tags the rule moves are moved. "
-        + `Only the temporary dist-tag ${tag} is left; remove it with \`npm dist-tag rm ${deps.name} ${tag}\`, `
-        + "or re-run this workflow, which removes it.");
-}
-
-/**
  * npmjs refusing the version number: E409 Conflict, or "cannot publish over
  * the previously published versions" (E403 from the registry, or npm's own
  * check of the packument). The refusal does not say why. npmjs gives it for a
@@ -401,7 +348,7 @@ function isVersionNumberRefused(stderr)
 }
 
 /**
- * Publish the downloaded bytes under `publishTagOf`: true when npmjs accepted them,
+ * Publish the downloaded bytes under `PUBLISH_TAG`: true when npmjs accepted them,
  * false when it refused the version number (`isVersionNumberRefused`).
  * `--registry` on the command line wins over a `publishConfig.registry` inside
  * the tarball (the unscoped `spfn` CLI pins the Gitea registry there for local
@@ -418,7 +365,7 @@ function publishToNpmjs(deps, bytes)
     const args = [
         "publish", file,
         "--access", "public",
-        "--tag", publishTagOf(deps.version),
+        "--tag", PUBLISH_TAG,
         "--registry", deps.npmjsRegistry,
         "--provenance",
         ...(deps.dryRun ? ["--dry-run"] : []),
@@ -542,10 +489,7 @@ export async function republish(deps)
 
     const outcome = present ? "already-published" : await publishAndConfirm(deps, dist, giteaIntegrity);
 
-    const current = await npmjsDistTags(deps);
-
-    moveTags(deps, tagsToMove(deps, current));
-    await removePublishTag(deps, current);
+    moveTags(deps, tagsToMove(deps, await npmjsDistTags(deps)));
 
     return outcome;
 }

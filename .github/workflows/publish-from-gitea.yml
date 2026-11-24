@@ -176,19 +176,19 @@ jobs:
           COMMIT=$(node scripts/version-commit.mjs "${{ inputs.package_dir }}")
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
 
-      # Only the run for that commit tags it — the push that moved the version
-      # (its push may carry later commits too), or a dispatch started at that
-      # commit — and that run's re-run, which finishes a run that published and
-      # failed before this step. A dispatch from a later head says it did not.
+      # Only a dispatch that asks for it tags: one started at that commit with
+      # create_tag (or its re-run, which finishes a run that published and
+      # failed before this step), or create_release in the next step. A
+      # dispatch from a later head says it did not. Push runs never tag: every
+      # caller passes create_tag only from its workflow_dispatch inputs.
       - name: Create git tag
         id: git-tag
         if: ${{ inputs.create_tag && steps.republish.outputs.outcome != 'dry-run' && steps.republish.outcome == 'success' }}
         env:
           COMMIT: ${{ steps.origin.outputs.commit }}
-          MOVED: ${{ steps.bump.outputs.moved }}
         run: |
           TAG="${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}"
-          if [[ "$COMMIT" != "$GITHUB_SHA" && "$MOVED" != "true" ]]; then
+          if [[ "$COMMIT" != "$GITHUB_SHA" ]]; then
             echo "::notice::Not tagging $TAG: the version was set in $COMMIT and this run is at $GITHUB_SHA. Only the run for $COMMIT (or its re-run) tags it."
             echo "result=not created — set in ${COMMIT:0:12}, run at ${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
             exit 0
@@ -204,21 +204,45 @@ jobs:
           git push origin "$TAG"
           echo "result=\`$TAG\` on ${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
 
-      # gh creates a missing tag at --target: the commit that set the version.
+      # The release names the commit that set the version. gh creates a missing
+      # tag at --target, but GitHub ignores the target for a tag that exists, so
+      # a tag on another commit stops the run. A published release on the tag
+      # at that commit is what an earlier run (or its re-run) left, and counts
+      # as done. It is read before creating: for it, gh release create only
+      # exits 1 with GitHub's 422 "Release.tag_name already exists", which says
+      # nothing about the commit. Every other failure fails the step.
       - name: Create GitHub release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.pkg.outputs.version }}
+          COMMIT: ${{ steps.origin.outputs.commit }}
+        # `bash` rather than the default `bash -e {0}`: it adds pipefail, so a failed
+        # `git ls-remote` stops the step instead of reading as "no tag" and skipping
+        # the wrong-commit check below.
+        shell: bash
         run: |
           TAG="${{ steps.pkg.outputs.name }}@$VERSION"
+          # An annotated tag lists its commit on the `^{}` line, sorted last.
+          TAGGED=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | sort -k2 | tail -n1 | cut -f1)
+          if [[ -n "$TAGGED" && "$TAGGED" != "$COMMIT" ]]; then
+            echo "::error::Tag $TAG is on $TAGGED, not on $COMMIT where the version was set: a release for it would name the wrong commit"
+            exit 1
+          fi
+          if DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$DRAFT" != "false" || "$TAGGED" != "$COMMIT" ]]; then
+              echo "::error::A release for $TAG exists but is not published on $COMMIT (draft: $DRAFT, tag on: ${TAGGED:-nothing})"
+              exit 1
+            fi
+            echo "::notice::GitHub release $TAG already exists on $COMMIT"
+            exit 0
+          fi
           PRERELEASE=""
           if [[ "$VERSION" == *-alpha* || "$VERSION" == *-beta* ]]; then
             PRERELEASE="--prerelease"
           fi
-          gh release create "$TAG" --target "${{ steps.origin.outputs.commit }}" --title "$TAG" \
-            --generate-notes $PRERELEASE \
-            || echo "::warning::GitHub release creation failed for $TAG"
+          gh release create "$TAG" --target "$COMMIT" --title "$TAG" \
+            --generate-notes $PRERELEASE
 
       - name: Summary
         if: ${{ always() }}
