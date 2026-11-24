@@ -23,7 +23,7 @@ import { kitPaths } from './../paths.js';
 import { writeOperationContext } from './../operation-context.js';
 import { buildPlan, checkApproval, planDigest, type KitPlanV1 } from './../plan.js';
 import { resolveUpdateEdges, type KitReleaseManifestView, type KitUpdateEdge } from './../manifest.js';
-import { applyManifestVersions, installedGraphMismatches } from './../package-graph.js';
+import { applyManifestVersions } from './../package-graph.js';
 import {
     compareCustomerSource,
     customerSourceDigests,
@@ -45,6 +45,7 @@ import {
     requireCredential,
     resolveRelease,
     runLocalGates,
+    verifyInstalledGraph,
     writeRegistryNpmrc,
     type MaterializeTarget,
 } from './shared.js';
@@ -435,11 +436,10 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
                     activationId: credential.license.activationId,
                     localClientId: credential.license.localClientId,
                     credential: credential.record.credential,
-                    packages: manifest.packages,
+                    manifest,
                     // The lockfile pins the previous release, so holding it
                     // frozen would install the previous release and succeed.
                     resolve: declared.length > 0,
-                    expect: manifest,
                 });
 
                 /* Evidence a resume can re-derive, which is what the step
@@ -451,11 +451,9 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
             },
             async verify()
             {
-                const mismatches = installedGraphMismatches(projectDir, manifest);
+                const graph = verifyInstalledGraph(projectDir, manifest);
 
-                return mismatches.length === 0
-                    ? { ok: true, evidence: { packages: manifest.packages.length, graph: 'exact' } }
-                    : { ok: false, reason: 'installed-graph-is-not-the-target-release' };
+                return graph.ok ? { ok: true, evidence: { packages: manifest.packages.length, graph: 'exact' } } : graph;
             },
         },
         {
@@ -526,7 +524,7 @@ function updateSteps(options: UpdateStepOptions): OperationStep[]
                     });
                 }
 
-                const gates = await runLocalGates(adapters, projectDir, manifest.gates);
+                const gates = await runLocalGates(adapters, projectDir, manifest);
 
                 writeInstalledLock(paths.lockFile, lockFromManifest(manifest, {
                     manifestUrl: options.manifestUrl,

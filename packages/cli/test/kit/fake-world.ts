@@ -1036,8 +1036,17 @@ function materializeDeclaredGraph(projectDir: string): void
 
 export function defaultScaffoldFiles(version: string): Record<string, string>
 {
+    /* Declares the release's graph, as a real scaffold does: the kit reads the
+       installed tree back after its install and around its gates, and a
+       scaffold declaring nothing would leave an install with nothing on disk
+       to read. */
     return {
-        'package.json': `${JSON.stringify({ name: 'kit-scaffold', private: true, version: '0.0.0' }, null, 4)}\n`,
+        'package.json': `${JSON.stringify({
+            name: 'kit-scaffold',
+            private: true,
+            version: '0.0.0',
+            dependencies: { '@spfn/core': '0.3.0-beta.5', [FAKE_KIT_PACKAGE]: version },
+        }, null, 4)}\n`,
         'pnpm-lock.yaml': 'lockfileVersion: 9.0\n',
         'src/app/page.tsx': `export default function Page() { return null; } // ${version}\n`,
         'src/server/router.ts': 'export const appRouter = {};\n',

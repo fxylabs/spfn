@@ -21,7 +21,7 @@ import { JournalStore } from '../../src/kit/journal.js';
 import { acquireOperationLock } from '../../src/kit/lock.js';
 import { readInstalledLock } from '../../src/kit/installed-state.js';
 import { KIT_EXIT, isKitError } from '../../src/kit/errors.js';
-import { FakeKitWorld, FAKE_LICENSE_KEY } from './fake-world.js';
+import { FakeKitWorld, FAKE_KIT_PACKAGE, FAKE_LICENSE_KEY } from './fake-world.js';
 
 const R0 = { version: '1.0.0', sequence: 1, releaseClass: 'feature' as const };
 const R1 = {
@@ -231,6 +231,75 @@ describe('table B — clean clone and credentials', () =>
 
         expect(result.code).toBe('KIT_MANAGED_DRIFT');
         expect(existsSync(join(clone, 'node_modules'))).toBe(false);
+    });
+
+    it('reinstalls on a resume when the restored graph is gone', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+
+        const clone = cleanClone();
+
+        world.faults.failingGates.add('build');
+
+        expect((await runRestore({ projectDir: clone, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        rmSync(join(clone, 'node_modules'), { recursive: true });
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: clone,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({ status: 'completed', code: 'KIT_RESTORE_COMPLETE' });
+        expect(existsSync(join(clone, 'node_modules', '@spfn', 'core', 'package.json'))).toBe(true);
+    });
+
+    it('stops a resumed restore on a managed file edited since its install', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+
+        const clone = cleanClone();
+
+        world.faults.failingGates.add('build');
+        await runRestore({ projectDir: clone, json: true, write: silent }, world.adapters);
+
+        writeFileSync(join(clone, 'src/app/api/landing/route.ts'), '// edited by hand\n', 'utf8');
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: clone,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({
+            code: 'KIT_RESUME_MISMATCH',
+            evidence: { checkpoint: 'install-frozen', reason: 'managed-drift: src/app/api/landing/route.ts' },
+        });
+    });
+
+    it('warns that the graph is not installed when node_modules is there and the graph is not', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        await install(world);
+        rmSync(join(target, 'node_modules', '@spfn'), { recursive: true });
+
+        const check = await runCheck({ projectDir: target }, world.adapters);
+
+        expect(check.diagnostics).toContainEqual(expect.objectContaining({
+            code: 'KIT_GATE_FAILED',
+            summary: 'The dependency graph is not installed in this checkout.',
+        }));
     });
 });
 
@@ -513,5 +582,67 @@ describe('table D — update, approval and resume', () =>
         expect(resumed.status).toBe('failed');
         expect(resumed.code).toBe('KIT_RESUME_MISMATCH');
         expect(resumed.evidence?.checkpoint).toBe('migration-applied');
+    });
+
+    it('refuses a resumed update over a kit package the customer pinned back, and leaves the pin', async () =>
+    {
+        const world = new FakeKitWorld({ releases: [R0] });
+
+        await install(world);
+        world.publish(R1);
+        world.faults.failingGates.add('build');
+
+        expect((await runUpdate({ projectDir: target, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        const manifestPath = join(target, 'package.json');
+        const installedPath = join(target, 'node_modules', ...FAKE_KIT_PACKAGE.split('/'), 'package.json');
+        const document = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> };
+
+        document.dependencies[FAKE_KIT_PACKAGE] = R0.version;
+        writeFileSync(manifestPath, `${JSON.stringify(document, null, 4)}\n`, 'utf8');
+        writeFileSync(installedPath, `${JSON.stringify({ name: FAKE_KIT_PACKAGE, version: R0.version })}\n`, 'utf8');
+        world.faults.failingGates.clear();
+
+        const pinned = { manifest: readFileSync(manifestPath, 'utf8'), installed: readFileSync(installedPath, 'utf8') };
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({
+            status: 'failed',
+            code: 'KIT_RESUME_MISMATCH',
+            evidence: { reason: `installed-graph-moved: ${FAKE_KIT_PACKAGE} expected ${R1.version}, found ${R0.version}` },
+        });
+        expect({ manifest: readFileSync(manifestPath, 'utf8'), installed: readFileSync(installedPath, 'utf8') })
+            .toEqual(pinned);
+    });
+
+    it('reinstalls the target graph on a resume when it is gone, and completes', async () =>
+    {
+        const world = new FakeKitWorld({ releases: [R0] });
+
+        await install(world);
+        world.publish(R1);
+        world.faults.failingGates.add('build');
+
+        expect((await runUpdate({ projectDir: target, json: true, write: silent }, world.adapters)).code)
+            .toBe('KIT_GATE_FAILED');
+
+        rmSync(join(target, 'node_modules'), { recursive: true });
+        world.faults.failingGates.clear();
+
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({ status: 'completed', code: 'KIT_UPDATE_COMPLETE' });
+        expect(existsSync(join(target, 'node_modules', '@spfn', 'core', 'package.json'))).toBe(true);
     });
 });

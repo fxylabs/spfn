@@ -17,13 +17,12 @@
  * the path it is about, and the command that would fix it.
  */
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { detectManagedDrift } from './../drift.js';
 import { JournalStore, RESUMABLE_STATUSES } from './../journal.js';
 import { readLockOwner } from './../lock.js';
 import { kitPaths } from './../paths.js';
 import { readInstalledLock, readLicenseFile } from './../installed-state.js';
+import { installedGraphMismatches } from './../package-graph.js';
 import type { KitDiagnostic } from './../tooling.js';
 import type { KitAdapters } from './../ports.js';
 import { latestActiveRelease, verifiedCatalog } from './shared.js';
@@ -218,7 +217,10 @@ export async function runCheck(request: InspectRequest, adapters: KitAdapters | 
             fixCommand: `spfn kit resume ${journal.operationId} --json`,
         });
     }
-    if (!existsSync(join(request.projectDir, 'node_modules')))
+    // The lock records the manifest's packages, and the graph is those packages
+    // at those versions — not a `node_modules` directory, which pnpm leaves
+    // behind when it empties it.
+    if (installedGraphMismatches(request.projectDir, lock).length > 0)
     {
         diagnostics.push({
             code: 'KIT_GATE_FAILED',

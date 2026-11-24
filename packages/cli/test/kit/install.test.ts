@@ -369,6 +369,123 @@ describe('table A — retries, waits and resumes', () =>
         expect(existsSync(join(target, '.git'))).toBe(true);
     });
 
+    it('refuses a resume over a graph that moved to another version since the gate failed', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        world.faults.failingGates.add('build');
+
+        expect((await runInstall(installRequest(world), world.adapters)).code).toBe('KIT_GATE_FAILED');
+
+        writeFileSync(
+            join(target, 'node_modules', '@spfn', 'core', 'package.json'),
+            `${JSON.stringify({ name: '@spfn/core', version: '99.0.0' })}\n`,
+            'utf8',
+        );
+        world.faults.failingGates.clear();
+
+        const installs = world.childEnvironments.length;
+        const resumed = await runResume({
+            projectDir: target,
+            readLicenseKey: async () => FAKE_LICENSE_KEY,
+            json: true,
+            write: silent,
+        }, world.adapters);
+
+        expect(resumed).toMatchObject({
+            status: 'failed',
+            code: 'KIT_RESUME_MISMATCH',
+            evidence: {
+                checkpoint: 'install-frozen',
+                reason: 'installed-graph-moved: @spfn/core expected 0.3.0-beta.5, found 99.0.0',
+            },
+        });
+        expect(world.childEnvironments).toHaveLength(installs);
+        expect(existsSync(join(target, '.git'))).toBe(false);
+    });
+
+    it('fails the gates when a gate leaves the release\'s graph gone, and commits nothing', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        const result = await runInstall(installRequest(world), {
+            ...world.adapters,
+            gates: {
+                async run()
+                {
+                    rmSync(join(target, 'node_modules', '@spfn'), { recursive: true, force: true });
+                    rmSync(join(target, 'node_modules', '@superfunction'), { recursive: true, force: true });
+
+                    return { ok: true };
+                },
+            },
+        });
+
+        expect(result).toMatchObject({
+            code: 'KIT_GATE_FAILED',
+            evidence: { gate: 'installed-graph', when: 'after', firstPackage: '@spfn/core', actual: 'absent' },
+        });
+        expect(existsSync(join(target, '.git'))).toBe(false);
+    });
+
+    it('runs no gate on a graph that is gone by the time the gates start', async () =>
+    {
+        const world = new FakeKitWorld();
+        const gatesRun: string[] = [];
+
+        world.faults.databasePending = ['0002_add_table'];
+
+        const result = await runInstall(installRequest(world), {
+            ...world.adapters,
+            database: {
+                ...world.adapters.database,
+                async migrate(request)
+                {
+                    rmSync(join(target, 'node_modules', '@spfn'), { recursive: true });
+
+                    return world.adapters.database.migrate(request);
+                },
+            },
+            gates: {
+                async run(gate, request)
+                {
+                    gatesRun.push(gate);
+
+                    return world.adapters.gates.run(gate, request);
+                },
+            },
+        });
+
+        expect(result).toMatchObject({
+            code: 'KIT_GATE_FAILED',
+            evidence: { gate: 'installed-graph', when: 'before', firstPackage: '@spfn/core' },
+        });
+        expect(gatesRun).toEqual([]);
+        expect(existsSync(join(target, '.git'))).toBe(false);
+    });
+
+    it('refuses an install whose package manager left another graph than the release pins', async () =>
+    {
+        const world = new FakeKitWorld();
+
+        world.onPackageInstall = (projectDir) =>
+        {
+            writeFileSync(
+                join(projectDir, 'node_modules', '@spfn', 'core', 'package.json'),
+                `${JSON.stringify({ name: '@spfn/core', version: '0.3.0-beta.4' })}\n`,
+                'utf8',
+            );
+        };
+
+        const result = await runInstall(installRequest(world), world.adapters);
+
+        expect(result).toMatchObject({
+            code: 'KIT_UNSUPPORTED_RESOLUTION',
+            phase: 'dependencies',
+            evidence: { firstPackage: '@spfn/core', expected: '0.3.0-beta.5', actual: '0.3.0-beta.4' },
+        });
+    });
+
     it('stops with a mismatch when a managed file changed under a completed checkpoint', async () =>
     {
         const world = new FakeKitWorld();

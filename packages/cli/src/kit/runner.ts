@@ -12,6 +12,11 @@
  * migration set, a different managed file — the operation stops with
  * `KIT_RESUME_MISMATCH` rather than continuing on top of a state nobody
  * planned for.
+ *
+ * One answer is not a moved world: a step whose own effect is gone — an
+ * installed graph that is no longer on disk — says so with `rerun`, and is run
+ * again rather than refused. Running it again is what restores it, and the
+ * steps after it then go on as they would have.
  */
 
 import { KitError, KIT_EXIT, isKitError } from './errors.js';
@@ -49,6 +54,12 @@ export type StepOutcome =
 export interface VerifyResult
 {
     ok: boolean;
+    /**
+     * With `ok: false`: what is missing is this step's own effect, not a
+     * project that moved, and running the step again restores it. The runner
+     * runs it again instead of stopping with `KIT_RESUME_MISMATCH`.
+     */
+    rerun?: boolean;
     /** Why the world no longer matches. Printed with the mismatch. */
     reason?: string;
     /** Re-read evidence. Digested and compared with the recorded digest. */
@@ -98,12 +109,14 @@ export async function executeOperation(options: ExecuteOperationOptions): Promis
             {
                 const reused = await reuseCheckpoint(step, context, sink);
 
-                if (reused !== null)
+                if (reused instanceof KitError)
                 {
                     return failed(reused, context, options);
                 }
-
-                continue;
+                if (reused === 'reused')
+                {
+                    continue;
+                }
             }
 
             const outcome = await runStep(step, context, options);
@@ -145,12 +158,15 @@ export async function executeOperation(options: ExecuteOperationOptions): Promis
     }
 }
 
-/** Returns the mismatch to report, or null when the checkpoint still holds. */
+/**
+ * Returns the mismatch to report, `'rerun'` when the step's own effect is gone
+ * and the step is to run again, or `'reused'` when the checkpoint still holds.
+ */
 async function reuseCheckpoint(
     step: OperationStep,
     context: StepContext,
     sink: KitEventSink,
-): Promise<KitError | null>
+): Promise<KitError | 'rerun' | 'reused'>
 {
     if (!context.resuming || step.verify === undefined)
     {
@@ -163,10 +179,26 @@ async function reuseCheckpoint(
             summary: `${step.summary} — already done.`,
         });
 
-        return null;
+        return 'reused';
     }
 
     const verified = await step.verify(context);
+
+    if (!verified.ok && verified.rerun === true)
+    {
+        sink.emit({
+            schemaVersion: 1,
+            operationId: context.journal.operationId,
+            phase: step.phase,
+            status: 'progress',
+            code: 'KIT_CHECKPOINT_RERUN',
+            summary: `${step.summary} — its effect is gone from the project, so it runs again.`,
+            evidence: { checkpoint: step.checkpoint, reason: verified.reason ?? null },
+        });
+
+        return 'rerun';
+    }
+
     const recorded = findCheckpoint(context.journal, step.checkpoint)?.evidenceDigest;
     const reReadDigest = verified.evidence === undefined ? undefined : digestOfJson(verified.evidence);
 
@@ -194,7 +226,7 @@ async function reuseCheckpoint(
         summary: `${step.summary} — verified against the project as it is now.`,
     });
 
-    return null;
+    return 'reused';
 }
 
 /** Runs one step. Returns a result when the operation must stop here. */

@@ -1889,6 +1889,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   primary; under a caller's transaction — the routes keep `Transactional()` — it is a savepoint, so
   a throw the caller catches rolls back the service's own writes. Recovery codes are still hashed
   before the transaction. No signature, route or wire change.
+- **spfn: a kit gate's success says the release's graph was installed, and a lost graph is
+  reinstalled by `spfn kit resume` (#484).** A gate is a script about the project; it exits 0 on
+  an emptied `node_modules` as readily as on the release's, and nothing read the installed graph
+  between the install and the commit — `kit install`, `kit update` and `kit restore` ran the
+  gates and committed or completed on their exit status alone. pnpm 11 and later can install
+  before `pnpm run` under the gate's own configuration, and from 12.9.0 a failed pre-run install
+  warns and runs the script anyway, so that path existed. The gate step now reads the installed
+  graph (every package the signed manifest names, at its pinned version, in `node_modules`)
+  immediately before and immediately after the gates; a package missing or at another version
+  fails with `KIT_GATE_FAILED` (exit 3) and `evidence: { gate: 'installed-graph', when: 'before' |
+  'after', firstPackage, expected, actual }`, and nothing is committed. `kit install` and `kit
+  restore` now check that graph right after `pnpm install`, as `kit update` did
+  (`KIT_UNSUPPORTED_RESOLUTION`, exit 4). On a resume the install step re-reads the same graph —
+  in `install` and `restore` it used to check only that a `node_modules` directory existed, and
+  `restore`'s check never held — and when the graph is gone (every differing package absent) it
+  is run again (a progress event `KIT_CHECKPOINT_RERUN`) instead of stopping with
+  `KIT_RESUME_MISMATCH`, so `spfn kit resume` after an `installed-graph` failure that emptied
+  `node_modules` reinstalls, runs the gates again and commits. A package present at another
+  version is a project that moved, and still stops the resume with `KIT_RESUME_MISMATCH`, reason
+  `installed-graph-moved: <package> expected <version>, found <version>`. A restore
+  resumed over a managed file edited since its install stops with `KIT_RESUME_MISMATCH`, reason
+  `managed-drift: <path>`. `kit check`'s "The dependency graph is not installed" reads the same
+  graph, so it also fires on a `node_modules` that is there but empty.
 - **spfn: `kit install`, `kit update` and `kit restore` authenticate under pnpm 12.23 (#482).** The
   registry session reached pnpm only as `npm_config_//host/npm/:_authToken`. pnpm 12.23's corepack
   entry starts its native binary through `/bin/sh`, and dash (Debian's and Ubuntu's `/bin/sh`)
