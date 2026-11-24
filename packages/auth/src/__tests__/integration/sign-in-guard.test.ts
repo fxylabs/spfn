@@ -39,6 +39,9 @@
  * 16. a limit on attempts that does not bound the comparisons (#478): eight
  *     concurrent wrong passwords, each past a first `admit` that read the
  *     count before any wrote it, all compared against the account's hash
+ * 18. the README's worked example as an existence oracle (#486): its policy
+ *     answering an account's sixth wrong password otherwise than an unknown
+ *     identifier's
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -48,7 +51,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { Hono } from 'hono';
 import postgres from 'postgres';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, max, sql } from 'drizzle-orm';
+import { integer, pgSchema, text } from 'drizzle-orm/pg-core';
 import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } from 'jose';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
@@ -201,6 +205,79 @@ class SignInAttemptsRepository extends BaseRepository
 
 const attempts = new SignInAttemptsRepository();
 
+/**
+ * The README's worked example, "lock after five attempts", as it is written
+ * there — its table, repository and policy — without the temporary password.
+ */
+const signInAttempts = pgSchema('sign_in_guard_test').table('sign_in_attempts', {
+    identifier: text('identifier').primaryKey(),
+    attempts: integer('attempts').notNull(),
+});
+
+class ReadmeSignInAttemptsRepository extends BaseRepository
+{
+    async count(identifiers: string[]): Promise<number>
+    {
+        const [row] = await this.db.select({ attempts: max(signInAttempts.attempts) }).from(signInAttempts)
+            .where(inArray(signInAttempts.identifier, identifiers));
+
+        return row?.attempts ?? 0;
+    }
+
+    async add(identifiers: string[]): Promise<number>
+    {
+        const rows = await this.db.insert(signInAttempts).values(identifiers.map(identifier => ({ identifier, attempts: 1 })))
+            .onConflictDoUpdate({ target: signInAttempts.identifier, set: { attempts: sql`${signInAttempts.attempts} + 1` } })
+            .returning({ attempts: signInAttempts.attempts });
+
+        return Math.max(...rows.map(row => row.attempts));
+    }
+
+    async clear(identifiers: string[]): Promise<void>
+    {
+        await this.db.delete(signInAttempts).where(inArray(signInAttempts.identifier, identifiers));
+    }
+}
+
+const signInAttemptsRepository = new ReadmeSignInAttemptsRepository();
+
+function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
+{
+    if (identifier)
+    {
+        return [identifier.email ? identifier.email.trim().toLowerCase() : identifier.phone!];
+    }
+
+    return [user?.email, user?.phone].filter((value): value is string => Boolean(value));
+}
+
+const readmeLockAfterFive = {
+    admit: async (attempt: SignInAttempt, call: SignInAdmitCall): Promise<SignInAdmission> =>
+    {
+        const identifiers = countedIdentifiers(attempt);
+
+        if (identifiers.length === 0)
+        {
+            return undefined;
+        }
+
+        const count = call === 'before-proof'
+            ? await signInAttemptsRepository.add(identifiers)
+            : await signInAttemptsRepository.count(identifiers);
+
+        return count > 5 ? LOCKED : undefined;
+    },
+    settled: async (outcome: SignInOutcome): Promise<void> =>
+    {
+        await history.record(outcome);
+
+        if (outcome.result === 'succeeded')
+        {
+            await signInAttemptsRepository.clear(countedIdentifiers(outcome));
+        }
+    },
+};
+
 /** What the guard does in the current row; the guard itself is stated once per row. */
 const policy: {
     admit: (attempt: SignInAttempt, call: SignInAdmitCall) => Promise<SignInAdmission>;
@@ -301,6 +378,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
             reason text, key_id text, ip text, web_proxy boolean not null)`);
         await getTestDb().execute(sql`create table sign_in_guard_test.attempts (user_id bigint primary key, count int not null)`);
+        await getTestDb().execute(sql`create table sign_in_guard_test.sign_in_attempts (identifier text primary key, attempts int not null)`);
 
         // `setupTestDb` points DATABASE_URL at the test database.
         observer = postgres(process.env.DATABASE_URL!, { max: 1 });
@@ -321,7 +399,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     beforeEach(async () =>
     {
         await clearTables(getTestDb());
-        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts`);
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts, sign_in_guard_test.sign_in_attempts`);
         resetMemoryRateLimitStore();
         await initializeAuth();
         sendEmail.mockClear();
@@ -1721,7 +1799,9 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     });
 
     // ========================================================================
-    // Row 17 — a configured guard tells no account from its database work
+    // Row 17 — a configured guard sends the same statements for an account and
+    // an unknown identifier (not the same work: an account's lock writes a
+    // commit record, #486)
     // ========================================================================
 
     const IDENTIFIER_CHANNELS = [
@@ -1788,5 +1868,27 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect((await attempt('moving@test.com')).status).toBe(401);
         expect(asked).toEqual([null]);
         expect(comparedHashes()).toEqual([await getDummyPasswordHash()]);
+    });
+
+    it.each(IDENTIFIER_CHANNELS)('row 18 — $channel, the README\'s worked example: six wrong passwords for an account and six for an unknown identifier answer the same statuses (#486)', async ({ attempt }) =>
+    {
+        await seedUser('known@test.com');
+        policy.admit = readmeLockAfterFive.admit;
+        policy.settled = readmeLockAfterFive.settled;
+
+        const statuses = async (email: string) =>
+        {
+            const answered: number[] = [];
+
+            for (let sent = 0; sent < 6; sent += 1)
+            {
+                answered.push((await attempt(email)).status);
+            }
+
+            return answered;
+        };
+
+        expect(await statuses('known@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
+        expect(await statuses('nobody@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
     });
 });

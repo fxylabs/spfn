@@ -769,10 +769,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On `password` and `deletion-cancel` the lock of that call and of the failure report
   (`after-failure`) is now taken by the identifier the attempt names — the row the sign-in read —
   rather than by the account's id, so an identifier that names no account sends the same statements
-  as an account's, and a configured guard no longer tells the two apart by the work done. With a
+  as an account's~~, and a configured guard no longer tells the two apart by the work done~~. With a
   guard that does nothing, a wrong password sent six statements more for an account than for an
   unknown identifier, two of them row locks; both now send the same ones. `user: null` still names no
   account; your `admit` and `settled` doing different work for it is yours to equalise (README).
+  *Corrected (#486): the same statements are not the same work. A lock that finds the account's
+  row assigns the transaction an id, so each of an account's lock transactions writes and flushes
+  a WAL commit record that an unknown identifier's does not — about 0.85 ms per wrong password,
+  accepted for now. And the README's worked example as written here counted only accounts, so it
+  answered an account's sixth wrong password 403 and an unknown identifier's 401; it now counts by
+  identifier.*
 - **BREAKING: @spfn/auth: a user id that is not a safe integer is refused with `400
   BadRequestError` naming it, before any read (#479).** On `main` an unsafe integer (`2 ** 53 + 2`,
   `9007199254740993n`, `'9007199254740993'`) was read as the nearest double — another number than
@@ -2021,8 +2027,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opened. On `password` and `deletion-cancel` the lock of that call and of the failure report
   (`after-failure`) is taken by the identifier the attempt names — the row the sign-in read — rather
   than by the account's id, so an identifier that names no account sends the same statements as an
-  account's, and a configured guard does not tell the two apart by the work done; the comparison is
-  against the account as read under that lock.
+  account's~~, and a configured guard does not tell the two apart by the work done~~; the comparison is
+  against the account as read under that lock. *Corrected (#486): the work differs — an account's
+  lock writes and flushes a WAL commit record an unknown identifier's does not, about 0.85 ms per
+  wrong password, accepted for now.*
 
 - **@spfn/auth, @spfn/core: an error the client restores keeps every field it was thrown with —
   `SignInRefusedError` and `PasswordChangeRefusedError` keep `details.code`, `HttpError`,
@@ -2676,6 +2684,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **@spfn/auth: what a sign-in's account lock costs, and a worked guard that answers an unknown
+  identifier as it answers an account (#486).** The #478 entries above, the README and the doc
+  comment of `usersRepository.lockAccountByEmailOrPhone` said that an account and an unknown
+  identifier, sending the same statements, did the same database work. They do not: locking a row
+  that exists assigns the transaction an id, so each of an account's lock transactions writes and
+  flushes a WAL commit record and an unknown identifier's writes none — about 0.85 ms per wrong
+  password, measured in #486 and accepted for now. Those statements are corrected (the entries
+  above with a marked correction). The README's worked guard, "lock after five attempts", counted
+  only accounts, so an account's sixth wrong password answered 403 `LOCKED` and an unknown
+  identifier's 401, for ever: six requests told them apart. It now counts by the identifier the
+  attempt names on `password` and `deletion-cancel`, and by the account's own email and phone on
+  the other channels; the lift clears by identifier, and an account reachable by an email and a
+  phone has two counts. An app that copied the example: migrate `sign_in_attempts` from `user_id`
+  to `identifier` (README). No package behaviour changes.
 - **@spfn/core: `enumText` is documented as what it is** (spfn/spfn#167): it narrows the TypeScript
   type only; the column is plain `text`, the database accepts any string, and adding a value needs no
   migration. The schema README called it a column "with enum constraint" and "plain text + CHECK";
