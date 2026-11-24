@@ -346,11 +346,17 @@ function graphEmptyingBuild(marker: string): string
  * local `link:` directory, so a package manager that installs before a gate
  * can do so with no registry and no network.
  *
- * The lockfile is trusted in the project's own configuration for the same
- * reason. Otherwise pnpm 12 first checks it against its supply-chain policies,
- * which fetches registry metadata the gate holds no session for: that install
- * fails, warns and runs the script anyway, and `late` would be absent whether
- * pnpm installs before the gate or not.
+ * Two settings in the project's own configuration hold that premise wherever
+ * the file runs, so that `late` is absent only because the kit's gate installs
+ * nothing first — and the control below shows pnpm otherwise would link it:
+ *
+ * - `trustLockfile: true`. Otherwise pnpm 12 first checks the lockfile against
+ *   its supply-chain policies, which fetches registry metadata the gate holds
+ *   no session for: that install fails, warns and runs the script anyway.
+ * - `frozenLockfile: false`. The gate passes `CI` through, and under `CI` pnpm
+ *   installs with a frozen lockfile, which refuses the manifest `late` was just
+ *   added to (ERR_PNPM_OUTDATED_LOCKFILE) — and again warns and runs the
+ *   script anyway. CI sets `CI=true` for the whole job.
  */
 async function installThenDeclareLate(): Promise<void>
 {
@@ -365,7 +371,7 @@ async function installThenDeclareLate(): Promise<void>
     writeFileSync(join(target, 'late', 'package.json'), `${JSON.stringify({ name: 'late', version: '0.0.0' })}\n`, 'utf8');
     manifest.dependencies.late = 'link:./late';
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`, 'utf8');
-    writeFileSync(join(target, 'pnpm-workspace.yaml'), 'trustLockfile: true\n', 'utf8');
+    writeFileSync(join(target, 'pnpm-workspace.yaml'), 'trustLockfile: true\nfrozenLockfile: false\n', 'utf8');
 }
 
 /** The gate port the kit runs, on the binary the install ran. */
