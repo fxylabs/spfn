@@ -208,10 +208,12 @@ export async function refuseInvalidCsrf(
 
     // One line per request that fails the check, in either mode. Never the
     // expected token or the key id — the log would otherwise hand out what the
-    // check exists to withhold.
+    // check exists to withhold. The route by its template, never the filled
+    // path: `redactPaths` is the backend's, and a capability in a path
+    // parameter would be written here in full.
     const detail = {
         method: ctx.method,
-        path: ctx.path,
+        route: ctx.route?.path,
         headerPresent: !!presented,
     };
 

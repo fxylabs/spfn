@@ -109,7 +109,7 @@ async function retryExpiredToken(ctx: ResponseInterceptorContext): Promise<void>
         return;
     }
 
-    authLogger.interceptor.general.warn('Request token refused as expired — retrying once, signed afresh', { path: ctx.path });
+    authLogger.interceptor.general.warn('Request token refused as expired — retrying once, signed afresh');
 
     const retried = await ctx.callBackend({ headers: signedRequestHeaders(session) }).catch((error) =>
     {
