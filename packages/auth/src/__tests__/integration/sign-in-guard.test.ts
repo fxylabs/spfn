@@ -50,6 +50,8 @@
  * 20. the README's opening guard snippet edited away from code that compiles
  *     against the worked example's exports: the account-keyed guard put back,
  *     or `user: null` let through
+ * 21. the worked example's lift that clears nothing, or that reads the account
+ *     instead of taking its lock before it clears the counts
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -218,13 +220,17 @@ const attempts = new SignInAttemptsRepository();
 
 /**
  * The README's worked example, "lock after five attempts": each of its blocks
- * is one of these modules, text for text (row 18), and rows 18 and 19 run
+ * is one of these modules, text for text (row 18), and rows 18, 19 and 21 run
  * it. The README's opening guard snippet is `server.config.opening.ts` (row
  * 20). Only the temporary passwords' repository, which the README names and
  * does not show, is not a block.
  */
 const README_EXAMPLE = resolve(__dirname, '../fixtures/readme-sign-in-guard');
 const { signInPolicy: readmeSignInPolicy } = await import('../fixtures/readme-sign-in-guard/src/server/sign-in-policy');
+const { signInAttemptsRepository: readmeAttempts } = await import('../fixtures/readme-sign-in-guard/src/server/repositories/sign-in-history.repository');
+const { liftSignInLock } = await import('../fixtures/readme-sign-in-guard/src/server/services/sign-in-lock.service');
+// The account lock the lift takes: the fixture imports `@spfn/auth/server` as an app does, from dist.
+const { usersRepository: appUsersRepository } = await import('@spfn/auth/server');
 
 /** A fenced block of the README, and the path its first line names if it names one. */
 interface ReadmeBlock
@@ -1851,7 +1857,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     });
 
     // ========================================================================
-    // Rows 18 and 19 — the README's worked example, as the README prints it
+    // Rows 18, 19 and 21 — the README's worked example, as the README prints it
     // ========================================================================
 
     /** The guard is the worked example's policy, imported from its fixture. */
@@ -1897,6 +1903,37 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
     });
 
+    it('row 21 — the README\'s lift: an account six wrong passwords locked takes the right one once liftSignInLock has taken its lock and then cleared its counts (#486)', async () =>
+    {
+        const user = await seedUser('known@test.com');
+        useReadmePolicy();
+
+        const answered: number[] = [];
+
+        for (let sent = 0; sent < 6; sent += 1)
+        {
+            answered.push((await login('known@test.com', WRONG_PASSWORD)).status);
+        }
+
+        const lockAccount = vi.spyOn(appUsersRepository, 'lockAccount');
+        const clear = vi.spyOn(readmeAttempts, 'clear');
+        onTestFinished(() =>
+        {
+            lockAccount.mockRestore();
+            clear.mockRestore();
+        });
+
+        await liftSignInLock(user.id);
+
+        const liftCalls = [
+            ...lockAccount.mock.invocationCallOrder.map(order => ({ order, call: 'lockAccount' })),
+            ...clear.mock.invocationCallOrder.map(order => ({ order, call: 'clear' })),
+        ].sort((a, b) => a.order - b.order).map(({ call }) => call);
+
+        expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
+        expect(liftCalls).toEqual(['lockAccount', 'clear']);
+        expect((await login('known@test.com', PASSWORD)).status).toBe(200);
+    });
 });
 
 // ============================================================================
