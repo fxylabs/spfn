@@ -283,9 +283,13 @@ export function decodeToken(token: string): TokenPayload | null
  * - Server calculates: SHA-256(publicKey)
  * - Server compares: calculated === received
  *
- * @param publicKeyB64 - Base64 encoded DER public key
+ * The key arrives as the client sent it: a route does not validate the key
+ * fields it declares for its interceptor, so a direct client's body can carry
+ * anything there. A value that is not a string is not a key that matches.
+ *
+ * @param publicKeyB64 - Base64 encoded DER public key, as received
  * @param expectedFingerprint - SHA-256 hex fingerprint (64 chars)
- * @returns True if fingerprint matches
+ * @returns True if fingerprint matches; false for a key that is not a string
  *
  * @example
  * ```typescript
@@ -299,11 +303,11 @@ export function decodeToken(token: string): TokenPayload | null
  * ```
  */
 export function verifyKeyFingerprint(
-    publicKeyB64: string,
+    publicKeyB64: unknown,
     expectedFingerprint: string,
 ): boolean
 {
-    return crypto
+    return typeof publicKeyB64 === 'string' && crypto
         .createHash('sha256')
         .update(Buffer.from(publicKeyB64, 'base64'))
         .digest('hex') === expectedFingerprint;

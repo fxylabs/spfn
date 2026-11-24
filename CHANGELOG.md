@@ -603,8 +603,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported as done. The cancel line no longer names the invitee's address, and the cancellation
   reason, stored on the row, is not copied into it. `verifyKeyFingerprint` loses its `try`/`catch`
   and its `console.error('Failed to verify key fingerprint:', …)`: hashing a string's base64 bytes
-  does not throw, and the result for every string is unchanged. A log query that matched the console
-  text matches the new messages instead. Held by a test row for the rolled-back cancel.
+  does not throw, and a key that is not a string — a route does not validate the key fields it
+  declares for its interceptor, so a direct client's body can omit `publicKey` or send a number — is
+  answered `false`, so `POST /_auth/login` refuses it with 400 `InvalidKeyFingerprintError` as before.
+  A log query that matched the console text matches the new messages instead. Held by a table-driven
+  row over the five acts (rolled back, committed inside an application transaction, alone) and a
+  row for the login with no string key.
 
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked

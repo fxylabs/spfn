@@ -179,4 +179,31 @@ describe.skipIf(!dbAvailable)('API Flow Integration', () =>
         expect(response.status).toBe(401);
         expect((await response.json()).__type).toBeDefined();
     });
+
+    // The route does not validate the key fields it declares for its
+    // interceptor, so the fingerprint check is what a direct client's body reaches.
+    it('answers a login whose publicKey is not a string as a fingerprint mismatch, not a 500 (#489)', async () =>
+    {
+        await registerViaFlow('no-key@example.com', 'Password123!');
+        const statuses: number[] = [];
+
+        for (const publicKey of [undefined, 12345])
+        {
+            const response = await app.request('/_auth/login', {
+                method: 'POST',
+                headers: JSON_HEADERS,
+                body: JSON.stringify({
+                    email: 'no-key@example.com',
+                    password: 'Password123!',
+                    publicKey,
+                    keyId: 'no-key',
+                    fingerprint: 'a'.repeat(64),
+                    algorithm: 'ES256',
+                }),
+            });
+            statuses.push(response.status);
+        }
+
+        expect(statuses).toEqual([400, 400]);
+    });
 });
