@@ -12,16 +12,34 @@
  * proxy built from the route's template with the caller's params filled in,
  * and `redactPaths` is a backend option `createServer` applies — the Next.js
  * process never reads it. A line there names the route by its template
- * (`ctx.route.path`), as core's proxy does, or names no path; what it logs of
- * `ctx.path` otherwise is listed below with the reason.
+ * (`ctx.route.path`), as core's proxy does, or names no path. No auth line
+ * logs `ctx.path` or a piece of it: the CSRF-exempt lines once did, because
+ * the path equalled an entry of the application's exempt list (which can name
+ * a webhook path carrying a capability), and the OAuth lines logged the
+ * `:provider` segment, any `\w+` a caller sends.
+ *
+ * The scan knows an interceptor context by its declared shape, not its name:
+ * a parameter or `const` typed `RequestInterceptorContext` or
+ * `ResponseInterceptorContext` (directly, in a union, through `Pick` and the
+ * like, or through the file's own type alias), and the first parameter of an
+ * interceptor rule's `request`/`response`. It follows a path handed as an
+ * argument of its own to a function the same file declares, into a logger
+ * call there. What it does not see — an untyped helper parameter, a path
+ * handed inside another value or to a function from another file — is still
+ * a read, and A13b's exact list is what catches a new one; A13d shows which
+ * names are seen.
  *
  * | #    | goes unnoticed without the row                                          |
  * | ---- | ----------------------------------------------------------------------- |
  * | A13  | a new auth log line that names the request path itself, past redaction  |
- * | A13b | a path that reaches a log line through a call, unread by A13            |
+ * | A13b | a path that reaches a log line by a way the scan does not follow        |
+ * | A13c | a context's raw Request read for its URL (`ctx.request.url`)            |
+ * | A13d | a context known by another name, or a non-context taken for one         |
+ * | A13e | a path handed to a same-file function that logs it (the exempt warning) |
  */
 
 import { describe, it, expect } from 'vitest';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { againstList, productionSources, scanFile } from '../../../../../scripts/lib/request-path-scan.mjs';
 
@@ -29,26 +47,20 @@ const authSource = fileURLToPath(new URL('../..', import.meta.url));
 
 /**
  * Logged reads that do not write a path a caller chose. `<file> <expression>`
- * → how many times the file logs it; exact, as core's list is.
+ * → how many times the file logs it; exact, as core's list is. Auth has none.
  */
-const LOGGED_NOT_A_REQUEST = new Map<string, number>([
-    // logged only when it equals an entry of the application's CSRF exempt list
-    ['nextjs/interceptors/csrf.ts ctx.path', 1],
-    // the provider segment of a path the rule matches only as /_auth/oauth/\w+/(url|link)
-    ['nextjs/interceptors/oauth.ts provider (ctx.path)', 2],
-    ['nextjs/interceptors/oauth.ts ctx.path', 1],
-]);
+const LOGGED_NOT_A_REQUEST = new Map<string, number>([]);
 
 /** Every read of the request path, logged or not. `<file> <expression>` → count; exact. */
 const READS = new Map<string, number>([
     // the path the client signed, verified against its proof
     ['server/middleware/auth-profiles.ts c.req.path', 1],
     ['server/client-proof/guard.ts c.req.path', 1],
-    // the exempt-list match and its one warning (which logs only a listed entry), the
-    // exempt line above, and the route lookup
-    ['nextjs/interceptors/csrf.ts ctx.path', 4],
-    // the provider segment, above
-    ['nextjs/interceptors/oauth.ts ctx.path', 2],
+    // the route lookup, the exempt-list match, and the ignored-exemption
+    // warning's once-per-entry key (the warning logs the route's template)
+    ['nextjs/interceptors/csrf.ts ctx.path', 3],
+    // the provider segment the OAuth state is sealed for
+    ['nextjs/interceptors/oauth.ts ctx.path', 1],
     // which of a rule's paths this request is
     ['nextjs/interceptors/general-auth.ts ctx.path', 3],
     ['nextjs/interceptors/device-login.ts ctx.path', 5],
@@ -57,6 +69,14 @@ const READS = new Map<string, number>([
     ['nextjs/interceptors/password-reset.ts ctx.path', 3],
     ['nextjs/interceptors/signup-link.ts ctx.path', 3],
 ]);
+
+/** A fixture scanned as if it were a file of auth's: its logged sites and reads, as `<line> <text>` */
+function scanned(lines: string[]): { logged: string[]; reads: string[] }
+{
+    const { logged, reads } = scanFile(authSource, join(authSource, 'fixture.ts'), lines.join('\n'));
+
+    return { logged: logged.map(site => `${site.line} ${site.text}`), reads: reads.map(site => `${site.line} ${site.text}`) };
+}
 
 describe('request path in auth log lines', () =>
 {
@@ -76,5 +96,52 @@ describe('request path in auth log lines', () =>
 
         expect(unlisted, 'a read that reaches a log line goes through loggedPath(c); one that does not is listed here').toEqual([]);
         expect(inexact, 'the list names each read exactly: drop removed ones, count each expression').toEqual([]);
+    });
+
+    it('A13c: a context\'s request is a raw Request, read for its URL', () =>
+    {
+        expect(scanned([
+            'function handler(ctx: RequestInterceptorContext)',
+            '{',
+            "    logger.warn('raw', { url: ctx.request.url, at: ctx.request['url'], headers: ctx.request.headers });",
+            '}',
+        ])).toEqual({
+            logged: ['3 ctx.request.url', "3 ctx.request['url']"],
+            reads: ['3 ctx.request.url', "3 ctx.request['url']"],
+        });
+    });
+
+    it('A13d: a context is known by its declared shape, whatever its name', () =>
+    {
+        expect(scanned([
+            'type Proposal = RequestInterceptorContext | ResponseInterceptorContext;',
+            'const rule = { pathPattern: /x/, request: async (context, next) => log.info(\'rule\', { p: context.path }) };',
+            "function typed(c: Proposal) { log.info('alias', { p: c.path }); }",
+            "function picked(c: Pick<ResponseInterceptorContext, 'path'>) { log.info('pick', { p: c.path }); }",
+            "function taken({ path }: RequestInterceptorContext) { log.info('destructured', { path }); }",
+            "function untyped(ctx) { log.info('not seen', { p: ctx.path }); }",
+            "function other(ctx: { path: string; request: Request }) { log.info('not a context', { p: ctx.path, u: ctx.request.url }); }",
+        ])).toEqual({
+            logged: ['2 context.path', '3 c.path', '4 c.path', '5 path ((parameter) { path })'],
+            reads: ['2 context.path', '3 c.path', '4 c.path', '5 (parameter) { path }'],
+        });
+    });
+
+    it('A13e: a path handed to a function of the same file is followed into its logger call', () =>
+    {
+        expect(scanned([
+            "function report(path: string) { log.warn('entry ignored', { path }); }",
+            'function relay(entry: string) { report(entry); }',
+            "function byRoute(ctx: RequestInterceptorContext) { log.warn('entry ignored', { route: ctx.route?.path }); }",
+            'function check(ctx: RequestInterceptorContext)',
+            '{',
+            '    report(ctx.path);',
+            '    relay(ctx.path);',
+            '    byRoute(ctx);',
+            '}',
+        ])).toEqual({
+            logged: ['6 ctx.path → report()', '7 ctx.path → relay()'],
+            reads: ['6 ctx.path', '7 ctx.path'],
+        });
     });
 });

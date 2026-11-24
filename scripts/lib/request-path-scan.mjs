@@ -11,8 +11,12 @@
  * interceptor's context, and any `.pathname`. A path parameter is a segment of
  * the path, so `c.req.param()` is a read like `c.req.path`. A request object
  * is `<x>.req` or a Node `req`; its raw Request is `.raw` of one (or a
- * `clone()` of that); an interceptor context is `ctx`, as the proxy's
- * interceptors name it, and its `request` is a raw Request. Element access
+ * `clone()` of that). An interceptor context is known by its declared shape,
+ * whatever its name: a parameter or `const` typed `RequestInterceptorContext`
+ * or `ResponseInterceptorContext` (or a union, intersection, `Pick`-like
+ * wrapper, or the file's own type alias of one), and the first parameter of
+ * an interceptor rule's `request` or `response` — a member of an object
+ * literal that has a `pathPattern`. Its `request` is a raw Request. Element access
  * counts as member access (`c.req['path']`), and a computed key on a request
  * object (`c.req[name]`) as a read, since it could be any of them. A
  * `const`/`let` bound to a request object or to a path — by initialiser or by
@@ -23,7 +27,17 @@
  * `logged`: the reads that are an argument of a logger call —
  * `<receiver>.debug|info|warn|error|fatal|log(…)` or `<receiver>[level](…)`
  * with a receiver named like a logger, `log` or `console` — at any depth up to
- * the function they sit in. `reads`: every read, logged or not.
+ * the function they sit in; and a path handed as an argument of its own —
+ * the read, or a name holding it — to a function this file declares (by
+ * name: a function declaration, or a `const` bound to an arrow or function
+ * expression) whose parameter reaches a logger call there, followed through
+ * such calls in turn. `reads`: every read, logged or not.
+ *
+ * Not seen: a context reached by any other shape — an untyped helper
+ * parameter, `any` — and a path handed inside another value (`{ path }`, a
+ * template), to a function from another file, to a method, or to a parameter
+ * that is destructured. Those reads are still `reads`, and an exact list of
+ * them is what catches a new one.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -81,15 +95,95 @@ function memberName(node)
     return undefined;
 }
 
-/** The request object a name is when nothing in scope rebinds it: a Node `req`, an interceptor's `ctx` */
+/** The request object a name is when nothing in scope rebinds it: a Node `req` */
 function namedKind(node)
 {
-    if (!isReference(node))
+    return isReference(node) && node.text === 'req' ? 'req' : undefined;
+}
+
+/** The type names of an interceptor context, as core's proxy declares them */
+const CONTEXT_TYPES = new Set(['RequestInterceptorContext', 'ResponseInterceptorContext']);
+
+/** Wrappers whose result keeps the members of the type they are given */
+const KEEPING_WRAPPERS = new Set(['Pick', 'Omit', 'Partial', 'Required', 'Readonly']);
+
+/** The type aliases a source file declares, by name */
+const typeAliasCache = new WeakMap();
+
+function typeAliasesOf(source)
+{
+    if (!typeAliasCache.has(source))
     {
-        return undefined;
+        const aliases = new Map();
+        const collect = (node) =>
+        {
+            if (ts.isTypeAliasDeclaration(node))
+            {
+                aliases.set(node.name.text, node.type);
+            }
+
+            ts.forEachChild(node, collect);
+        };
+
+        collect(source);
+        typeAliasCache.set(source, aliases);
     }
 
-    return node.text === 'req' ? 'req' : (node.text === 'ctx' ? 'ctx' : undefined);
+    return typeAliasCache.get(source);
+}
+
+/** Whether a type annotation declares an interceptor context, directly or through the file's own alias */
+function isContextType(type, seen = new Set())
+{
+    if (type === undefined)
+    {
+        return false;
+    }
+
+    if (ts.isUnionTypeNode(type) || ts.isIntersectionTypeNode(type))
+    {
+        return type.types.some(member => isContextType(member, seen));
+    }
+
+    if (ts.isParenthesizedTypeNode(type))
+    {
+        return isContextType(type.type, seen);
+    }
+
+    if (!ts.isTypeReferenceNode(type))
+    {
+        return false;
+    }
+
+    const name = ts.isQualifiedName(type.typeName) ? type.typeName.right.text : type.typeName.text;
+    const aliased = typeAliasesOf(type.getSourceFile()).get(name);
+
+    if (CONTEXT_TYPES.has(name) || (KEEPING_WRAPPERS.has(name) && isContextType(type.typeArguments?.[0], seen)))
+    {
+        return true;
+    }
+
+    return aliased !== undefined && !seen.has(name) && isContextType(aliased, new Set([...seen, name]));
+}
+
+/** Whether a function is an interceptor rule's `request` or `response`: a member of an object literal with a `pathPattern` */
+function isRuleHandler(fn)
+{
+    const member = ts.isMethodDeclaration(fn) ? fn : fn.parent;
+    const literal = member?.parent;
+    const named = (property, names) => property.name !== undefined
+        && (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)) && names.includes(property.name.text);
+
+    return (ts.isPropertyAssignment(member) || ts.isMethodDeclaration(member)) && named(member, ['request', 'response'])
+        && ts.isObjectLiteralExpression(literal) && literal.properties.some(property => named(property, ['pathPattern']));
+}
+
+/** Whether a parameter is an interceptor context: by its declared type, or as a rule handler's first */
+function isContextParameter(parameter)
+{
+    const fn = parameter.parent;
+
+    return isContextType(parameter.type) || (parameter.type === undefined && fn.parameters[0] === parameter && isRuleHandler(fn));
 }
 
 /** The request object a member access reaches: `.req`, `.raw` of a request, `.request` of a context */
@@ -150,6 +244,19 @@ function isPathExpression(node, aliases)
     return isRequestRead(node, aliases) || memberName(node) === 'pathname';
 }
 
+/** The request path an expression is — a path expression, or a name holding one — as text; not one it contains */
+function pathItself(node, aliases)
+{
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node))
+    {
+        return pathItself(node.expression, aliases);
+    }
+
+    const alias = ts.isIdentifier(node) && isReference(node) ? aliases.get(node.text) : undefined;
+
+    return isPathExpression(node, aliases) ? node.getText() : (alias?.kind === 'path' ? alias.text : undefined);
+}
+
 /** The first request path in the subtree — a path expression, or a name holding one — as text */
 function pathIn(node, aliases)
 {
@@ -184,6 +291,11 @@ function patternSource(pattern, aliases)
     if (ts.isVariableDeclaration(owner))
     {
         return owner.initializer && requestKind(owner.initializer, aliases);
+    }
+
+    if (ts.isParameter(owner))
+    {
+        return isContextParameter(owner) ? 'ctx' : undefined;
     }
 
     const kind = ts.isBindingElement(owner) ? bindingKind(owner, aliases) : undefined;
@@ -242,25 +354,58 @@ function declaredAliases(declaration, aliases)
         return kind === undefined ? [] : [[name, { kind, text: `${name} (${bindingText(declaration)})` }]];
     }
 
-    const kind = declaration.initializer && requestKind(declaration.initializer, aliases);
+    const kind = isContextType(declaration.type) ? 'ctx' : declaration.initializer && requestKind(declaration.initializer, aliases);
     const path = declaration.initializer && pathIn(declaration.initializer, aliases);
 
     if (kind !== undefined)
     {
-        return [[name, { kind, text: `${name} (${declaration.initializer.getText()})` }]];
+        return [[name, { kind, text: `${name} (${declaration.initializer?.getText() ?? kind})` }]];
     }
 
     return path === undefined ? [] : [[name, { kind: 'path', text: `${name} (${path})` }]];
 }
 
 /**
+ * The names inside a function as its parameters leave them: a context
+ * parameter is one, what a destructured parameter takes out of a context is
+ * one, and any other parameter hides an outer name it shadows
+ */
+function parameterAliases(fn, outer)
+{
+    const aliases = new Map(outer);
+
+    for (const parameter of fn.parameters)
+    {
+        if (ts.isIdentifier(parameter.name))
+        {
+            aliases.delete(parameter.name.text);
+
+            if (isContextParameter(parameter))
+            {
+                aliases.set(parameter.name.text, { kind: 'ctx', text: parameter.name.text });
+            }
+
+            continue;
+        }
+
+        for (const [name, alias] of declaredAliases(parameter, aliases))
+        {
+            aliases.set(name, alias);
+        }
+    }
+
+    return aliases;
+}
+
+/**
  * The names under a node that hold a request path or a request object: the
- * outer ones, and those the `const`/`let` declarations among its statements
- * bind, each declaration seeing the ones before it
+ * outer ones, a function's parameters, and those the `const`/`let`
+ * declarations among its statements bind, each declaration seeing the ones
+ * before it
  */
 function aliasesUnder(node, outer)
 {
-    const aliases = new Map(outer);
+    const aliases = ts.isFunctionLike(node) ? parameterAliases(node, outer) : new Map(outer);
     const declarations = (node.statements ?? [])
         .filter(statement => ts.isVariableStatement(statement))
         .flatMap(statement => [...statement.declarationList.declarations]);
@@ -323,6 +468,33 @@ function insideLogCall(node)
 }
 
 /**
+ * The functions a file declares by name: function declarations, and `const`s
+ * bound to an arrow function or a function expression. The first of a name wins.
+ */
+function namedFunctions(source)
+{
+    const functions = new Map();
+    const collect = (node) =>
+    {
+        const named = ts.isFunctionDeclaration(node) && node.name ? [node.name.text, node]
+            : ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+                && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) ? [node.name.text, node.initializer]
+                : undefined;
+
+        if (named && !functions.has(named[0]))
+        {
+            functions.set(...named);
+        }
+
+        ts.forEachChild(node, collect);
+    };
+
+    collect(source);
+
+    return functions;
+}
+
+/**
  * Request paths in logger arguments, and request reads anywhere, of one file.
  * `file` is reported relative to `root`.
  *
@@ -333,12 +505,47 @@ function insideLogCall(node)
 export function scanFile(root, file, text = readFileSync(file, 'utf-8'))
 {
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    const functions = namedFunctions(source);
     const logged = [];
     const reads = [];
     const found = (node, what) =>
         ({ file: relative(root, file), line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1, text: what });
 
-    const visit = (node, outer) =>
+    /** Whether the parameter at `index` of a function this file names reaches a logger call there; memoised, cycles answer no */
+    const reachesLog = new Map();
+    const logsParameter = (fn, index) =>
+    {
+        const key = `${fn.pos} ${index}`;
+        const parameter = fn.parameters[index];
+
+        if (!reachesLog.has(key))
+        {
+            reachesLog.set(key, false);
+
+            if (parameter && ts.isIdentifier(parameter.name) && fn.body)
+            {
+                const sink = { logged: () => reachesLog.set(key, true), read: () => undefined };
+                walk(fn.body, new Map([[parameter.name.text, { kind: 'path', text: parameter.name.text }]]), sink);
+            }
+        }
+
+        return reachesLog.get(key);
+    };
+
+    /** The paths a call hands, as an argument of their own, to a parameter its callee logs — each as `<path> → <callee>()` */
+    const handedToLog = (node, aliases) =>
+    {
+        const fn = ts.isCallExpression(node) && ts.isIdentifier(node.expression) ? functions.get(node.expression.text) : undefined;
+
+        return fn === undefined ? [] : node.arguments.flatMap((argument, index) =>
+        {
+            const path = pathItself(argument, aliases);
+
+            return path !== undefined && logsParameter(fn, index) ? [[argument, `${path} → ${node.expression.text}()`]] : [];
+        });
+    };
+
+    const walk = (node, outer, sink) =>
     {
         const aliases = aliasesUnder(node, outer);
         const alias = ts.isIdentifier(node) && isReference(node) ? aliases.get(node.text) : undefined;
@@ -346,23 +553,28 @@ export function scanFile(root, file, text = readFileSync(file, 'utf-8'))
 
         if (path !== undefined && insideLogCall(node))
         {
-            logged.push(found(node, path));
+            sink.logged(node, path);
         }
+
+        handedToLog(node, aliases).forEach(([argument, handed]) => sink.logged(argument, handed));
 
         if (isRequestRead(node, aliases))
         {
-            reads.push(found(node, node.getText()));
+            sink.read(node, node.getText());
         }
 
         if (ts.isBindingElement(node) && bindingKind(node, aliases) === 'path')
         {
-            reads.push(found(node, bindingText(node)));
+            sink.read(node, bindingText(node));
         }
 
-        ts.forEachChild(node, child => visit(child, aliases));
+        ts.forEachChild(node, child => walk(child, aliases, sink));
     };
 
-    visit(source, new Map());
+    walk(source, new Map(), {
+        logged: (node, what) => logged.push(found(node, what)),
+        read: (node, what) => reads.push(found(node, what)),
+    });
 
     return { logged, reads };
 }

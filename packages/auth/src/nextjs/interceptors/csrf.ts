@@ -82,7 +82,7 @@ function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
 
     if (declaresRequired(ctx))
     {
-        reportIgnoredExemption(ctx.path);
+        reportIgnoredExemption(ctx);
 
         return 'enforce';
     }
@@ -91,7 +91,9 @@ function checkModeFor(ctx: RequestInterceptorContext): CsrfMode
 
     if (mode !== 'off' && getCsrfExemptPaths().includes(ctx.path))
     {
-        authLogger.interceptor.csrf.debug('Path is CSRF-exempt', { path: ctx.path });
+        // The route by its template, never the path: an application may exempt
+        // a webhook path that carries a capability token.
+        authLogger.interceptor.csrf.debug('Path is CSRF-exempt', { route: ctx.route?.path });
 
         return 'off';
     }
@@ -121,10 +123,14 @@ function declaresRequired(ctx: RequestInterceptorContext): boolean
 }
 
 /**
- * Warn, once per process, that the exempt list names a CSRF-required route's path.
+ * Warn, once per exempt entry and process, that the exempt list names a
+ * CSRF-required route's path. The line names the route by its template: the
+ * entry is the application's to choose, and a path can carry a capability.
  */
-function reportIgnoredExemption(path: string): void
+function reportIgnoredExemption(ctx: RequestInterceptorContext): void
 {
+    const path = ctx.path;
+
     if (exemptionsReported.has(path) || !getCsrfExemptPaths().includes(path))
     {
         return;
@@ -133,7 +139,7 @@ function reportIgnoredExemption(path: string): void
     exemptionsReported.add(path);
     authLogger.interceptor.csrf.warn(
         'CSRF exempt list names a path that is always checked — the entry is ignored',
-        { path },
+        { route: ctx.route?.path },
     );
 }
 

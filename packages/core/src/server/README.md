@@ -405,7 +405,9 @@ What it does not cover:
   lines carries a param value: its debug lines `→ RPC request` (`targetPath`) and
   `Found N matching interceptors for <method> <path>` name the route's pattern
   (`/api/import/:token`) and `routeName`, not the path the params fill in. `@spfn/auth`'s
-  interceptors follow the same rule: a CSRF refusal names the route's pattern (`route`).
+  interceptors follow the same rule and carry no param value either: their CSRF lines (a
+  refusal, an exempt path, an exempt entry that is ignored) and their OAuth start and link lines
+  name the route's pattern (`route`), and the rest name no path.
 - Prefer a request body over a path segment for a token where you can: a body reaches no
   access log.
 

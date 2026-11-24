@@ -620,11 +620,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix. On the Next.js side, where `ctx.path` is the backend path with the caller's params filled
   in and `redactPaths` is never read, the two CSRF refusal lines (`CSRF check refused this
   request`, `CSRF check would refuse this request (mode=warn)`) log `route`, the route's template
-  (`ctx.route.path`), in place of `path`; `Request token refused as expired — retrying once,
-  signed afresh` and the missing session-decision error line log no path. The scanner moved out of
-  core's test into `scripts/lib/request-path-scan.mjs`, learned the interceptor context's
-  `ctx.path`, and is run by each package's suite over its own sources with its own exact lists. A
-  log query that read `path` from the CSRF refusal lines reads `route` instead.
+  (`ctx.route.path`), in place of `path`; so do `Path is CSRF-exempt` and `CSRF exempt list names a
+  path that is always checked — the entry is ignored`, which logged the path because it equalled
+  an entry of the application's exempt list — and an application can exempt a webhook path that
+  carries a capability token. The OAuth lines `OAuth start refused: returnUrl is not a path within
+  the app`, `OAuth state created` and `OAuth link refused: …` log `route` in place of `provider`,
+  the `:provider` segment of the path — any `\w+` a caller sends, logged before the backend checked
+  that it names a provider. `Request token refused as expired — retrying once, signed afresh` and
+  the missing session-decision error line log no path. The scanner moved out of core's test into
+  `scripts/lib/request-path-scan.mjs` and is run by each package's suite over its own sources with
+  its own exact lists; auth's list of logged reads is empty. It knows an interceptor context by
+  its declared shape rather than by the name `ctx` — a parameter or `const` typed
+  `RequestInterceptorContext`/`ResponseInterceptorContext` (also through a union, `Pick` and the
+  like, or the file's own type alias) and the first parameter of an interceptor rule's
+  `request`/`response` — reads its `path` and its raw Request's `url`, and follows a path handed as
+  an argument of its own to a function of the same file into a logger call there. A log query that
+  read `path` from the CSRF lines, or `provider` from the OAuth lines, reads `route` instead.
 
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked

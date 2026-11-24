@@ -17,7 +17,7 @@
  * `newAlgorithm` rather than under names that rule also writes (#99).
  */
 
-import type { InterceptorRule } from '@spfn/core/nextjs/server';
+import type { InterceptorRule, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { unsealSession } from '../../server/lib/session';
 import { signKeyReplacementProof } from '../../server/lib/key-replacement-proof';
@@ -186,7 +186,7 @@ export const loginRegisterInterceptor: InterceptorRule =
  * Whether the session being sealed is a kept one: the sign-in asked, or — for a
  * renewal, which continues the session it renews — the renewed one was.
  */
-function keptSession(ctx: { path: string; metadata: Record<string, any> }): boolean
+function keptSession(ctx: Pick<ResponseInterceptorContext, 'path' | 'metadata'>): boolean
 {
     return ctx.path === '/_auth/session/renew/verify'
         ? ctx.metadata.inboundSession?.remember === true
