@@ -16,9 +16,12 @@
  * or `ResponseInterceptorContext` (or a union, intersection, `Pick`-like
  * wrapper, or the file's own type alias of one), and the first parameter of
  * an interceptor rule's `request` or `response` — a member of an object
- * literal that has a `pathPattern`. Its `request` is a raw Request. Element access
- * counts as member access (`c.req['path']`), and a computed key on a request
- * object (`c.req[name]`) as a read, since it could be any of them. A
+ * literal that has a `pathPattern`. A parameter or `const` named `ctx` whose
+ * type is `any`, `unknown`, or has no annotation at all is a context too —
+ * nothing else gives the scan a shape to go by, so the name is what the old,
+ * shape-blind scanner read instead. Its `request` is a raw Request. Element
+ * access counts as member access (`c.req['path']`), and a computed key on a
+ * request object (`c.req[name]`) as a read, since it could be any of them. A
  * `const`/`let` bound to a request object or to a path — by initialiser or by
  * destructuring (`const { path } = c.req`, `const { req } = c`,
  * `const { raw } = c.req`) — holds one too, in the block that declares it and
@@ -33,11 +36,12 @@
  * expression) whose parameter reaches a logger call there, followed through
  * such calls in turn. `reads`: every read, logged or not.
  *
- * Not seen: a context reached by any other shape — an untyped helper
- * parameter, `any` — and a path handed inside another value (`{ path }`, a
- * template), to a function from another file, to a method, or to a parameter
- * that is destructured. Those reads are still `reads`, and an exact list of
- * them is what catches a new one.
+ * Not seen: a context reached by any other shape under any other name — a
+ * helper parameter typed `any` or left untyped that is not named `ctx` — and
+ * a path handed inside another value (`{ path }`, a template), to a function
+ * from another file, to a method, or to a parameter that is destructured.
+ * Those reads are still `reads`, and an exact list of them is what catches a
+ * new one.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -178,12 +182,26 @@ function isRuleHandler(fn)
         && ts.isObjectLiteralExpression(literal) && literal.properties.some(property => named(property, ['pathPattern']));
 }
 
-/** Whether a parameter is an interceptor context: by its declared type, or as a rule handler's first */
+/** Whether a type annotation gives the scan nothing to go by: absent, `any`, or `unknown` */
+function isUntypedAnnotation(type)
+{
+    return type === undefined || type.kind === ts.SyntaxKind.AnyKeyword || type.kind === ts.SyntaxKind.UnknownKeyword;
+}
+
+/** Whether a name is `ctx` with no shape of its own to go by, the one case the scan still knows by name */
+function isNamedCtx(name, type)
+{
+    return name === 'ctx' && isUntypedAnnotation(type);
+}
+
+/** Whether a parameter is an interceptor context: by its declared type, as a rule handler's first, or named `ctx` and untyped */
 function isContextParameter(parameter)
 {
     const fn = parameter.parent;
 
-    return isContextType(parameter.type) || (parameter.type === undefined && fn.parameters[0] === parameter && isRuleHandler(fn));
+    return isContextType(parameter.type)
+        || (parameter.type === undefined && fn.parameters[0] === parameter && isRuleHandler(fn))
+        || (ts.isIdentifier(parameter.name) && isNamedCtx(parameter.name.text, parameter.type));
 }
 
 /** The request object a member access reaches: `.req`, `.raw` of a request, `.request` of a context */
@@ -354,7 +372,8 @@ function declaredAliases(declaration, aliases)
         return kind === undefined ? [] : [[name, { kind, text: `${name} (${bindingText(declaration)})` }]];
     }
 
-    const kind = isContextType(declaration.type) ? 'ctx' : declaration.initializer && requestKind(declaration.initializer, aliases);
+    const kind = isContextType(declaration.type) ? 'ctx'
+        : (declaration.initializer && requestKind(declaration.initializer, aliases)) ?? (isNamedCtx(name, declaration.type) ? 'ctx' : undefined);
     const path = declaration.initializer && pathIn(declaration.initializer, aliases);
 
     if (kind !== undefined)

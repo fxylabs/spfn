@@ -18,16 +18,21 @@
  * a webhook path carrying a capability), and the OAuth lines logged the
  * `:provider` segment, any `\w+` a caller sends.
  *
- * The scan knows an interceptor context by its declared shape, not its name:
- * a parameter or `const` typed `RequestInterceptorContext` or
+ * The scan knows an interceptor context mostly by its declared shape, not its
+ * name: a parameter or `const` typed `RequestInterceptorContext` or
  * `ResponseInterceptorContext` (directly, in a union, through `Pick` and the
  * like, or through the file's own type alias), and the first parameter of an
- * interceptor rule's `request`/`response`. It follows a path handed as an
+ * interceptor rule's `request`/`response`. The one place it still goes by
+ * name: a parameter or `const` named exactly `ctx` with no shape of its own
+ * to go by — typed `any`, typed `unknown`, or left with no annotation at all
+ * — is a context too, since nothing else gives the scan something to read.
+ * A name other than `ctx`, or a `ctx` typed to something concrete that is not
+ * one of the known context types, is not. It follows a path handed as an
  * argument of its own to a function the same file declares, into a logger
- * call there. What it does not see — an untyped helper parameter, a path
- * handed inside another value or to a function from another file — is still
- * a read, and A13b's exact list is what catches a new one; A13d shows which
- * names are seen.
+ * call there. What it does not see — a differently-named untyped helper
+ * parameter, a path handed inside another value or to a function from
+ * another file — is still a read, and A13b's exact list is what catches a
+ * new one; A13d shows which names are seen by shape, A13f by name.
  *
  * | #    | goes unnoticed without the row                                          |
  * | ---- | ----------------------------------------------------------------------- |
@@ -36,6 +41,7 @@
  * | A13c | a context's raw Request read for its URL (`ctx.request.url`)            |
  * | A13d | a context known by another name, or a non-context taken for one         |
  * | A13e | a path handed to a same-file function that logs it (the exempt warning) |
+ * | A13f | a context named `ctx` with no shape of its own — `any`, `unknown`, or untyped — still read by name |
  */
 
 import { describe, it, expect } from 'vitest';
@@ -119,11 +125,25 @@ describe('request path in auth log lines', () =>
             "function typed(c: Proposal) { log.info('alias', { p: c.path }); }",
             "function picked(c: Pick<ResponseInterceptorContext, 'path'>) { log.info('pick', { p: c.path }); }",
             "function taken({ path }: RequestInterceptorContext) { log.info('destructured', { path }); }",
-            "function untyped(ctx) { log.info('not seen', { p: ctx.path }); }",
+            "function untyped(context) { log.info('not seen', { p: context.path }); }",
             "function other(ctx: { path: string; request: Request }) { log.info('not a context', { p: ctx.path, u: ctx.request.url }); }",
         ])).toEqual({
             logged: ['2 context.path', '3 c.path', '4 c.path', '5 path ((parameter) { path })'],
             reads: ['2 context.path', '3 c.path', '4 c.path', '5 (parameter) { path }'],
+        });
+    });
+
+    it('A13f: a context named ctx with no shape of its own — any, unknown, or untyped — is read by name', () =>
+    {
+        expect(scanned([
+            "export function probe(ctx: any) { authLogger.interceptor.csrf.warn('x', { path: ctx.path }); }",
+            "function asUnknown(ctx: unknown) { log.info('cast', { p: (ctx as { path: string }).path }); }",
+            "function bare(ctx) { log.info('bare', { p: ctx.path }); }",
+            "function notCtx(context: any) { log.info('not ctx', { p: context.path }); }",
+            "function shapedCtx(ctx: { path: string }) { log.info('not any/unknown/absent', { p: ctx.path }); }",
+        ])).toEqual({
+            logged: ['1 ctx.path', '2 (ctx as { path: string }).path', '3 ctx.path'],
+            reads: ['1 ctx.path', '2 (ctx as { path: string }).path', '3 ctx.path'],
         });
     });
 
