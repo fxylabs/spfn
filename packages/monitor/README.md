@@ -235,6 +235,11 @@ await trackError(
 
 `ErrorTrackingContext` requires `statusCode`, `path`, `method`; the rest are optional.
 
+`headers` and `query` are stored in `error_events` and sent to Slack exactly as given. The monitor
+decides nothing about them: `createMonitorErrorHandler` passes core's `OnErrorContext.request`, in
+which core has already left out every value not known to be safe (see core's middleware README,
+`OnErrorContext`). Pass that, never a request's raw headers or query.
+
 ### Status management
 
 ```typescript

@@ -1,8 +1,9 @@
 # @spfn/core/middleware — Built-in HTTP middleware (error handling + request logging + proxy-guard + rate limiting)
 
-Production Hono middleware factories and a masking helper: `ErrorHandler` (serializes
+Production Hono middleware factories: `ErrorHandler` (serializes
 thrown errors into HTTP responses), `RequestLogger` (structured request/response logging
-with request IDs, slow-request detection, and sensitive-data masking), `createProxyGuard`
+with request IDs and slow-request detection; a failed write's body is logged as its shape,
+never its values), `createProxyGuard`
 (verifies a trusted-proxy HMAC signature + origin allowlist and tags `clientType`), and
 `rateLimit` (Redis-backed fixed-window limiter for brute-force / DoS protection).
 
@@ -17,7 +18,6 @@ with request IDs, slow-request detection, and sensitive-data masking), `createPr
 import {
     ErrorHandler,
     RequestLogger,
-    maskSensitiveData,
     createProxyGuard,
     createCacheNonceStore,
     rateLimit,
@@ -51,7 +51,6 @@ From `@spfn/core/middleware`:
   — register with `app.onError(...)`, **not** `app.use(...)`.
 - `RequestLogger(options?: RequestLoggerOptions)` → Hono middleware `(c, next) => Promise<void>`
   — register with `app.use(...)`.
-- `maskSensitiveData(obj, sensitiveFields, seen?)` → deep-masked copy of `obj`.
 - `createProxyGuard(config?: ProxyGuardConfig)` → Hono middleware. Verifies the proxy→backend
   HMAC signature (rotating key set, keyed by `keyId`) over `method+path+query+body` and the
   client address (`x-spfn-proxy-client-ip`, signature version 2), plus an optional origin
@@ -287,16 +286,32 @@ interface OnErrorContext {
     timestamp: string;    // ISO 8601
     userId?: string;      // from c.get('auth')?.userId, when auth middleware set it
     request: {
-        headers: Record<string, string>;  // sensitive headers masked to '***'; Referer redacted like a path
-        query: Record<string, string>;
+        headers: Record<string, string>;  // every name; a value only for an allow-listed header, else '***'
+        query: Record<string, string>;    // every name; every value '***'
     };
 }
 ```
 
-Masked request headers: `authorization`, `cookie`, `x-api-key`, `x-auth-token`
-(case-insensitive). A `Referer` whose path falls under a declared `redactPaths` prefix becomes
-`<origin><prefix>/[redacted]`: a page served under a capability path sends its own URL with every
-request it makes. `onError` receives the error itself, unchanged — its message is yours to keep
+`request` copies only values known to be safe; anything else is there by name only. Request data
+is the application's, and core cannot know which of its names is a secret — a list of names to
+hide missed every secret nobody had added to it. A header's value is carried only for these names
+(case-insensitive), and every other header — `authorization`, `cookie`, `x-spfn-proof`,
+`x-forwarded-for`, an application's own — is `'***'`:
+
+`accept`, `accept-encoding`, `accept-language`, `cache-control`, `connection`, `content-length`,
+`content-type`, `host`, `origin`, `pragma`, `referer`, `user-agent`, `sec-ch-ua`,
+`sec-ch-ua-mobile`, `sec-ch-ua-platform`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site`,
+`sec-fetch-user`, `x-forwarded-proto`, `x-forwarded-host`, `x-request-id`, `x-spfn-client-kind`,
+`x-spfn-client-version`, `x-spfn-client-contract-version`, `x-spfn-auth-profile`,
+`x-spfn-proxy-signature-version`.
+
+Every query parameter keeps its name and has the value `'***'`. A `Referer` is the referring
+page's URL, and only its origin and path are known to be safe: it keeps those, its query
+parameters by name with the value `'***'` (the request's own rule — a reset link's `?token=` rides
+in the page URL as easily), and no fragment; `https://app.example.com/reset?token=…#x` becomes
+`https://app.example.com/reset?token=***`. A path under a declared `redactPaths` prefix becomes
+`<prefix>/[redacted]` — a page served under a capability path sends its own URL with every request
+it makes — and a value that is not an http(s) URL is `'***'`. `onError` receives the error itself, unchanged — its message is yours to keep
 out of what you send on (`loggedError(c, err)` is the redacted form). `requestId` and `userId` are only populated when the corresponding
 upstream middleware (RequestLogger / auth) has run.
 
@@ -317,7 +332,13 @@ Per-request logging middleware. Register with **`app.use()`**.
   `@spfn/core:api`.
 - **Slow requests** (`duration >= slowRequestThreshold`) get `slow: true`.
 - **For 4xx/5xx**: clones the response to attach the error `response` body, and for
-  `POST`/`PUT`/`PATCH` attaches the masked request body (`request`). Under a declared
+  `POST`/`PUT`/`PATCH` attaches the JSON request body's **shape** (`request`): every key kept,
+  every leaf replaced by its JSON type — `'<string>'`, `'<number>'`, `'<boolean>'`, `'<null>'` —
+  and an array by its elements' shapes. `{ email: 'a@b.c', code: '123456', remember: true }` is
+  logged as `{ email: '<string>', code: '<string>', remember: '<boolean>' }`. No value is copied:
+  the body is the application's, and a list of field names to hide missed every secret field
+  nobody had added to it. Keys are logged, so a record-typed field (auth's `metadata`) shows its
+  keys with hidden values. Under a declared
   `redactPaths` prefix it attaches neither: the response may be built from the path (a
   `NotFoundError` may name the token). The line keeps status, duration and the redacted path.
 - If the downstream throws, logs `Request failed` at `error` level **and re-throws**
@@ -329,7 +350,6 @@ Per-request logging middleware. Register with **`app.use()`**.
 | Option | Type | Default |
 |--------|------|---------|
 | `excludePaths` | `string[]` | `['/_core/health', '/health', '/ping', '/favicon.ico']` |
-| `sensitiveFields` | `string[]` | `['password', 'token', 'apiKey', 'secret', 'authorization']` |
 | `slowRequestThreshold` | `number` (ms) | `1000` |
 
 `excludePaths` matches **exact or prefix** — `/health` also excludes `/health/db` — against the
@@ -344,7 +364,6 @@ declared prefix.
 ```typescript
 app.use('*', RequestLogger({
     excludePaths: ['/health', '/metrics', '/_next'],
-    sensitiveFields: ['password', 'creditCard', 'ssn'],
     slowRequestThreshold: 500,
 }));
 ```
@@ -368,11 +387,11 @@ const requestId = c.get('requestId'); // string | undefined
 { "level": "info", "module": "api", "msg": "Request completed",
   "requestId": "req_...", "method": "POST", "path": "/users", "status": 201, "duration": 45 }
 
-// completed (4xx — includes response body + masked request body)
+// completed (4xx — includes response body + request body shape)
 { "level": "warn", "module": "api", "msg": "Request completed",
   "status": 400, "duration": 2,
   "response": { "__type": "ValidationError", "message": "Invalid request body" },
-  "request": { "status": 123, "password": "***MASKED***" } }
+  "request": { "status": "<number>", "password": "<string>" } }
 
 // slow
 { "level": "info", "msg": "Request completed", "status": 200, "duration": 1250, "slow": true }
@@ -416,31 +435,6 @@ importLogger.warn('Import refused', loggedError(c, error), { path: loggedPath(c)
 
 On a bare Hono app that does not go through `createServer`, publish the declaration yourself,
 before the first request: `setRedactPaths(['/api/import'])`.
-
----
-
-## maskSensitiveData
-
-Deep-masks fields whose name (case-insensitive) **contains** any of `sensitiveFields`,
-returning a new structure. Used internally by `RequestLogger`; exported for reuse.
-
-```typescript
-import { maskSensitiveData } from '@spfn/core/middleware';
-
-maskSensitiveData(
-    { username: 'john', password: 'secret', apiKey: 'sk_live_x' },
-    ['password', 'apiKey'],
-);
-// → { username: 'john', password: '***MASKED***', apiKey: '***MASKED***' }
-```
-
-- **Partial + case-insensitive**: `['password']` masks `userPassword`, `PASSWORD`, etc.
-- **Recursive**: descends into nested objects and arrays.
-- **Immutable**: shallow-clones at each level; the input is untouched.
-- **Circular-safe**: repeated references become `'[Circular]'` (via an internal `WeakSet`).
-- Non-objects (`null`, primitives) are returned as-is.
-
-Replacement token is the literal string `'***MASKED***'`.
 
 ---
 
@@ -720,8 +714,6 @@ Read these before relying on rate limiting as a security control:
   per-route via the route DSL. Route-level skip applies only to `NamedMiddleware` created
   with `defineMiddleware` (`@spfn/core/route`). To exclude paths from logging, use
   `excludePaths`, not `.skip()`.
-- **`sensitiveFields` matches by substring.** A field named `tokenize` is masked because it
-  contains `token`. Choose field names with that in mind.
 - **Don't import from `@spfn/core`.** No root barrel exists; use `@spfn/core/middleware`.
 - **`RequestLoggerConfig` is deprecated** — alias of `RequestLoggerOptions`.
 
@@ -790,13 +782,10 @@ interface OnErrorContext {
 
 interface RequestLoggerOptions {
     excludePaths?: string[];        // default: ['/_core/health', '/health', '/ping', '/favicon.ico']; decoded path
-    sensitiveFields?: string[];     // default: ['password','token','apiKey','secret','authorization']
     slowRequestThreshold?: number;  // default: 1000 (ms)
 }
 
 type RequestLoggerConfig = RequestLoggerOptions; // @deprecated
-
-function maskSensitiveData(obj: any, sensitiveFields: string[], seen?: WeakSet<object>): any;
 
 function loggedPath(c: Context): string;               // c.req.path, or '<prefix>/[redacted]'
 function isRedactedPath(c: Context): boolean;          // the path falls under a declared prefix

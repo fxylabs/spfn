@@ -69,6 +69,15 @@ export interface ErrorHandlerOptions
 
 /**
  * Context passed to onError callback
+ *
+ * `request` copies only values known to be safe. `headers` names every request
+ * header and carries the value of a header on core's allow-list alone (accept,
+ * content-type, user-agent, the SPFN client descriptors, …), `'***'` for any
+ * other — a credential, a proof, an IP address and a header nobody has judged
+ * alike. `Referer` carries the referring page's origin and path (redacted under
+ * a declared prefix) and its query parameters by name with the value `'***'`,
+ * no fragment, and is `'***'` when it is not an http(s) URL (`loggedUrl`). `query` names
+ * every parameter and carries no value (`'***'`).
  */
 export interface OnErrorContext
 {
@@ -160,12 +169,35 @@ function resolveRequestId(c: Context): string
     return existing ?? randomBytes(16).toString('hex');
 }
 
-const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'x-auth-token']);
+// An allow-list, not a deny-list: a header not named here is a header nobody has judged, so its value stays out.
+const LOGGED_HEADERS = new Set([
+    'accept', 'accept-encoding', 'accept-language', 'cache-control', 'connection',
+    'content-length', 'content-type', 'host', 'origin', 'pragma', 'referer', 'user-agent',
+    'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+    'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user',
+    'x-forwarded-proto', 'x-forwarded-host', 'x-request-id',
+    'x-spfn-client-kind', 'x-spfn-client-version', 'x-spfn-client-contract-version',
+    'x-spfn-auth-profile', 'x-spfn-proxy-signature-version',
+]);
 
 /**
- * Extract headers from request, masking sensitive values. `Referer` names the
- * page that made the request, so it is redacted like a request path
- * (`loggedUrl`).
+ * The value `OnErrorContext` carries for one header: its own for a header in
+ * `LOGGED_HEADERS`, `'***'` for any other. `Referer` is the URL of the page
+ * that made the request, so only its origin and path are copied, and its query
+ * by name (`loggedUrl`).
+ */
+function loggedHeaderValue(name: string, value: string): string
+{
+    if (!LOGGED_HEADERS.has(name))
+    {
+        return '***';
+    }
+
+    return name === 'referer' ? loggedUrl(value) : value;
+}
+
+/**
+ * Every request header by name, each with its `loggedHeaderValue`
  */
 function extractHeaders(c: Context): Record<string, string>
 {
@@ -173,36 +205,20 @@ function extractHeaders(c: Context): Record<string, string>
 
     c.req.raw.headers.forEach((value, key) =>
     {
-        const name = key.toLowerCase();
-
-        headers[key] = SENSITIVE_HEADERS.has(name) ? '***' : name === 'referer' ? loggedUrl(value) : value;
+        headers[key] = loggedHeaderValue(key.toLowerCase(), value);
     });
 
     return headers;
 }
 
-const SENSITIVE_QUERY_PARAMS = new Set([
-    'token', 'access_token', 'refresh_token', 'id_token', 'code',
-    'secret', 'client_secret', 'password', 'passwd', 'pwd',
-    'api_key', 'apikey', 'key', 'signature', 'sig',
-    'session', 'sessionid', 'auth', 'authorization',
-]);
-
 /**
- * Extract query params from request, masking sensitive values so credentials in
- * the URL (?token=…, ?code=…) don't reach error logs / the onError callback.
+ * Every query parameter by name, every value `'***'`: which of an
+ * application's query names carries a secret (`?token=`, `?code=`) is the
+ * application's to know, not core's.
  */
 function extractQuery(c: Context): Record<string, string>
 {
-    const query = c.req.query();
-    const masked: Record<string, string> = {};
-
-    for (const [key, value] of Object.entries(query))
-    {
-        masked[key] = SENSITIVE_QUERY_PARAMS.has(key.toLowerCase()) ? '***' : value;
-    }
-
-    return masked;
+    return Object.fromEntries(Object.keys(c.req.query()).map(name => [name, '***']));
 }
 
 /**

@@ -38,20 +38,6 @@ export interface RequestLoggerOptions
     excludePaths?: string[];
 
     /**
-     * Field names to mask in logged request bodies
-     *
-     * Case-insensitive partial matching (e.g., 'password' masks 'userPassword').
-     *
-     * @default ['password', 'token', 'apiKey', 'secret', 'authorization']
-     *
-     * @example
-     * ```typescript
-     * sensitiveFields: ['password', 'creditCard', 'ssn']
-     * ```
-     */
-    sensitiveFields?: string[];
-
-    /**
      * Threshold in milliseconds for marking requests as slow
      *
      * Slow requests are logged with `slow: true` flag.
@@ -68,7 +54,6 @@ export type RequestLoggerConfig = RequestLoggerOptions;
 
 const DEFAULT_CONFIG: Required<RequestLoggerConfig> = {
     excludePaths: ['/_core/health', '/health', '/ping', '/favicon.ico'],
-    sensitiveFields: ['password', 'token', 'apiKey', 'secret', 'authorization'],
     slowRequestThreshold: 1000,
 };
 
@@ -84,37 +69,33 @@ function generateRequestId(): string
 }
 
 /**
- * Mask sensitive data with circular reference handling
+ * A parsed JSON body's shape: every key kept, every leaf replaced by its JSON
+ * type (`'<string>'`, `'<number>'`, `'<boolean>'`, `'<null>'`), an array by
+ * its elements' shapes.
+ *
+ * The body is request data the framework does not own, and no list of field
+ * names can say which of an application's fields is secret: a name left off
+ * such a list was logged with its value. The shape names the fields that
+ * caused a failure and carries none of their values.
  */
-export function maskSensitiveData(
-    obj: any,
-    sensitiveFields: string[],
-    seen = new WeakSet(),
-): any
+function jsonShape(value: unknown): unknown
 {
-    if (!obj || typeof obj !== 'object') return obj;
-
-    if (seen.has(obj)) return '[Circular]';
-    seen.add(obj);
-
-    const lowerFields = sensitiveFields.map(f => f.toLowerCase());
-    const masked = Array.isArray(obj) ? [...obj] : { ...obj };
-
-    for (const key in masked)
+    if (Array.isArray(value))
     {
-        const lowerKey = key.toLowerCase();
-
-        if (lowerFields.some(field => lowerKey.includes(field)))
-        {
-            masked[key] = '***MASKED***';
-        }
-        else if (typeof masked[key] === 'object' && masked[key] !== null)
-        {
-            masked[key] = maskSensitiveData(masked[key], sensitiveFields, seen);
-        }
+        return value.map(jsonShape);
     }
 
-    return masked;
+    if (value === null)
+    {
+        return '<null>';
+    }
+
+    if (typeof value === 'object')
+    {
+        return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, jsonShape(field)]));
+    }
+
+    return `<${typeof value}>`;
 }
 
 /**
@@ -122,7 +103,8 @@ export function maskSensitiveData(
  *
  * Logs incoming requests with method, path, IP, and user agent.
  * Logs completed requests with status code and duration.
- * Automatically generates unique request IDs and masks sensitive data.
+ * Automatically generates unique request IDs. A failed write's request body is
+ * logged as its shape (field names and JSON types), never its values.
  *
  * @param options - Configuration options
  * @returns Hono middleware function
@@ -137,7 +119,6 @@ export function maskSensitiveData(
  * // Add request logging
  * app.use(RequestLogger({
  *     excludePaths: ['/health', '/metrics'],
- *     sensitiveFields: ['password', 'token'],
  *     slowRequestThreshold: 2000,
  * }));
  *
@@ -225,14 +206,14 @@ export function RequestLogger(options?: RequestLoggerOptions)
                     // Response is not JSON or already consumed - ignore
                 }
 
-                // Add request body for POST/PUT/PATCH to see what data caused the error
+                // Add the request body's shape for POST/PUT/PATCH to see which
+                // fields the failed write carried
                 if (['POST', 'PUT', 'PATCH'].includes(method))
                 {
                     try
                     {
-                        // Try to get the already parsed body from context
-                        const requestBody = await c.req.json();
-                        logData.request = maskSensitiveData(requestBody, cfg.sensitiveFields);
+                        // Hono keeps the body the route already parsed
+                        logData.request = jsonShape(await c.req.json());
                     }
                     catch
                     {

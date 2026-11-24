@@ -26,7 +26,7 @@
  * | T15c | the request logger's `Request failed` line, downstream throwing a message quoting the segment | that line carrying the message |
  * | T16a | spellings the router does not serve (`//`, case, `%2F`, double encoding, `..` after decoding) | a 404 logging the token the client meant for the route |
  * | T16b | a mixed-case entry; the same rules beside the boundary, and an undeclared 404 | an entry that matches nothing, over-redaction, or a 404's path no longer written as received |
- * | T15d | a `Referer` under the prefix in the `onError` context                 | the referring page's token in the context's headers             |
+ * | T15d | a `Referer` under the prefix, one outside it, and two that are not http(s) URLs (no scheme; a scheme with no origin), in the `onError` context | the referring page's token in the context's headers, or a value that is not an http(s) URL copied as it is |
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -341,7 +341,7 @@ describe('a declared path prefix is redacted in every core log line (#164)', () 
         expect(output()).not.toContain(SECRET);
     });
 
-    it('T15d: a Referer under the prefix reaches the onError context redacted; any other is unchanged', async () =>
+    it('T15d: a Referer under the prefix reaches the onError context redacted, any other keeps its path, a non-http(s) value is masked', async () =>
     {
         const onError = vi.fn<(err: Error, context: OnErrorContext) => void>();
         const app = await createServer(serverConfig(builder => builder
@@ -349,16 +349,22 @@ describe('a declared path prefix is redacted in every core log line (#164)', () 
             .logging({ redactPaths: ['/api/import'] })));
         captureLoggerClass(Logger);
 
-        const referers = [`https://app.test/api/import/${SECRET}?x=1`, `https://app.test//API/import/${SECRET}`, 'https://app.test/users/7?tab=a'];
+        const referers = [
+            `https://app.test/api/import/${SECRET}?x=1`,
+            `https://app.test//API/import/${SECRET}`,
+            'https://app.test/users/7?tab=a',
+            `/api/import/${SECRET}`,
+            `token:${SECRET}`,
+        ];
 
         for (const referer of referers)
         {
             await Promise.resolve(app.fetch(new Request('http://localhost/users/1/fail', { headers: { referer } })));
         }
-        await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(5));
 
         expect(onError.mock.calls.map(([, context]) => context.request.headers.referer))
-            .toEqual([`https://app.test${REDACTED}`, `https://app.test${REDACTED}`, 'https://app.test/users/7?tab=a']);
+            .toEqual([`https://app.test${REDACTED}?x=***`, `https://app.test${REDACTED}`, 'https://app.test/users/7?tab=***', '***', '***']);
     });
 
     it('T16a: a spelling of a declared prefix the router does not serve is redacted in its 404 lines', async () =>

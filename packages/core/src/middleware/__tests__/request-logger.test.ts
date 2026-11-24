@@ -13,9 +13,11 @@
  * - src/server/core/middleware/request-logger.ts
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
-import { RequestLogger, maskSensitiveData } from '../request-logger';
+import { Logger } from '@spfn/core/logger';
+import { RequestLogger } from '../request-logger';
+import { captureLoggerClass } from '../../logger/__tests__/helpers/leak-probe';
 
 type Env = {
     Variables: {
@@ -26,6 +28,8 @@ type Env = {
 
 describe('RequestLogger Middleware', () => 
 {
+    afterEach(() => vi.restoreAllMocks());
+
     describe('Basic Logging', () => 
     {
         it('should log request and response without errors', async () => 
@@ -108,6 +112,32 @@ describe('RequestLogger Middleware', () =>
             const res = await app.request('/not-found');
 
             expect(res.status).toBe(404);
+        });
+
+        it('#469: a failed write logs the body\'s shape and none of its values', async () =>
+        {
+            const { lines, output } = captureLoggerClass(Logger);
+            const app = new Hono();
+            app.use(RequestLogger());
+            app.post('/verify', async (c) =>
+            {
+                await c.req.json();
+
+                return c.json({ __type: 'ValidationError', message: 'Invalid code' }, 400);
+            });
+
+            await app.request('/verify', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ code: 'probe-code-735102', nested: { recoveryCode: 'probe-recovery-9f3k' } }),
+            });
+
+            expect(lines.find(line => line.message === 'Request completed')!.context!.request).toEqual({
+                code: '<string>',
+                nested: { recoveryCode: '<string>' },
+            });
+            expect(output()).not.toContain('probe-code-735102');
+            expect(output()).not.toContain('probe-recovery-9f3k');
         });
 
         it('should log 5xx responses', async () => 
@@ -300,225 +330,6 @@ describe('RequestLogger Middleware', () =>
 
             expect(res.status).toBe(200);
             expect(json.data).toBe('test');
-        });
-    });
-});
-
-describe('maskSensitiveData', () => 
-{
-    describe('Basic Masking', () => 
-    {
-        it('should mask password fields', () => 
-        {
-            const data = {
-                username: 'john',
-                password: 'secret123',
-                email: 'john@example.com',
-            };
-
-            const masked = maskSensitiveData(data, ['password']);
-
-            expect(masked.username).toBe('john');
-            expect(masked.password).toBe('***MASKED***');
-            expect(masked.email).toBe('john@example.com');
-        });
-
-        it('should mask multiple sensitive fields', () => 
-        {
-            const data = {
-                username: 'john',
-                password: 'secret123',
-                token: 'abc123',
-                apiKey: 'key456',
-            };
-
-            const masked = maskSensitiveData(data, ['password', 'token', 'apiKey']);
-
-            expect(masked.username).toBe('john');
-            expect(masked.password).toBe('***MASKED***');
-            expect(masked.token).toBe('***MASKED***');
-            expect(masked.apiKey).toBe('***MASKED***');
-        });
-
-        it('should be case-insensitive', () => 
-        {
-            const data = {
-                PASSWORD: 'secret',
-                Token: 'abc',
-                ApiKey: 'key',
-            };
-
-            const masked = maskSensitiveData(data, ['password', 'token', 'apikey']);
-
-            expect(masked.PASSWORD).toBe('***MASKED***');
-            expect(masked.Token).toBe('***MASKED***');
-            expect(masked.ApiKey).toBe('***MASKED***');
-        });
-
-        it('should mask fields with partial matches', () => 
-        {
-            const data = {
-                userPassword: 'secret',
-                accessToken: 'abc',
-                secretKey: 'key',
-            };
-
-            const masked = maskSensitiveData(data, ['password', 'token', 'secret']);
-
-            expect(masked.userPassword).toBe('***MASKED***');
-            expect(masked.accessToken).toBe('***MASKED***');
-            expect(masked.secretKey).toBe('***MASKED***');
-        });
-    });
-
-    describe('Nested Objects', () => 
-    {
-        it('should mask nested objects', () => 
-        {
-            const data = {
-                user: {
-                    name: 'john',
-                    credentials: {
-                        password: 'secret',
-                        token: 'abc123',
-                    },
-                },
-            };
-
-            const masked = maskSensitiveData(data, ['password', 'token']);
-
-            expect(masked.user.name).toBe('john');
-            expect(masked.user.credentials.password).toBe('***MASKED***');
-            expect(masked.user.credentials.token).toBe('***MASKED***');
-        });
-
-        it('should mask deeply nested objects', () => 
-        {
-            const data = {
-                level1: {
-                    level2: {
-                        level3: {
-                            password: 'secret',
-                        },
-                    },
-                },
-            };
-
-            const masked = maskSensitiveData(data, ['password']);
-
-            expect(masked.level1.level2.level3.password).toBe('***MASKED***');
-        });
-    });
-
-    describe('Arrays', () => 
-    {
-        it('should mask array elements', () => 
-        {
-            const data = {
-                users: [
-                    { name: 'john', password: 'secret1' },
-                    { name: 'jane', password: 'secret2' },
-                ],
-            };
-
-            const masked = maskSensitiveData(data, ['password']);
-
-            expect(masked.users[0].name).toBe('john');
-            expect(masked.users[0].password).toBe('***MASKED***');
-            expect(masked.users[1].name).toBe('jane');
-            expect(masked.users[1].password).toBe('***MASKED***');
-        });
-
-        it('should handle nested arrays', () => 
-        {
-            const data = {
-                matrix: [
-                    [{ password: 'a' }, { password: 'b' }],
-                    [{ password: 'c' }, { password: 'd' }],
-                ],
-            };
-
-            const masked = maskSensitiveData(data, ['password']);
-
-            expect(masked.matrix[0][0].password).toBe('***MASKED***');
-            expect(masked.matrix[1][1].password).toBe('***MASKED***');
-        });
-    });
-
-    describe('Circular References', () => 
-    {
-        it('should handle circular references', () => 
-        {
-            const data: any = {
-                name: 'john',
-                password: 'secret',
-            };
-            data.self = data; // Circular reference
-
-            const masked = maskSensitiveData(data, ['password']);
-
-            expect(masked.name).toBe('john');
-            expect(masked.password).toBe('***MASKED***');
-            expect(masked.self).toBe('[Circular]');
-        });
-
-        it('should handle nested circular references', () => 
-        {
-            const parent: any = { name: 'parent', password: 'secret1' };
-            const child: any = { name: 'child', password: 'secret2' };
-            parent.child = child;
-            child.parent = parent;
-
-            const masked = maskSensitiveData(parent, ['password']);
-
-            expect(masked.name).toBe('parent');
-            expect(masked.password).toBe('***MASKED***');
-            expect(masked.child.name).toBe('child');
-            expect(masked.child.password).toBe('***MASKED***');
-            expect(masked.child.parent).toBe('[Circular]');
-        });
-    });
-
-    describe('Edge Cases', () => 
-    {
-        it('should handle null values', () => 
-        {
-            const masked = maskSensitiveData(null, ['password']);
-            expect(masked).toBeNull();
-        });
-
-        it('should handle undefined values', () => 
-        {
-            const masked = maskSensitiveData(undefined, ['password']);
-            expect(masked).toBeUndefined();
-        });
-
-        it('should handle primitive values', () => 
-        {
-            expect(maskSensitiveData('string', ['password'])).toBe('string');
-            expect(maskSensitiveData(123, ['password'])).toBe(123);
-            expect(maskSensitiveData(true, ['password'])).toBe(true);
-        });
-
-        it('should handle empty objects', () => 
-        {
-            const masked = maskSensitiveData({}, ['password']);
-            expect(masked).toEqual({});
-        });
-
-        it('should handle empty arrays', () => 
-        {
-            const masked = maskSensitiveData([], ['password']);
-            expect(masked).toEqual([]);
-        });
-
-        it('should not mutate original object', () => 
-        {
-            const original = { password: 'secret', username: 'john' };
-            const masked = maskSensitiveData(original, ['password']);
-
-            expect(original.password).toBe('secret'); // Original unchanged
-            expect(masked.password).toBe('***MASKED***');
         });
     });
 });

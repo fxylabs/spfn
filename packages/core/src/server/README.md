@@ -371,7 +371,8 @@ Nothing derived from the path is written under the prefix either:
   `Request failed` describe the error by name, code, status and stack frames, without the
   message of any link in its cause chain (`loggedError(c, error)`).
 - **No `Referer` naming it.** `OnErrorContext.request.headers.referer` under a declared prefix is
-  `<origin><prefix>/[redacted]`, whatever path the erroring request had. `onError` still receives
+  `<origin><prefix>/[redacted]` (its query parameters by name, `'***'`, as for any `Referer`),
+  whatever path the erroring request had. `onError` still receives
   the error object itself.
 
 - **Matching.** A prefix covers itself and what lies below it on a segment boundary:

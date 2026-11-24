@@ -203,19 +203,30 @@ function withoutMessages<T extends ErrorDescription | DatabaseErrorDescription>(
 
 /**
  * A URL a request carries in a header (`Referer`) as a log line may name it:
- * its origin and `<prefix>/[redacted]` when its path falls under a declared
- * prefix, otherwise unchanged. A page served under a capability path sends
- * its own URL, secret and all, with every request it makes.
+ * its origin, its path — `<prefix>/[redacted]` when the path falls under a
+ * declared prefix — and every query parameter by name with the value `'***'`;
+ * never its fragment. Only the origin and the path are known to be safe: the
+ * query and the fragment are the page's own data, which core cannot classify
+ * any more than the request's own query (a reset link's `?token=`, an OAuth
+ * `?code=`), and a page served under a capability path sends its own URL with
+ * every request it makes. A value that is not an http(s) URL is not a URL core
+ * can split, so it is `'***'`: one `URL` cannot parse, and one whose scheme
+ * has no origin (`token:…`, `javascript:…`), whose whole text `URL` reads as
+ * an opaque path behind the origin `null`.
  */
 export function loggedUrl(url: string): string
 {
-    if (!URL.canParse(url))
+    const parsed = URL.canParse(url) ? new URL(url) : undefined;
+
+    if (parsed === undefined || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:'))
     {
-        return url;
+        return '***';
     }
 
-    const { origin, pathname } = new URL(url);
+    const { origin, pathname, searchParams } = parsed;
     const prefix = redactedPrefixOf(pathname);
+    const path = prefix === undefined ? pathname : `${prefix}/${REDACTED_SEGMENT}`;
+    const query = new URLSearchParams([...searchParams.keys()].map(name => [name, '***']));
 
-    return prefix === undefined ? url : `${origin}${prefix}/${REDACTED_SEGMENT}`;
+    return query.size === 0 ? `${origin}${path}` : `${origin}${path}?${query}`;
 }

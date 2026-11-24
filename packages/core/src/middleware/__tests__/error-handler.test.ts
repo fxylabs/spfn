@@ -663,18 +663,18 @@ describe('ErrorHandler Middleware', () =>
         });
     });
 
-    describe('Request context masking (S-L8)', () =>
+    describe('Request context copies only values known to be safe (#469)', () =>
     {
-        it('masks sensitive query params in the onError context', async () =>
+        it('carries an allow-listed header\'s value, names any other header and every query parameter without its value, and a Referer\'s origin, path and query names only', async () =>
         {
             let captured: OnErrorContext | undefined;
 
             const app = new Hono();
             app.onError(ErrorHandler({
                 enableLogging: false,
-                onError: (_err, ctx) => 
+                onError: (_err, ctx) =>
                 {
-                    captured = ctx; 
+                    captured = ctx;
                 },
             }));
             app.get('/x', () =>
@@ -682,13 +682,23 @@ describe('ErrorHandler Middleware', () =>
                 throw new Error('boom');
             });
 
-            await app.request('/x?token=supersecret&code=abc123&page=2');
+            await app.request('/x?code=probe-query-e88a', {
+                headers: {
+                    'x-spfn-proof': 'probe-proof-c41d',
+                    'user-agent': 'probe-agent/7.3',
+                    referer: 'https://app.example.com/reset-password?token=probe-referer-9b3f#probe-fragment-51ae',
+                },
+            });
             // onError fires asynchronously (fire-and-forget) — flush the microtask queue.
             await new Promise(resolve => setTimeout(resolve, 0));
 
-            expect(captured?.request.query.token).toBe('***');
-            expect(captured?.request.query.code).toBe('***');
-            expect(captured?.request.query.page).toBe('2');
+            expect(JSON.stringify(captured)).not.toContain('probe-proof-c41d');
+            expect(JSON.stringify(captured)).not.toContain('probe-query-e88a');
+            expect(JSON.stringify(captured)).not.toContain('probe-referer-9b3f');
+            expect(JSON.stringify(captured)).not.toContain('probe-fragment-51ae');
+            expect(captured!.request.headers.referer).toBe('https://app.example.com/reset-password?token=***');
+            expect(captured!.request.headers).toHaveProperty('x-spfn-proof');
+            expect(captured!.request.headers['user-agent']).toBe('probe-agent/7.3');
         });
     });
 });

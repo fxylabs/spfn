@@ -534,6 +534,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (source, log consumers; security-relevant): @spfn/core: logs and error reports copy
+  only values known to be safe (#469).** The request logger and the error handler copied request
+  data the framework does not own — a failed write's body, the request headers, the query — and
+  decided what to hide by a hand-kept list of names to deny, so a name not on the list went out in
+  plain text: a wrong TOTP, verification or recovery code (`code`, `recoveryCode`, `userCode`) in
+  the `Request completed` line of a 4xx; `x-spfn-proof`, `x-spfn-nonce`, `x-spfn-csrf`,
+  `x-spfn-proxy-signature`, `x-spfn-proxy-nonce`, `proxy-authorization` in `OnErrorContext`, and so
+  in the Slack error notification and the monitor's stored error events. The decision is inverted:
+  a value is copied only when its name is known to be safe, anything else is reported by name only.
+  `RequestLogger` logs a failed `POST`/`PUT`/`PATCH` body as its **shape** — every key kept, every
+  leaf replaced by its JSON type (`'<string>'`, `'<number>'`, `'<boolean>'`, `'<null>'`), an array
+  by its elements' shapes; keys are still names, so a record-typed field (auth's `metadata`) shows
+  its keys. `OnErrorContext.request.headers` names every header and carries a value only for a
+  header on core's allow-list (`accept`, `accept-encoding`, `accept-language`, `cache-control`,
+  `connection`, `content-length`, `content-type`, `host`, `origin`, `pragma`, `referer` — its
+  origin and path (redacted under a declared prefix) and its query parameters by name with the
+  value `'***'`, no fragment, `'***'` when it is not an http(s) URL — `user-agent`, the `sec-ch-ua*` and `sec-fetch-*` headers,
+  `x-forwarded-proto`, `x-forwarded-host`, `x-request-id`, `x-spfn-client-kind`,
+  `x-spfn-client-version`, `x-spfn-client-contract-version`, `x-spfn-auth-profile`,
+  `x-spfn-proxy-signature-version`), `'***'` for every other, an address-carrying one
+  (`x-forwarded-for`, `x-real-ip`, `x-spfn-proxy-client-ip`) included; `OnErrorContext.request.query`
+  names every parameter and carries no value (`'***'`). `OnErrorContext`'s type is unchanged.
+  **Removed:** `RequestLoggerOptions.sensitiveFields` and the `maskSensitiveData` export of
+  `@spfn/core/middleware`, with no replacement — both were the deny rule. **Upgrade:** drop
+  `sensitiveFields` from `RequestLogger(...)` / `middleware.logger`; an `onError` hook that read a
+  query value or a header off the list reads it from the request itself, under its own rule. The
+  logger's own `SENSITIVE_KEYS`, the net under values an application chooses to log, is unchanged.
+- **BREAKING (behaviour): @spfn/monitor: `createMonitorErrorHandler` stores and sends the request
+  headers and query as core hands them over (#469).** Its own list of header and query names to
+  hide was a third copy of core's deny rule, disagreeing with the other two; core's `OnErrorContext`
+  now carries no value it has not judged safe. The `error_events.headers` and `query` of a new event
+  hold `'***'` wherever core does — every query value, and every header off core's allow-list.
+  `trackError` stores what it is given: pass it `OnErrorContext.request`, never raw request headers.
 - **BREAKING (behaviour): @spfn/auth: the first `signIn.admit` runs under the account lock, so a
   sign-in guard can bound the credentials compared, whatever the concurrency (#478).** The first
   `admit` on `password`, `deletion-cancel` and `mfa/verify` — the one call before the credential is
