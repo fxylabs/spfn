@@ -7,7 +7,8 @@ import type { SendResult } from '../types';
 import { awsSnsProvider } from './providers/aws-sns';
 import { env, isHistoryContentStored } from '../../config';
 import { renderTemplateChannel, getTemplate } from '../../templates';
-import { maskRecipients, maskPhone, historyRecipient, scrubSendResult } from '../../privacy';
+import { maskRecipients, maskPhone, historyRecipient } from '../../privacy';
+import { sendThroughProvider } from '../provider-boundary';
 import {
     markManySent,
     markManyFailed,
@@ -142,7 +143,7 @@ export async function deliverSMS(params: SendSMSParams, scheduledRowId?: number)
             return opened.stop;
         }
 
-        const result = scrubSendResult(await provider.send(internalParams));
+        const result = await sendThroughProvider(() => provider.send(internalParams));
 
         if (result.success)
         {
@@ -378,7 +379,7 @@ export async function sendSMSBulk(
 
     const sendResults = await runWithConcurrency(
         sendable,
-        (p) => provider.send({ to: p.phone, message: p.message }).then(scrubSendResult),
+        (p) => sendThroughProvider(() => provider.send({ to: p.phone, message: p.message })),
         concurrency,
     );
 
