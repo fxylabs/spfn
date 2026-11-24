@@ -117,4 +117,54 @@ describe('a provider that throws is answered at the channel boundary (#489)', ()
         expect(vi.mocked(markManyFailed)).toHaveBeenCalledWith([{ id: 1, errorMessage: send.scrubbed }]);
         expect(text).not.toContain(send.recipient);
     });
+
+    describe('a thrown value whose own text cannot be read', () =>
+    {
+        const UNREADABLE_PROVIDER = 'throws-489-unreadable';
+        let thrown: unknown;
+
+        registerEmailProvider({
+            name: UNREADABLE_PROVIDER,
+            send: async () =>
+            {
+                throw thrown;
+            },
+        });
+
+        const CASES: Record<string, () => unknown> = {
+            'a null-prototype object': () => Object.create(null),
+            'an object whose toString throws': () => ({
+                toString()
+                {
+                    throw new Error(`reading ${ADDRESS}`);
+                },
+            }),
+            'an Error whose message getter throws': () =>
+            {
+                const error = new Error('placeholder');
+                Object.defineProperty(error, 'message', {
+                    get()
+                    {
+                        throw new Error(`reading ${ADDRESS}`);
+                    },
+                });
+
+                return error;
+            },
+        };
+
+        beforeEach(() =>
+        {
+            vi.stubEnv('SPFN_NOTIFICATION_EMAIL_PROVIDER', UNREADABLE_PROVIDER);
+        });
+
+        it.each(Object.keys(CASES))('%s', async (name) =>
+        {
+            thrown = CASES[name]();
+            const { answer, text } = await seen(SENDS.email.single);
+
+            expect(answer).toMatchObject({ success: false });
+            expect(text).not.toContain(ADDRESS);
+        });
+    });
 });

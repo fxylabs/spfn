@@ -31,8 +31,20 @@ export function sendThroughProvider(
         );
 }
 
-/** The text of a thrown value: an Error's message, anything else as a string. */
+/**
+ * The text of a thrown value: an Error's message, anything else as a string.
+ * Reading that text is itself able to throw (`Object.create(null)`, a
+ * `toString` that throws, an `Error` whose `message` getter throws) — a
+ * second failure the boundary answers the same fixed way as an empty one.
+ */
 function thrownText(thrown: unknown): string
 {
-    return (thrown instanceof Error ? thrown.message : String(thrown)) || 'Unknown error';
+    try
+    {
+        return (thrown instanceof Error ? thrown.message : String(thrown)) || 'Unknown error';
+    }
+    catch
+    {
+        return 'Unknown error';
+    }
 }
