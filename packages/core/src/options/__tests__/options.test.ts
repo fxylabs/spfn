@@ -19,6 +19,12 @@
  * with a userland `util` whose `types.isProxy` throws, or a
  * `getBuiltinModule` called where there is none — and no suite run under Node
  * would see it.
+ *
+ * And every other way the host falls short of a working `types.isProxy`: a
+ * `getBuiltinModule` that answers `undefined`, an object with no `types`, or
+ * a lookup that throws, each cannot tell — a plain object is still read and a
+ * refusal keeps its wording, rather than throwing the host's own error in its
+ * place. `globalThis.process` itself missing for the call is the same.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -165,5 +171,40 @@ describe('the host\'s Proxy test (#492)', () =>
     {
         expect(() => readChannels(new Proxy({ signup: false }, {}))).toThrow('channels must be a plain object '
             + 'naming its options — signup, deviceCode; received a Proxy, whose names do not say what a read of it finds.');
+    });
+
+    function throwNoUtil(): never
+    {
+        throw new Error('no node:util here');
+    }
+
+    it.each([
+        ['answers undefined', () => undefined],
+        ['answers an object with no types', () => ({})],
+        ['throws', throwNoUtil],
+    ])('cannot tell when getBuiltinModule %s — a plain object is still read and a refusal keeps its wording', (_label, stub) =>
+    {
+        (process as { getBuiltinModule?: unknown }).getBuiltinModule = stub;
+
+        expect(readChannels({ signup: false })).toEqual({ signup: false });
+        expect(() => readList('defaultScopes', 'read', 'of scope names'))
+            .toThrow('defaultScopes must be an array of scope names; received read.');
+    });
+
+    it('cannot tell when globalThis.process is absent for the call — a plain object is read and a Proxy is read as an object', () =>
+    {
+        const realProcess = globalThis.process;
+
+        try
+        {
+            delete (globalThis as { process?: unknown }).process;
+
+            expect(readChannels({ signup: false })).toEqual({ signup: false });
+            expect(readChannels(new Proxy({ signup: false }, {}))).toEqual({ signup: false });
+        }
+        finally
+        {
+            globalThis.process = realProcess;
+        }
     });
 });

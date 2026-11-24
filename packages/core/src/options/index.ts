@@ -19,7 +19,10 @@
  *
  * Only Node tells a Proxy from its target, so a Proxy is refused on Node and
  * read like any object where the host cannot tell (a browser or edge bundle):
- * the same call answers differently by host for a Proxy (`isProxy`).
+ * the same call answers differently by host for a Proxy (`isProxy`). Where it
+ * is read like any object, its traps can defeat the rest of this rule too —
+ * an `ownKeys` trap hiding a misspelt name, a `getPrototypeOf` trap passing a
+ * class instance as plain.
  */
 
 /** How the messages name what an object holds: options, or channels for `channels`. */
@@ -222,23 +225,46 @@ function isOrdinaryObject(value: unknown): value is object
 /** What `isProxy` needs of the host's `process`: Node's, where `getBuiltinModule` is. */
 interface HostProcess
 {
-    getBuiltinModule?(id: string): { types: { isProxy(value: unknown): boolean } };
+    getBuiltinModule?(id: string): { types?: { isProxy?(value: unknown): boolean } } | undefined;
+}
+
+/**
+ * The host's `util.types.isProxy`, taken through `process.getBuiltinModule`
+ * (as `module-evaluation.ts` takes `node:fs`), or `undefined` where the host
+ * cannot hand over a working one: no `process`, no `getBuiltinModule`, no
+ * module, no `types`, no `isProxy`, or a lookup that throws. Only this lookup
+ * is guarded — a function it does hand over runs unguarded, like the rest of
+ * the rule.
+ */
+function hostIsProxy(): ((value: unknown) => boolean) | undefined
+{
+    try
+    {
+        return (globalThis as { process?: HostProcess }).process?.getBuiltinModule?.('node:util')?.types?.isProxy;
+    }
+    catch
+    {
+        return undefined;
+    }
 }
 
 /**
  * Whether `value` is a Proxy, as the running host tells: Node's
- * `util.types.isProxy`, taken through `process.getBuiltinModule` (as
- * `module-evaluation.ts` takes `node:fs`), so the module holds no `node:`
- * import a bundler would have to replace — a browser's userland `util`
- * throws from `types.isProxy`. `process` is read off `globalThis`: a free
- * `process` would have a client bundler inject a shim. Where the host has no
- * `getBuiltinModule` — a browser or edge bundle — it cannot tell, and a Proxy
- * is read like any object, under every other part of the rule.
+ * `util.types.isProxy` (`hostIsProxy`), so the module holds no `node:` import
+ * a bundler would have to replace — a browser's userland `util` throws from
+ * `types.isProxy`. `process` is read off `globalThis`: a free `process` would
+ * have a client bundler inject a shim. Where the host cannot hand over a
+ * working `types.isProxy` — a browser or edge bundle, or any other host that
+ * falls short of it — it cannot tell, and a Proxy is read like any object,
+ * under every other part of the rule: its traps can then defeat that part —
+ * an `ownKeys` trap hiding a misspelt name, a `getPrototypeOf` trap passing a
+ * class instance as plain.
  */
 function isProxy(value: unknown): boolean
 {
-    return (globalThis as { process?: HostProcess }).process
-        ?.getBuiltinModule?.('node:util').types.isProxy(value) ?? false;
+    const isProxyFn = hostIsProxy();
+
+    return typeof isProxyFn === 'function' && isProxyFn(value);
 }
 
 /**

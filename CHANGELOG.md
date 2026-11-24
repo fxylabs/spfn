@@ -19,9 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now a public, isomorphic subpath of core, wording unchanged: for packages; an application may
   use it. The Proxy test is taken from the running host (`process.getBuiltinModule`), so the module
   imports no Node module: a Proxy is refused on Node and read like any object where the host
-  cannot tell (a browser or edge bundle). `@spfn/auth`'s server readers import it and behave as
-  before. Release core before auth: auth's peer-dependency floor on core is raised by the release.
-  No reader outside auth's server code is converted yet.
+  cannot tell (a browser or edge bundle); read like any object, its traps can defeat the rest of
+  the rule too — an `ownKeys` trap hiding a misspelt name, a `getPrototypeOf` trap passing a class
+  instance as plain. `@spfn/auth`'s server readers import it and behave as before. Release core
+  before auth: auth's peer-dependency floor on core is raised by the release. No reader outside
+  auth's server code is converted yet.
 - **@spfn/auth: a seat for the app inside a passkey's enrolment and revocation —
   `createAuthLifecycle({ passkey: { enrolled, revoked } })` (#493).** A passkey was written and
   revoked inside the package's transactions and the app was told only after the commit
