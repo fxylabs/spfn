@@ -184,7 +184,9 @@ interface ProvenHolder
  * and its kind; it proves this account when that is the account's own address
  * of that kind.
  *
- * Answers a missing account as it answers a wrong credential, at the same cost.
+ * Answers a missing account as it answers a wrong credential, after the same
+ * comparison (the dummy hash); with a `signIn` guard an account's lock writes a
+ * commit record a missing account's does not, about 0.85 ms (#486).
  *
  * A password is a guarded credential check (`deletion-cancel`) under the app's
  * `signIn` guard, as a password sign-in is: `admit` before the comparison,
