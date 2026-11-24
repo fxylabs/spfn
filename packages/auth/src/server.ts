@@ -108,6 +108,11 @@ export type {
     PasswordChangeGuardOptions,
 } from './server/lib/password-change-guard';
 export type {
+    PasskeyHookOptions,
+    PasskeyRevocation,
+    PasskeyRevocationReason,
+} from './server/lib/passkey-hook';
+export type {
     AdmittedPasswordHash,
     PasswordRuleAnswer,
     PasswordRuleChannel,

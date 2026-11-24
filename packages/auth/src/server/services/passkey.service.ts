@@ -85,6 +85,7 @@ import {
 import type { PasskeyAssertionProof } from '../lib/passkey-assertion';
 import { updateLastLoginService } from './user.service';
 import { authLoginEvent, passkeyEnrolledEvent, passkeyRevokedEvent } from '../events';
+import { reportPasskeyEnrolled, reportPasskeyRevoked } from './passkey-hook.service';
 import { loginBindingFields, type LoginResult } from './auth.service';
 
 /**
@@ -544,8 +545,14 @@ export interface FinishPasskeyEnrollmentResult
  * authentication against the account as it is now — not as it was when the
  * options were asked for (au7-A3).
  *
+ * Once everything the registration writes is written, the app's
+ * `passkey.enrolled` is told in the same transaction, under the lock; a throw
+ * there rolls the registration back, the challenge left live
+ * (`PasskeyHookFailedError`).
+ *
  * @throws StepUpRequiredError | RecentAuthenticationRequiredError | PasskeyChallengeError
  *   | PasskeyVerificationError | PasskeyAlreadyRegisteredError | PasskeyProofRequiredError
+ *   | PasskeyHookFailedError
  */
 export async function finishPasskeyEnrollmentService(
     params: FinishPasskeyEnrollmentParams,
@@ -630,17 +637,20 @@ async function keepPasskey(
         registeredUserVerified: verified.userVerified,
     });
 
-    onAfterCommit(() => passkeyEnrolledEvent.emit({
-        userId: String(params.userId),
-        passkeyId: String(row.id),
-        label: row.label ?? undefined,
-    }));
+    const enrolment = { userId: String(params.userId), passkeyId: String(row.id), label: row.label ?? undefined };
 
-    return await registrationAnswer(
+    onAfterCommit(() => passkeyEnrolledEvent.emit(enrolment));
+
+    const answer = await registrationAnswer(
         params,
         mark,
         { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() },
     );
+
+    // Everything the registration writes is written: the app's rows join it here.
+    await reportPasskeyEnrolled(enrolment);
+
+    return answer;
 }
 
 /**
@@ -1279,14 +1289,28 @@ export interface RevokePasskeyParams
  * last-recovery-credential guard, because there is no undo for the state that
  * would leave.
  *
- * The owner row is locked before the guard runs, and the route's
- * `Transactional()` is what holds that lock to commit. Without it the guard is a
+ * The owner row is locked before the guard runs, and the service's own
+ * transaction (`auth:passkey-revoke`; a savepoint under a caller's) holds that
+ * lock to commit. Without it the guard is a
  * read-modify-write with a gap: an owner with two passkeys and nothing else who
  * fires two revokes at once has both count two live credentials, both pass, and
  * both revoke — the exact state the guard exists to refuse. Locking makes the
  * second revoke count one.
+ *
+ * The app's `passkey.revoked` is told in that transaction, under that lock,
+ * once the row is revoked (`reason: 'user'`); a throw there rolls the
+ * revocation back (`PasskeyHookFailedError`).
  */
 export async function revokePasskeyService(params: RevokePasskeyParams): Promise<{ passkeyId: string }>
+{
+    return await runInTransaction(
+        () => revokeOwnPasskey(params),
+        { context: 'auth:passkey-revoke' },
+    );
+}
+
+/** The owner's removal, run in `revokePasskeyService`'s transaction. */
+async function revokeOwnPasskey(params: RevokePasskeyParams): Promise<{ passkeyId: string }>
 {
     await assertStepUp(params);
     await assertRecentAuthentication(params);
@@ -1309,11 +1333,10 @@ export async function revokePasskeyService(params: RevokePasskeyParams): Promise
         throw new PasskeyNotFoundError();
     }
 
-    onAfterCommit(() => passkeyRevokedEvent.emit({
-        userId: String(params.userId),
-        passkeyId: String(revoked.id),
-        reason: 'user',
-    }));
+    const revocation = { userId: String(params.userId), passkeyId: String(revoked.id), reason: 'user' as const };
+
+    await reportPasskeyRevoked(revocation);
+    onAfterCommit(() => passkeyRevokedEvent.emit(revocation));
 
     return { passkeyId: String(revoked.id) };
 }

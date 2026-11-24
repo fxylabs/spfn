@@ -33,6 +33,7 @@ import {
     configurePasswordChange,
     type PasswordChangeGuardOptions,
 } from './lib/password-change-guard';
+import { assertPasskeyHookConsistent, configurePasskeyHook, type PasskeyHookOptions } from './lib/passkey-hook';
 import { assertOAuthRedirectUris } from './lib/oauth/redirect-uri-check';
 import { assertAppleWebConfig } from './lib/oauth/apple-config-check';
 import { assertAndroidAssetLinks, assertAppleRelayUrls } from './lib/oauth/android-config-check';
@@ -570,6 +571,48 @@ export interface AuthLifecycleOptions extends AuthInitOptions
     passwordChange?: PasswordChangeGuardOptions;
 
     /**
+     * The application's seat inside a passkey's enrolment and revocation
+     *
+     * Omitted, nothing changes. Stated, each runs inside the transaction that
+     * writes or revokes the passkey row, after that write and before the
+     * commit, under the account lock the act already holds — once per
+     * passkey, on every path:
+     *
+     * - `enrolled({ userId, passkeyId, label? })` — every registration
+     *   (`POST /_auth/passkeys/register/verify`: first set-up and adding a
+     *   passkey), once everything it writes is written;
+     * - `revoked({ userId, passkeyId, reason })` — the owner's removal
+     *   (`POST /_auth/passkeys/revoke`, `reason: 'user'`) and the operator's
+     *   `resetSecondFactorService` (`'operator'`), once for each passkey it
+     *   revokes.
+     *
+     * Each is handed the payload its after-commit event
+     * (`auth.passkey.enrolled`, `auth.passkey.revoked`) carries; the events
+     * are published as before. A throw rolls the act back — the whole reset,
+     * on the operator's — and answers 500 `PasskeyHookFailedError`, which
+     * keeps only the thrown value's class and SQLSTATE. An app repository
+     * extending `BaseRepository` joins the transaction: its write commits with
+     * the passkey's change or not at all. Database work only, and fast; never
+     * open a `requiresNew` transaction that touches the account, which waits
+     * on the lock the act holds, and never lock a second account. See the
+     * README, "The passkey hook".
+     *
+     * A later `createAuthLifecycle()` that omits it leaves it as it is; one
+     * that states other functions refuses boot in `afterInfrastructure`.
+     *
+     * @example
+     * ```typescript
+     * createAuthLifecycle({
+     *     passkey: {
+     *         enrolled: async ({ userId, passkeyId }) => { await history.add(userId, 'passkey-enrolled', passkeyId); },
+     *         revoked: async ({ userId, passkeyId, reason }) => { await history.add(userId, `passkey-revoked:${reason}`, passkeyId); },
+     *     },
+     * })
+     * ```
+     */
+    passkey?: PasskeyHookOptions;
+
+    /**
      * The application's rule for a new password
      *
      * Omitted, nothing changes: a new password is held to `PasswordSchema`
@@ -629,6 +672,7 @@ const LIFECYCLE_OPTIONS = optionKeys<AuthLifecycleOptions>({
     secondFactor: true,
     signIn: true,
     passwordChange: true,
+    passkey: true,
     password: true,
 });
 
@@ -690,6 +734,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // it is; a contradicting statement is refused below, in afterInfrastructure.
     configureSignIn(read.signIn);
     configurePasswordChange(read.passwordChange);
+    configurePasskeyHook(read.passkey);
     // Before afterInfrastructure, where admin seeding asks it.
     configurePasswordRule(read.password);
 
@@ -753,6 +798,8 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             assertSignInGuardConsistent();
             // Same reasoning, for the password-change guard.
             assertPasswordChangeGuardConsistent();
+            // Same reasoning, for the passkey hook.
+            assertPasskeyHookConsistent();
             // Same reasoning, for the password rule.
             assertPasswordRuleConsistent();
 

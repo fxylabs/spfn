@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/auth: a seat for the app inside a passkey's enrolment and revocation —
+  `createAuthLifecycle({ passkey: { enrolled, revoked } })` (#493).** A passkey was written and
+  revoked inside the package's transactions and the app was told only after the commit
+  (`auth.passkey.enrolled`, `auth.passkey.revoked`), so an app keeping its own history of the
+  account could write its row only from a subscriber: a process that stopped in between, or a
+  subscriber's write that failed, left the passkey changed and the row missing, with nothing to say
+  so. Both callbacks now run in the transaction that writes or revokes the passkey row, after that
+  write and before the commit, under the account lock the act already holds, once per passkey:
+  `enrolled({ userId, passkeyId, label? })` on every registration (`passkeys/register/verify`: first
+  set-up and adding a passkey), `revoked({ userId, passkeyId, reason })` on the owner's removal
+  (`passkeys/revoke`, `reason: 'user'`) and on `resetSecondFactorService` (`'operator'`, once for
+  each passkey it revokes) — each handed its event's payload. A throw rolls the act back (the whole
+  reset, on the operator's) and answers **500 `PasskeyHookFailedError`** (`hook`, `path`: `register`,
+  `revoke` or `reset`, `userId`, `hookErrorClass`, `hookErrorCode?` — nothing of what the hook
+  threw). An app repository extending `BaseRepository` joins the transaction. `revokePasskeyService`
+  now opens its own transaction (`auth:passkey-revoke`), as registration and the reset do, so the
+  promise holds for an app that calls it outside one. The option is read
+  once, by the rule of #477; a second `createAuthLifecycle()` stating other functions refuses boot.
+  The events are published as before. New exports from `@spfn/auth/server`: the types
+  `PasskeyHookOptions`, `PasskeyRevocation`, `PasskeyRevocationReason`; from `@spfn/auth/errors`:
+  `PasskeyHookFailedError`. Omitted, nothing changes: no call, query or lock more. No schema change,
+  no migration; the mobile contract does not move.
 - **@spfn/core, spfn: `appPrivileges` declares column lists, and the grant step keeps them (#460).**
   The grant step brings the app role to exactly what is declared, and a declaration was table-level
   only, so the step revoked every column grant: a table where the app inserts rows and may update

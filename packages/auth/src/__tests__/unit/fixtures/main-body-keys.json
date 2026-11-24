@@ -342,6 +342,15 @@
         "message",
         "details"
     ],
+    "PasskeyHookFailedError": [
+        "__type",
+        "message",
+        "hook",
+        "path",
+        "userId",
+        "hookErrorClass",
+        "hookErrorCode"
+    ],
     "PasskeyNotFoundError": [
         "__type",
         "message",

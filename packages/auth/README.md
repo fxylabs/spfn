@@ -110,7 +110,7 @@ export default defineServerConfig()
 
 One rule for every object of options the app hands this package — `createAuthLifecycle(options)`
 and each object inside it (`deletion`, `deviceAuth`, `deviceLink`, `authorizationServer`,
-`channels`, `secondFactor`, `signIn`, `passwordChange`, `password`, `oneTimeToken`),
+`channels`, `secondFactor`, `signIn`, `passwordChange`, `passkey`, `password`, `oneTimeToken`),
 `initializeAuth` with each record in `roles` and `permissions`, `initOneTimeTokenManager`,
 `createAuthJobRouter`, `configureAuth` with `csrf`, `oauthProviders`, each provider's policy,
 `oauthLink` and each `recentAuth`, each entry given to `defineUserSettings` and
@@ -1492,6 +1492,82 @@ The change stays in one place, the package's, and the app joins it there.
 
 A second `createAuthLifecycle()` that omits `passwordChange` leaves it as it is; one that states
 other functions refuses boot in `afterInfrastructure`, the first statement staying in force.
+
+### The passkey hook (`passkey`)
+
+A passkey is registered and revoked inside the package's own routes and transactions, and
+`auth.passkey.enrolled` and `auth.passkey.revoked` are published only after the commit. An app that
+keeps its own history of the account could write its row only from a subscriber, after the commit:
+if the process stops in between, or the subscriber's write fails, the passkey exists (or is gone)
+and the row does not, and nothing says so. `createAuthLifecycle({ passkey: { enrolled, revoked } })`
+is the app's seat inside the act instead: each runs **in the transaction that writes or revokes the
+passkey row, after that write and before the commit, under the account lock the act already holds**
+— once per passkey. Leave it out and nothing changes. Both callbacks are optional.
+
+```typescript
+import type { PasskeyEnrolledPayload, PasskeyRevocation } from '@spfn/auth/server';
+
+createAuthLifecycle({
+    passkey: {
+        enrolled: async ({ userId, passkeyId }: PasskeyEnrolledPayload) =>
+        {
+            await historyRepository.add({ userId: Number(userId), action: 'passkey-enrolled', passkeyId });
+        },
+        revoked: async ({ userId, passkeyId, reason }: PasskeyRevocation) =>
+        {
+            await historyRepository.add({ userId: Number(userId), action: `passkey-revoked-by-${reason}`, passkeyId });
+        },
+    },
+})
+```
+
+```typescript
+// enrolled: auth.passkey.enrolled's payload
+type PasskeyEnrolledPayload = { userId: string; passkeyId: string; label?: string };
+
+// revoked: auth.passkey.revoked's payload, its reason narrowed — a function written for
+// PasskeyRevokedPayload is still one `revoked` takes
+type PasskeyRevocationReason = 'user' | 'operator';
+type PasskeyRevocation = { userId: string; passkeyId: string; reason: PasskeyRevocationReason };
+```
+
+**Every path that writes or revokes a passkey**, and what is told:
+
+| Path | Told | When |
+|---|---|---|
+| `POST /_auth/passkeys/register/verify` (`finishPasskeyEnrollmentService`): first set-up and every passkey added | `enrolled` | once the row, the second-factor mark and the step-up it records are written |
+| `POST /_auth/passkeys/revoke` (`revokePasskeyService`), the owner's removal | `revoked`, `reason: 'user'` | once the row is revoked |
+| `resetSecondFactorService(userId)`, the operator's reset | `revoked`, `reason: 'operator'`, once for each passkey it revokes | once everything the reset writes is written: the passkeys, the TOTP, the recovery codes, the marks |
+| a purge (`anonymize`) | no | the passkey rows are deleted with the account; `deletion.onPurge` is the seat there |
+
+**A throw** rolls the act back — on a registration no passkey is kept and the challenge stays
+live; on the owner's removal the passkey stays live; on the operator's reset nothing of the reset
+is written, the passkeys the hook was already told of included — and no event is published. It
+is answered **500 `PasskeyHookFailedError`** (from `@spfn/auth/errors`), which names the hook
+(`hook: 'enrolled' | 'revoked'`), the path (`path: 'register' | 'revoke' | 'reset'`), the account
+(`userId`) and what the hook threw by identifiers only, `hookErrorClass` and, when a database
+statement failed, `hookErrorCode` (the SQLSTATE) — the
+[password-change guard's](#the-password-change-guard-passwordchange) rule: the error keeps no
+reference to what the hook threw. `resetSecondFactorService` throws it to the app's caller.
+
+**Where they run.** An app repository extending `BaseRepository` joins the act's transaction
+through the transaction context, so a write of yours commits with the passkey's change or rolls
+back with it. The rules of the password-change guard hold: **database work only, and fast** (every
+other writer of the account waits on the lock — send notices from the events); **never its own
+transaction** that touches the account (`requiresNew` waits on the lock the act holds); **never
+lock a second account** (`SecondAccountLockError`).
+
+The events stay as they are: `auth.passkey.enrolled` and `auth.passkey.revoked` are published
+after the commit, with the payloads the hooks were handed.
+
+| Error | HTTP | When |
+|---|---|---|
+| `PasskeyHookFailedError` | 500 | `passkey.enrolled` or `passkey.revoked` threw; the act rolled back; `hook`, `path`, `userId`, `hookErrorClass`, `hookErrorCode?` |
+
+None of these routes is a mobile-contract operation, so the contract does not list the error.
+
+A second `createAuthLifecycle()` that omits `passkey` leaves it as it is; one that states other
+functions refuses boot in `afterInfrastructure`, the first statement staying in force.
 
 ### The password rule (`password`)
 
@@ -4189,6 +4265,7 @@ Ask for a password, an address, or a social link before, or shortly after, the p
 | `LastRecoveryCredentialError` | 409 | `LAST_RECOVERY_CREDENTIAL` | revoking it would leave no way back in |
 | `PasskeyUserVerificationRequiredError` | 409 | `PASSKEY_USER_VERIFICATION_REQUIRED` | `mfa/passkey/mark` on a passkey registered without user verification |
 | `PasskeyConfigError` | boot | — | an origin off the rpId or not https, or an unsupported user-verification value |
+| `PasskeyHookFailedError` | 500 | — | the app's [`passkey.enrolled` or `passkey.revoked`](#the-passkey-hook-passkey) threw; the registration or the revocation rolled back |
 
 #### Events
 
@@ -4196,7 +4273,9 @@ Ask for a password, an address, or a social link before, or shortly after, the p
 `passkeyRevokedEvent` (`auth.passkey.revoked`: `userId`, `passkeyId`, `reason` — `'user'` from
 `passkeys/revoke`, `'operator'` from `resetSecondFactorService`) fire after
 commit. `authLoginEvent.provider` gains `'passkey'`. Subscribe to the first to tell the owner
-a new way into their account appeared — which is what it is.
+a new way into their account appeared — which is what it is. The app's rows that must move with
+the passkey belong in [`passkey.enrolled` and `passkey.revoked`](#the-passkey-hook-passkey), which
+run inside its transaction.
 
 #### The case table
 

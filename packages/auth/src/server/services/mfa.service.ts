@@ -70,6 +70,7 @@ import { loginBindingFields, type LoginResult, type MfaChallengeHandle } from '.
 import { updateLastLoginService } from './user.service';
 import { emitDeviceRegistered } from './device-registration.service';
 import { authLoginEvent, mfaLockedEvent, passkeyRevokedEvent } from '../events';
+import { reportPasskeyRevoked } from './passkey-hook.service';
 import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../entities/mfa-challenges';
 import type { MfaTotp } from '../entities/mfa-totp';
 import type { UserPublicKey } from '../entities/user-public-keys';
@@ -1010,9 +1011,12 @@ export async function disableMfaService(userId: number): Promise<void>
  * 'operator'`), but without that route's step-up, recent-authentication and
  * last-credential refusals; and it removes the TOTP, the recovery codes, the
  * second-factor marks and the step-up verifications. One transaction, after
- * the owner row's lock. Revoking a passkey ends no session today, here as on
- * the route. Afterwards the account holds nothing, so under a required policy
- * its next sign-in enrols on first use.
+ * the owner row's lock; once all of it is written, the app's `passkey.revoked`
+ * is told in it once per passkey revoked (`reason: 'operator'`), and a throw
+ * there rolls the whole reset back (`PasskeyHookFailedError`). Revoking a
+ * passkey ends no session today, here as on the route. Afterwards the account
+ * holds nothing, so under a required policy its next sign-in enrols on first
+ * use.
  *
  * A service, not a route: the application decides who may call it.
  *
@@ -1021,6 +1025,7 @@ export async function disableMfaService(userId: number): Promise<void>
  * over also ends them with `revokeAllKeysService({ userId, includeCurrent: true })`.
  *
  * @throws NotFoundError for an account that does not exist
+ * @throws PasskeyHookFailedError when the app's `passkey.revoked` throws
  */
 export async function resetSecondFactorService(userId: number): Promise<void>
 {
@@ -1035,11 +1040,19 @@ export async function resetSecondFactorService(userId: number): Promise<void>
 
         await disableMfaService(userId);
 
-        onAfterCommit(() => revoked.forEach(passkey => passkeyRevokedEvent.emit({
+        const revocations = revoked.map(passkey => ({
             userId: String(userId),
             passkeyId: String(passkey.id),
-            reason: 'operator',
-        })));
+            reason: 'operator' as const,
+        }));
+
+        // Everything the reset writes is written: the app's rows join it here, once per passkey.
+        for (const revocation of revocations)
+        {
+            await reportPasskeyRevoked(revocation);
+        }
+
+        onAfterCommit(() => revocations.forEach(revocation => passkeyRevokedEvent.emit(revocation)));
     }, { context: 'auth:mfa-reset' });
 }
 

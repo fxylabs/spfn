@@ -346,6 +346,48 @@ export class PasswordChangeHookFailedError extends InternalServerError
 }
 
 /**
+ * Passkey Hook Failed Error (500)
+ *
+ * The app's `passkey.enrolled` or `passkey.revoked`
+ * (`createAuthLifecycle({ passkey })`) threw, so the act rolled back: on
+ * `register` no passkey was kept and the challenge is still live; on `revoke`
+ * the passkey is still live; on `reset` nothing of the operator's reset was
+ * written. The hook runs beside the account's data, and what it throws may
+ * quote it, so this error keeps none of it — the rule
+ * `PasswordChangeHookFailedError` follows: which hook, on which path, which
+ * account (`userId`), and what it threw by class name and, when a database
+ * statement failed, SQLSTATE.
+ */
+export class PasskeyHookFailedError extends InternalServerError
+{
+    readonly hook: 'enrolled' | 'revoked';
+    readonly path: 'register' | 'revoke' | 'reset';
+    readonly userId: number;
+    readonly hookErrorClass: string;
+    readonly hookErrorCode?: string;
+
+    constructor(data: {
+        hook: 'enrolled' | 'revoked';
+        path: 'register' | 'revoke' | 'reset';
+        userId: number;
+        hookErrorClass: string;
+        hookErrorCode?: string;
+    })
+    {
+        super({
+            message: `passkey.${data.hook} failed on ${data.path} for user ${data.userId}: ${data.hookErrorClass}`
+                + (data.hookErrorCode === undefined ? '' : ` (SQLSTATE ${data.hookErrorCode})`),
+        });
+        this.name = 'PasskeyHookFailedError';
+        this.hook = data.hook;
+        this.path = data.path;
+        this.userId = data.userId;
+        this.hookErrorClass = data.hookErrorClass;
+        this.hookErrorCode = data.hookErrorCode;
+    }
+}
+
+/**
  * Password Rule Failed Error (500)
  *
  * The app's `password.validate` (`createAuthLifecycle({ password })`) threw, so

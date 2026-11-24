@@ -73,6 +73,7 @@ import {
     resetPasswordChangeGuardForTests,
 } from '@/server/lib/password-change-guard';
 import { configurePasswordRule, passwordRule, resetPasswordRuleForTests } from '@/server/lib/password-rule';
+import { configurePasskeyHook, passkeyHook, resetPasskeyHookForTests } from '@/server/lib/passkey-hook';
 import { getOneTimeTokenManager, initOneTimeTokenManager } from '@/server/lib/one-time-token';
 import { defineUserSettings } from '@/server/lib/user-settings/define';
 import { defineProfileFields } from '@/server/lib/profile-fields';
@@ -245,6 +246,7 @@ const MISSPELT: [string, () => unknown, string][] = [
     ['configureSecondFactor', () => configureSecondFactor({ requred: true } as never), 'secondFactor.requred is not an option'],
     ['configureSignIn', () => configureSignIn({ admitt: async () => undefined } as never), 'signIn.admitt is not an option'],
     ['configurePasswordChange', () => configurePasswordChange({ admitt: async () => undefined } as never), 'passwordChange.admitt is not an option'],
+    ['configurePasskeyHook', () => configurePasskeyHook({ enroled: async () => undefined } as never), 'passkey.enroled is not an option'],
     ['configurePasswordRule', () => configurePasswordRule({ validat: () => [] } as never), 'password.validat is not an option'],
     ['configureAuth', () => configureAuth({ oauthEmailMatchh: 'reject' } as never), 'configureAuth.oauthEmailMatchh is not an option'],
     ['configureAuth: csrf', () => configureAuth({ csrf: { mod: 'enforce' } } as never), 'configureAuth: csrf.mod is not an option'],
@@ -369,6 +371,12 @@ const GETTER: [string, string, unknown[], object, (options: never) => unknown][]
 
         return passwordChangeGuard()?.admit;
     }],
+    ['configurePasskeyHook', 'enrolled', [ADMIT_A, ADMIT_B], {}, (options) =>
+    {
+        configurePasskeyHook(options);
+
+        return passkeyHook()?.enrolled;
+    }],
     ['configurePasswordRule', 'validate', [VALIDATE_A, VALIDATE_B], {}, (options) =>
     {
         configurePasswordRule(options);
@@ -487,6 +495,7 @@ describe('every reader reads through the shared rule (#477)', () =>
         __resetSecondFactorPolicyForTests();
         resetSignInGuardForTests();
         resetPasswordChangeGuardForTests();
+        resetPasskeyHookForTests();
         resetPasswordRuleForTests();
         configureDeviceAuth();
         configureDeviceLink();
