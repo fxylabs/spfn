@@ -4,6 +4,7 @@
  * Tests for OAuth state management and pending session
  */
 
+import { inspect } from 'node:util';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { RequestInterceptorContext } from '@spfn/core/nextjs/server';
 import {
@@ -30,7 +31,8 @@ import {
     unsealPendingSession,
     type PendingSessionData,
 } from '../../nextjs/session-helpers';
-import { oauthUrlInterceptor } from '../../nextjs/interceptors/oauth';
+import { oauthLinkInterceptor, oauthUrlInterceptor } from '../../nextjs/interceptors/oauth';
+import { authLogger } from '../../server/logger';
 import { errorRegistry, ValidationError } from '@spfn/core/errors';
 
 /**
@@ -658,6 +660,36 @@ describe('OAuth Interceptor Logic', () =>
         // pending-session cookie off this, and a refusal never runs it anyway.
         expect(ctx.metadata.pendingSession).toBeUndefined();
         expect(ctx.metadata.oauthCsrf).toBeUndefined();
+    });
+
+    // The provider segment is whatever `\w+` a caller sent, unchecked until the
+    // backend: a refusal names the route by its template, never the segment (#489).
+    it.each([
+        ['start', oauthUrlInterceptor, 'url', 'OAuth start refused: returnUrl is not a path within the app'],
+        ['link', oauthLinkInterceptor, 'link', 'OAuth link refused: returnUrl is not a path within the app'],
+    ])('logs no caller-chosen provider segment when an OAuth %s is refused', async (_case, interceptor, action, message) =>
+    {
+        const route = `/_auth/oauth/:provider/${action}`;
+        const ctx = {
+            path: `/_auth/oauth/capabilitySecret123/${action}`,
+            route: { method: 'POST', path: route },
+            body: { returnUrl: 'https://evil.com' },
+            metadata: {},
+        } as unknown as RequestInterceptorContext;
+        const lines = (['debug', 'info', 'warn', 'error'] as const).map(level => vi.spyOn(authLogger.interceptor.oauth, level));
+
+        try
+        {
+            await interceptor.request?.(ctx, vi.fn(async () => undefined));
+
+            const calls = lines.flatMap(spy => spy.mock.calls);
+            expect(inspect(calls, { depth: 10 })).not.toContain('capabilitySecret123');
+            expect(calls).toEqual([[message, { route }]]);
+        }
+        finally
+        {
+            lines.forEach(spy => spy.mockRestore());
+        }
     });
 
     /**

@@ -9,6 +9,7 @@
  * forwarded (allowlisted) set, and hashing a missing secret.
  */
 
+import { inspect } from 'node:util';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
 import type { RequestInterceptorContext, ResponseInterceptorContext } from '@spfn/core/nextjs/server';
@@ -216,6 +217,25 @@ describe('CSRF - case table', () =>
 
         expect(ctx.abort).toBeUndefined();
         expect(continued).toBe(true);
+    });
+
+    // An application may exempt a webhook path that carries a capability token;
+    // the exempt lines name the route by its template, never the path (#489).
+    it.each([
+        ['an exempt path', undefined, 'Path is CSRF-exempt'],
+        ['an exempt entry naming a route that declares required', 'required' as const, 'CSRF exempt list names a path that is always checked — the entry is ignored'],
+    ])('logs no capability from %s', async (_case, csrf, message) =>
+    {
+        const path = '/webhooks/stripe/capability-secret-123';
+        const route = '/webhooks/stripe/:capability';
+        configureAuth({ csrf: { mode: 'enforce', exemptPaths: [path] } });
+        const lines = (['debug', 'info', 'warn', 'error'] as const).map(level => vi.spyOn(authLogger.interceptor.csrf, level));
+
+        await run({ ...requestContext({ path, sessionCookie: session.cookie }), route: { method: 'POST', path: route, csrf } });
+
+        const calls = lines.flatMap(spy => spy.mock.calls);
+        expect(inspect(calls, { depth: 10 })).not.toContain('capability-secret-123');
+        expect(calls).toContainEqual([message, { route }]);
     });
 
     it('POST to a path that merely starts with an exempt one is still refused', async () =>

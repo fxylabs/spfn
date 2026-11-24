@@ -10,6 +10,7 @@
 
 import type { Context, Next } from 'hono';
 import { defineMiddlewareFactory } from '@spfn/core/route';
+import { loggedPath } from '@spfn/core/middleware';
 import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
@@ -55,7 +56,7 @@ export const requireRole = defineMiddlewareFactory('role',
         {
             authLogger.middleware.warn('Role check failed: not authenticated', {
                 roles: roleNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
             throw new ForbiddenError({ message: 'Authentication required' });
         }
@@ -68,7 +69,7 @@ export const requireRole = defineMiddlewareFactory('role',
                 userId,
                 userRole,
                 requiredRoles: roleNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
             throw new InsufficientRoleError({ requiredRoles: roleNames });
         }

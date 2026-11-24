@@ -108,7 +108,7 @@ function proposalsOf(ctx: ProposalContext): SessionOutcome | null
 
     const error = new SessionDecisionMissingError();
 
-    authLogger.interceptor.general.error(error.message, { path: ctx.path });
+    authLogger.interceptor.general.error(error.message);
 
     if ('response' in ctx)
     {

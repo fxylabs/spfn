@@ -390,9 +390,10 @@ Nothing derived from the path is written under the prefix either:
   `/api/import/:token` would never equal a path, so it would redact nothing.
 - **Undeclared paths** are written as they always were.
 - **Your own lines.** Name the path with `loggedPath(c)` from `@spfn/core/middleware`; it
-  applies the same declaration. `createServer` publishes the declaration before it builds
-  anything, so a hand-written `app.ts` that wires its own `RequestLogger` and `ErrorHandler`
-  gets it too. A bare Hono app without `createServer` calls `setRedactPaths([...])` itself.
+  applies the same declaration, as `@spfn/auth`'s middleware lines do (#489). `createServer`
+  publishes the declaration before it builds anything, so a hand-written `app.ts` that wires its
+  own `RequestLogger` and `ErrorHandler` gets it too. A bare Hono app without `createServer`
+  calls `setRedactPaths([...])` itself.
 - **`excludePaths` is a different thing.** It only silences the request logger's lines for a
   path (noise such as `/metrics`). The guard, the error handler and the rest still write their
   lines, with the path, unless the path is declared here.
@@ -403,12 +404,10 @@ What it does not cover:
 - The Next.js RPC proxy runs in another process and cannot read this declaration, so none of its
   lines carries a param value: its debug lines `→ RPC request` (`targetPath`) and
   `Found N matching interceptors for <method> <path>` name the route's pattern
-  (`/api/import/:token`) and `routeName`, not the path the params fill in.
-- `@spfn/auth`'s refusal warnings — a refused role check (`requireRole`, `roleGuard`), a refused
-  permission check (`requirePermissions`, `requireAnyPermission`), and a machine credential on the
-  user path (`authenticate`, `optionalAuth`) — read the path themselves until they move to
-  `loggedPath`. Its `API access` line and its missing-authorization-header line read it through
-  `loggedPath`.
+  (`/api/import/:token`) and `routeName`, not the path the params fill in. `@spfn/auth`'s
+  interceptors follow the same rule and carry no param value either: their CSRF lines (a
+  refusal, an exempt path, an exempt entry that is ignored) and their OAuth start and link lines
+  name the route's pattern (`route`), and the rest name no path.
 - Prefer a request body over a path segment for a token where you can: a body reaches no
   access log.
 

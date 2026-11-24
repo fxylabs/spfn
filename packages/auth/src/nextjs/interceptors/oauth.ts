@@ -100,7 +100,7 @@ export const oauthUrlInterceptor: InterceptorRule = {
         if (typeof returnUrl !== 'string' || !isSafeReturnPath(returnUrl))
         {
             authLogger.interceptor.oauth?.warn?.('OAuth start refused: returnUrl is not a path within the app', {
-                provider,
+                route: ctx.route?.path,
             });
             ctx.abort = refuseUnsafeReturnUrl();
 
@@ -143,7 +143,7 @@ export const oauthUrlInterceptor: InterceptorRule = {
         ctx.metadata.oauthCsrf = csrfNonce;
 
         authLogger.interceptor.oauth?.debug?.('OAuth state created', {
-            provider,
+            route: ctx.route?.path,
             keyId: keyPair.keyId,
         });
 
@@ -485,7 +485,7 @@ export const oauthLinkInterceptor: InterceptorRule = {
         if (typeof returnUrl !== 'string' || !isSafeReturnPath(returnUrl))
         {
             authLogger.interceptor.oauth?.warn?.('OAuth link refused: returnUrl is not a path within the app', {
-                provider: ctx.path.split('/')[3],
+                route: ctx.route?.path,
             });
             ctx.abort = refuseUnsafeReturnUrl();
 

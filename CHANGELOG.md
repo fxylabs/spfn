@@ -609,6 +609,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A log query that matched the console text matches the new messages instead. Held by a table-driven
   row over the five acts (rolled back, committed inside an application transaction, alone) and a
   row for the login with no string key.
+- **@spfn/auth: every middleware line names the request path through `loggedPath(c)`, and the rule
+  is held by core's scanner over auth's sources (#489).** The rule that a log line names the
+  request path only through `loggedPath(c)` (spfn/spfn#164) was held by a source scan that read
+  core alone, so eleven `@spfn/auth:middleware` warnings still wrote `c.req.path` as it came, past a
+  prefix declared with `defineServerConfig().logging({ redactPaths })`: `Machine credential
+  presented to the user path — refused` (`authenticate`, `optionalAuth`), the four refusals of
+  `requirePermissions` and `requireAnyPermission`, the two of `requireRole` and the three of
+  `roleGuard`. Their `path` is now `loggedPath(c)`, written `<prefix>/[redacted]` under a declared
+  prefix. On the Next.js side, where `ctx.path` is the backend path with the caller's params filled
+  in and `redactPaths` is never read, the two CSRF refusal lines (`CSRF check refused this
+  request`, `CSRF check would refuse this request (mode=warn)`) log `route`, the route's template
+  (`ctx.route.path`), in place of `path`; so do `Path is CSRF-exempt` and `CSRF exempt list names a
+  path that is always checked — the entry is ignored`, which logged the path because it equalled
+  an entry of the application's exempt list — and an application can exempt a webhook path that
+  carries a capability token. The OAuth lines `OAuth start refused: returnUrl is not a path within
+  the app`, `OAuth state created` and `OAuth link refused: …` log `route` in place of `provider`,
+  the `:provider` segment of the path — any `\w+` a caller sends, logged before the backend checked
+  that it names a provider. `Request token refused as expired — retrying once, signed afresh` and
+  the missing session-decision error line log no path. The scanner moved out of core's test into
+  `scripts/lib/request-path-scan.mjs` and is run by each package's suite over its own sources with
+  its own exact lists; auth's list of logged reads is empty. It knows an interceptor context by
+  its declared shape rather than by the name `ctx` — a parameter or `const` typed
+  `RequestInterceptorContext`/`ResponseInterceptorContext` (also through a union, `Pick` and the
+  like, or the file's own type alias) and the first parameter of an interceptor rule's
+  `request`/`response` — reads its `path` and its raw Request's `url`, and follows a path handed as
+  an argument of its own to a function of the same file into a logger call there. A log query that
+  read `path` from the CSRF lines, or `provider` from the OAuth lines, reads `route` instead.
 
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked

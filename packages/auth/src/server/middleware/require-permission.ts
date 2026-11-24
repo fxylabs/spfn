@@ -11,6 +11,7 @@
 
 import type { Context, Next } from 'hono';
 import { defineMiddlewareFactory } from '@spfn/core/route';
+import { loggedPath } from '@spfn/core/middleware';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientPermissionsError } from '@spfn/auth/errors';
 import { getAuth, hasAllPermissions, hasAnyPermission, authLogger } from '@spfn/auth/server';
@@ -56,7 +57,7 @@ export const requirePermissions = defineMiddlewareFactory('permission',
         {
             authLogger.middleware.warn('Permission check failed: not authenticated', {
                 permissions: permissionNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
 
             throw new ForbiddenError({ message: 'Authentication required' });
@@ -71,7 +72,7 @@ export const requirePermissions = defineMiddlewareFactory('permission',
             authLogger.middleware.warn('Permission check failed', {
                 userId,
                 requiredPermissions: permissionNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
 
             throw new InsufficientPermissionsError({ requiredPermissions: permissionNames });
@@ -120,7 +121,7 @@ export const requireAnyPermission = defineMiddlewareFactory('anyPermission',
         {
             authLogger.middleware.warn('Any permission check failed: not authenticated', {
                 permissions: permissionNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
 
             throw new ForbiddenError({ message: 'Authentication required' });
@@ -133,7 +134,7 @@ export const requireAnyPermission = defineMiddlewareFactory('anyPermission',
             authLogger.middleware.warn('Any permission check failed', {
                 userId,
                 requiredAnyOf: permissionNames,
-                path: c.req.path,
+                path: loggedPath(c),
             });
 
             throw new InsufficientPermissionsError({ requiredPermissions: permissionNames });

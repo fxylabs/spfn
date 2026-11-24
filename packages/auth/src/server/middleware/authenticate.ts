@@ -139,7 +139,7 @@ export async function admitBearerKey(c: Context): Promise<BearerOutcome>
     {
         // The wire answer says nothing; the log says what happened, so an
         // operator can tell this apart from an ordinary malformed token.
-        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: c.req.path });
+        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: loggedPath(c) });
 
         return { refused: 'machine' };
     }
@@ -420,7 +420,7 @@ export const optionalAuth = defineMiddleware('optionalAuth', async (c, next) =>
     // try below, which exists to swallow an unusable *user* token.
     if (matchesMachineDiscriminator(token))
     {
-        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: c.req.path });
+        authLogger.middleware.warn('Machine credential presented to the user path — refused', { path: loggedPath(c) });
 
         throw new UnauthorizedError({ message: INVALID_TOKEN_MESSAGE });
     }

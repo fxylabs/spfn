@@ -6,6 +6,7 @@
 
 import type { Context, Next } from 'hono';
 import { defineMiddlewareFactory } from '@spfn/core/route';
+import { loggedPath } from '@spfn/core/middleware';
 import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
@@ -82,7 +83,7 @@ export const roleGuard = defineMiddlewareFactory('roleGuard', (options: RoleGuar
         if (!auth)
         {
             authLogger.middleware.warn('Role guard failed: not authenticated', {
-                path: c.req.path,
+                path: loggedPath(c),
             });
             throw new ForbiddenError({ message: 'Authentication required' });
         }
@@ -98,7 +99,7 @@ export const roleGuard = defineMiddlewareFactory('roleGuard', (options: RoleGuar
                     userId,
                     userRole,
                     deniedRoles: deny,
-                    path: c.req.path,
+                    path: loggedPath(c),
                 });
                 throw new InsufficientRoleError({ requiredRoles: [...allow ?? []] });
             }
@@ -113,7 +114,7 @@ export const roleGuard = defineMiddlewareFactory('roleGuard', (options: RoleGuar
                     userId,
                     userRole,
                     allowedRoles: allow,
-                    path: c.req.path,
+                    path: loggedPath(c),
                 });
                 throw new InsufficientRoleError({ requiredRoles: [...allow] });
             }
