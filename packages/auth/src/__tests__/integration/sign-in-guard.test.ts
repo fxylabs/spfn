@@ -41,18 +41,25 @@
  *     count before any wrote it, all compared against the account's hash
  * 18. the README's worked example as an existence oracle (#486): its policy
  *     answering an account's sixth wrong password otherwise than an unknown
- *     identifier's
+ *     identifier's — and the README's printed example edited away from the
+ *     code this row runs
+ * 19. the worked example's count of an email by each of its case spellings
+ *     (#486): the package resolves them all to one account, so a count per
+ *     spelling no longer bounds the guesses at it
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
- * Its table lives in a schema of this file's own.
+ * Its table lives in a schema of this file's own — but for rows 18 and 19,
+ * which run the README's worked example from `fixtures/readme-sign-in-guard`,
+ * its tables where the README puts them.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { Hono } from 'hono';
 import postgres from 'postgres';
-import { and, desc, eq, inArray, max, sql } from 'drizzle-orm';
-import { integer, pgSchema, text } from 'drizzle-orm/pg-core';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } from 'jose';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
@@ -206,77 +213,32 @@ class SignInAttemptsRepository extends BaseRepository
 const attempts = new SignInAttemptsRepository();
 
 /**
- * The README's worked example, "lock after five attempts", as it is written
- * there — its table, repository and policy — without the temporary password.
+ * The README's worked example, "lock after five attempts": each of its blocks
+ * is one of these modules, text for text (row 18), and rows 18 and 19 run its
+ * policy. Only the temporary passwords' repository, which the README names
+ * and does not show, is not a block.
  */
-const signInAttempts = pgSchema('sign_in_guard_test').table('sign_in_attempts', {
-    identifier: text('identifier').primaryKey(),
-    attempts: integer('attempts').notNull(),
-});
+const README_EXAMPLE = resolve(__dirname, '../fixtures/readme-sign-in-guard');
+const { signInPolicy: readmeSignInPolicy } = await import('../fixtures/readme-sign-in-guard/src/server/sign-in-policy');
 
-class ReadmeSignInAttemptsRepository extends BaseRepository
+/** The worked example's blocks in the README, by the path each names on its first line. */
+function readmeExampleBlocks(): Map<string, string>
 {
-    async count(identifiers: string[]): Promise<number>
-    {
-        const [row] = await this.db.select({ attempts: max(signInAttempts.attempts) }).from(signInAttempts)
-            .where(inArray(signInAttempts.identifier, identifiers));
+    const readme = readFileSync(resolve(__dirname, '../../../README.md'), 'utf8');
+    const section = readme.split('\n#### Worked example — lock after five attempts')[1]!.split('\n#### ')[0]!;
 
-        return row?.attempts ?? 0;
-    }
-
-    async add(identifiers: string[]): Promise<number>
-    {
-        const rows = await this.db.insert(signInAttempts).values(identifiers.map(identifier => ({ identifier, attempts: 1 })))
-            .onConflictDoUpdate({ target: signInAttempts.identifier, set: { attempts: sql`${signInAttempts.attempts} + 1` } })
-            .returning({ attempts: signInAttempts.attempts });
-
-        return Math.max(...rows.map(row => row.attempts));
-    }
-
-    async clear(identifiers: string[]): Promise<void>
-    {
-        await this.db.delete(signInAttempts).where(inArray(signInAttempts.identifier, identifiers));
-    }
+    return new Map([...section.matchAll(/```typescript\n(\/\/ (\S+)\n[\s\S]*?)```/g)]
+        .map(([, block, path]) => [path!, block!]));
 }
 
-const signInAttemptsRepository = new ReadmeSignInAttemptsRepository();
-
-function countedIdentifiers({ identifier, user }: SignInAttempt): string[]
+/** The fixture modules that stand for a block: those whose first line names their own path. */
+function readmeExampleFixtures(): Map<string, string>
 {
-    if (identifier)
-    {
-        return [identifier.email ? identifier.email.trim().toLowerCase() : identifier.phone!];
-    }
-
-    return [user?.email, user?.phone].filter((value): value is string => Boolean(value));
+    return new Map(readdirSync(README_EXAMPLE, { recursive: true, encoding: 'utf8' })
+        .filter(path => path.endsWith('.ts'))
+        .map(path => [path, readFileSync(join(README_EXAMPLE, path), 'utf8')] as const)
+        .filter(([path, text]) => text.startsWith(`// ${path}\n`)));
 }
-
-const readmeLockAfterFive = {
-    admit: async (attempt: SignInAttempt, call: SignInAdmitCall): Promise<SignInAdmission> =>
-    {
-        const identifiers = countedIdentifiers(attempt);
-
-        if (identifiers.length === 0)
-        {
-            return undefined;
-        }
-
-        const count = call === 'before-proof'
-            ? await signInAttemptsRepository.add(identifiers)
-            : await signInAttemptsRepository.count(identifiers);
-
-        return count > 5 ? LOCKED : undefined;
-    },
-    settled: async (outcome: SignInOutcome): Promise<void> =>
-    {
-        await history.record(outcome);
-
-        if (outcome.result === 'succeeded')
-        {
-            await signInAttemptsRepository.clear(countedIdentifiers(outcome));
-        }
-    },
-};
 
 /** What the guard does in the current row; the guard itself is stated once per row. */
 const policy: {
@@ -378,7 +340,12 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
             id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
             reason text, key_id text, ip text, web_proxy boolean not null)`);
         await getTestDb().execute(sql`create table sign_in_guard_test.attempts (user_id bigint primary key, count int not null)`);
-        await getTestDb().execute(sql`create table sign_in_guard_test.sign_in_attempts (identifier text primary key, attempts int not null)`);
+        // The README's worked example's tables, where its entities put them.
+        await getTestDb().execute(sql`drop table if exists sign_in_history, sign_in_attempts`);
+        await getTestDb().execute(sql`create table sign_in_history (
+            id serial primary key, user_id bigint, channel text not null, stage text not null, result text not null,
+            reason text, ip text, web_proxy boolean not null, at timestamptz not null default now())`);
+        await getTestDb().execute(sql`create table sign_in_attempts (identifier text primary key, attempts integer not null)`);
 
         // `setupTestDb` points DATABASE_URL at the test database.
         observer = postgres(process.env.DATABASE_URL!, { max: 1 });
@@ -390,6 +357,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         resetSignInGuardForTests();
         await observer.end();
         await getTestDb().execute(sql`drop schema if exists sign_in_guard_test cascade`);
+        await getTestDb().execute(sql`drop table if exists sign_in_history, sign_in_attempts`);
         delete process.env.SPFN_AUTH_PASSKEY_RP_ID;
         delete process.env.SPFN_AUTH_PASSKEY_ORIGINS;
         delete process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS;
@@ -399,7 +367,7 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
     beforeEach(async () =>
     {
         await clearTables(getTestDb());
-        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts, sign_in_guard_test.sign_in_attempts`);
+        await getTestDb().execute(sql`truncate sign_in_guard_test.history, sign_in_guard_test.attempts, sign_in_history, sign_in_attempts`);
         resetMemoryRateLimitStore();
         await initializeAuth();
         sendEmail.mockClear();
@@ -1870,11 +1838,26 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(comparedHashes()).toEqual([await getDummyPasswordHash()]);
     });
 
+    // ========================================================================
+    // Rows 18 and 19 — the README's worked example, as the README prints it
+    // ========================================================================
+
+    /** The guard is the worked example's policy, imported from its fixture. */
+    function useReadmePolicy(): void
+    {
+        policy.admit = async (attempt, call) => readmeSignInPolicy.admit!(attempt, call);
+        policy.settled = async outcome => readmeSignInPolicy.settled!(outcome);
+    }
+
+    it('row 18 — the README\'s worked example is the code rows 18 and 19 run: each of its blocks is a fixture module, text for text (#486)', () =>
+    {
+        expect(readmeExampleBlocks()).toEqual(readmeExampleFixtures());
+    });
+
     it.each(IDENTIFIER_CHANNELS)('row 18 — $channel, the README\'s worked example: six wrong passwords for an account and six for an unknown identifier answer the same statuses (#486)', async ({ attempt }) =>
     {
         await seedUser('known@test.com');
-        policy.admit = readmeLockAfterFive.admit;
-        policy.settled = readmeLockAfterFive.settled;
+        useReadmePolicy();
 
         const statuses = async (email: string) =>
         {
@@ -1890,5 +1873,20 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
 
         expect(await statuses('known@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
         expect(await statuses('nobody@test.com')).toEqual([401, 401, 401, 401, 401, 403]);
+    });
+
+    it('row 19 — the README\'s worked example: wrong passwords by six case spellings of one account\'s email share one count, five 401s and then a 403 (#486)', async () =>
+    {
+        await seedUser('known@test.com');
+        useReadmePolicy();
+
+        const answered: number[] = [];
+
+        for (const email of ['known@test.com', 'KNOWN@test.com', 'Known@Test.com', 'known@TEST.COM', 'kNoWn@tEsT.cOm', 'KNOWN@TEST.COM'])
+        {
+            answered.push((await login(email, WRONG_PASSWORD)).status);
+        }
+
+        expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
     });
 });
