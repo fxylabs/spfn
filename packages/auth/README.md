@@ -969,13 +969,35 @@ password, a sign-in history. Leave it out and nothing changes: no extra query, l
 runs on any sign-in. Both callbacks are optional.
 
 ```typescript
-import type { SignInAttempt, SignInOutcome } from '@spfn/auth/server';
-
+// The worked example below, shortened: `countedIdentifiers`, `signInAttempts` and `signInHistory`
+// are its. An attempt is counted by the identifier it names, whether or not an account holds it — a
+// guard that let `user: null` through would answer a locked account 403 and an unknown one 401.
 createAuthLifecycle({
     signIn: {
-        admit: async (attempt: SignInAttempt) =>
-            attempt.user && await lockouts.isLocked(attempt.user.id) ? { refuse: { code: 'LOCKED' } } : undefined,
-        settled: (outcome: SignInOutcome) => signInHistory.record(outcome),
+        admit: async (attempt, call) =>
+        {
+            const identifiers = countedIdentifiers(attempt);
+
+            if (identifiers.length === 0)
+            {
+                return undefined;
+            }
+
+            const attempts = call === 'before-proof'
+                ? await signInAttempts.add(identifiers)
+                : await signInAttempts.count(identifiers);
+
+            return attempts > 5 ? { refuse: { code: 'LOCKED' } } : undefined;
+        },
+        settled: async (outcome) =>
+        {
+            await signInHistory.record(outcome);
+
+            if (outcome.result === 'succeeded')
+            {
+                await signInAttempts.clear(countedIdentifiers(outcome));
+            }
+        },
     },
 })
 ```
@@ -1146,8 +1168,9 @@ refused session — the report of the refusal is `settled`'s. A count of attempt
 asked before the password is compared. An account it refuses is compared against the **dummy hash**,
 never its own, and answered the refusal whatever the password was. Skipping the comparison would
 make a refused account answer faster than an unknown one; comparing its real hash would make the
-refusal answer the password. An unknown identifier reaches `admit` with `user: null` — refuse those
-too if your policy counts identifiers.
+refusal answer the password. An unknown identifier reaches `admit` with `user: null` — count and
+refuse it as an account is, by the identifier, as the worked example does: a policy that lets it
+through answers a locked account otherwise than an unknown identifier.
 
 **An account the package refuses answers as a wrong password.** On `password` and
 `deletion-cancel`, an account that is disabled, suspended, pending deletion or purged is answered
@@ -1388,8 +1411,11 @@ the same. What that changes:
 - **The lift clears by identifier.** An administrator lifts an account's lock with
   `signInAttemptsRepository.clear([user.email, user.phone])` (the ones it has), from an ops or admin
   route behind `requireOpsScope` (or a role check).
-- **An account reachable by an email and a phone has two counts.** Five wrong passwords by its email
-  do not lock it by its phone, and a success by its email clears only the email's count.
+- **An account reachable by an email and a phone has two counts.** Six wrong passwords by its
+  email lock its password step by that email only: by its phone the password is still compared, and
+  a success by its email clears only the email's count. Every step that names no identifier is
+  locked all the same (next point): those six, then the right password by its phone, answer 202 and
+  then 403 `LOCKED` at `mfa/verify`.
 - **The channels without an identifier** — `mfa/verify`, passkey, OAuth, device code and link,
   `password-reset`, the registration channels — already hold the account, so they are judged by the
   account's own identifiers: the highest of their counts. `mfa/verify` counts an attempt on each of
