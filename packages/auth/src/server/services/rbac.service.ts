@@ -68,6 +68,7 @@ import type { AuthInitOptions, RoleConfig, PermissionConfig } from '../rbac';
 import { assertPasskeyConfig, configureAuth } from '../lib/config';
 import { authLogger } from '../logger';
 import { isLockTimeout } from '../lib/lock-timeout';
+import { optionKeys, readEntries, readList, readOptions, readRecords } from '../lib/stated-options';
 import { installUserSettings, sealUserSettings } from '../lib/user-settings/registry';
 import { installProfileFields, sealProfileFields } from '../lib/profile-fields';
 import { reconcileUserSettings } from './user-settings.service';
@@ -171,12 +172,70 @@ function collectMappings(options: AuthInitOptions): Record<string, string[]>
  */
 export async function initializeAuth(options: AuthInitOptions = {}): Promise<void>
 {
-    installDeclarations(options);
+    const read = readInitOptions(options);
+
+    installDeclarations(read);
     await reconcileUserSettings();
     await reconcileProfileFields();
-    await applyRbacConfig(options);
+    await applyRbacConfig(read);
     sealUserSettings();
     sealProfileFields();
+}
+
+/** Every option `initializeAuth` reads. `createAuthLifecycle` hands it these of its own. */
+export const AUTH_INIT_OPTIONS = optionKeys<AuthInitOptions>({
+    roles: true,
+    permissions: true,
+    rolePermissions: true,
+    sessionTtl: true,
+    userSettings: true,
+    profileFields: true,
+});
+
+const ROLE_OPTIONS = optionKeys<RoleConfig>({
+    name: true,
+    displayName: true,
+    description: true,
+    priority: true,
+    isSystem: true,
+    isBuiltin: true,
+});
+
+const PERMISSION_OPTIONS = optionKeys<PermissionConfig>({
+    name: true,
+    displayName: true,
+    description: true,
+    category: true,
+    isSystem: true,
+    isBuiltin: true,
+});
+
+/**
+ * `options` read once, by `readOptions`; `rolePermissions` — a map keyed by
+ * the application's role names — once, by `readEntries`, and each role's list
+ * once, by `readList`, into a copy; each role and permission record once, by
+ * `readRecords`, so a misspelt `prority` is refused rather than declared at
+ * the default priority (#477). Only the snapshot is read from here on.
+ * `createAuthLifecycle` reads its own through this at its call.
+ */
+export function readInitOptions(options: AuthInitOptions): AuthInitOptions
+{
+    const { roles, permissions, rolePermissions, ...read } = readOptions<AuthInitOptions>('initializeAuth', options, AUTH_INIT_OPTIONS);
+
+    return {
+        ...read,
+        ...(roles !== undefined && { roles: readRecords<RoleConfig>('roles', roles, ROLE_OPTIONS) as RoleConfig[] }),
+        ...(permissions !== undefined && {
+            permissions: readRecords<PermissionConfig>('permissions', permissions, PERMISSION_OPTIONS) as PermissionConfig[],
+        }),
+        ...(rolePermissions !== undefined && { rolePermissions: readRolePermissions(rolePermissions) }),
+    };
+}
+
+function readRolePermissions(rolePermissions: unknown): Record<string, string[]>
+{
+    return Object.fromEntries(Object.entries(readEntries<unknown>('rolePermissions', rolePermissions, 'giving each role its permission names'))
+        .map(([role, names]) => [role, readList<string>(`rolePermissions.${role}`, names, 'of permission names')])) as Record<string, string[]>;
 }
 
 function installDeclarations(options: AuthInitOptions): void

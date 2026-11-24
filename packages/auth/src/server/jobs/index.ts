@@ -12,6 +12,7 @@ import { createOAuth2ClientPurgeJob } from './oauth2-client-purge';
 import { createRevokeAllTokenPurgeJob } from './revoke-all-token-purge';
 import { createMfaSweepJob } from './mfa-sweep';
 import { linkMailJob } from './link-mail';
+import { optionKeys, readOptions } from '../lib/stated-options';
 
 export { createAuthDeletionPurgeJob } from './deletion-purge';
 export { createOAuth2ClientPurgeJob, DEFAULT_OAUTH2_CLIENT_PURGE_CRON } from './oauth2-client-purge';
@@ -35,6 +36,9 @@ export type { LinkMailPayload } from './link-mail';
  * @param options.oauth2ClientPurgeCron - Stale OAuth client sweep; defaults to daily at 05:00
  * @param options.revokeAllTokenPurgeCron - Sign-out-everywhere link sweep; defaults to daily at 06:00
  * @param options.mfaSweepCron - Abandoned second-factor enrolment sweep; defaults to daily at 07:00
+ * @throws Error when `options` is not a plain object or carries a name that is
+ *   not one of these, enumerable or not — a misspelt cron would otherwise run
+ *   on its default (#477)
  */
 export function createAuthJobRouter(options?: {
     purgeCron?: string;
@@ -43,11 +47,22 @@ export function createAuthJobRouter(options?: {
     mfaSweepCron?: string;
 })
 {
+    const read = options === undefined ? {} : readOptions<NonNullable<typeof options>>(
+        'createAuthJobRouter',
+        options,
+        optionKeys<NonNullable<typeof options>>({
+            purgeCron: true,
+            oauth2ClientPurgeCron: true,
+            revokeAllTokenPurgeCron: true,
+            mfaSweepCron: true,
+        }),
+    );
+
     return defineJobRouter({
-        deletionPurge: createAuthDeletionPurgeJob(options?.purgeCron),
-        oauth2ClientPurge: createOAuth2ClientPurgeJob(options?.oauth2ClientPurgeCron),
-        revokeAllTokenPurge: createRevokeAllTokenPurgeJob(options?.revokeAllTokenPurgeCron),
-        mfaSweep: createMfaSweepJob(options?.mfaSweepCron),
+        deletionPurge: createAuthDeletionPurgeJob(read.purgeCron),
+        oauth2ClientPurge: createOAuth2ClientPurgeJob(read.oauth2ClientPurgeCron),
+        revokeAllTokenPurge: createRevokeAllTokenPurgeJob(read.revokeAllTokenPurgeCron),
+        mfaSweep: createMfaSweepJob(read.mfaSweepCron),
         linkMail: linkMailJob,
     });
 }

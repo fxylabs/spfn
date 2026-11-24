@@ -146,7 +146,7 @@ function resolveScopes(params: OAuth2AuthorizeParams, config: AuthorizationServe
 
     if (!requested)
     {
-        return config.defaultScopes;
+        return [...config.defaultScopes];
     }
 
     return requested.split(/\s+/);

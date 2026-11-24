@@ -11,6 +11,8 @@
  * Where it is asked, and why there, is `services/password-rule.service.ts`.
  */
 
+import { optionKeys, readOptions } from './stated-options';
+
 /**
  * Which path is writing the password:
  *
@@ -55,7 +57,7 @@ export interface PasswordRuleOptions
     validate: (password: string, subject: PasswordRuleSubject) => PasswordRuleAnswer | Promise<PasswordRuleAnswer>;
 }
 
-const OPTION_KEYS = ['validate'] as const;
+const OPTION_KEYS = optionKeys<PasswordRuleOptions>({ validate: true });
 
 let rule: PasswordRuleOptions | null = null;
 
@@ -80,35 +82,33 @@ export function configurePasswordRule(options: PasswordRuleOptions | undefined):
         return;
     }
 
-    assertRuleShape(options);
+    const read = readRule(options);
 
     if (rule === null)
     {
-        rule = { validate: options.validate };
+        rule = read;
 
         return;
     }
 
-    if (rule.validate !== options.validate && contradiction === null)
+    if (rule.validate !== read.validate && contradiction === null)
     {
         contradiction = 'createAuthLifecycle() was given a different password.validate in two calls. '
             + 'State it once, or the same function in every call. Until then the first one stays in force.';
     }
 }
 
-function assertRuleShape(options: PasswordRuleOptions): void
+/** `options` read once, by `readOptions`: the snapshot is what is checked, compared and kept (#477). */
+function readRule(options: PasswordRuleOptions): PasswordRuleOptions
 {
-    const unknown = Object.keys(options).filter(key => !(OPTION_KEYS as readonly string[]).includes(key));
+    const { validate } = readOptions<PasswordRuleOptions>('password', options, OPTION_KEYS);
 
-    if (unknown.length > 0)
+    if (typeof validate !== 'function')
     {
-        throw new Error(`password.${unknown[0]} is not an option. Known options: ${OPTION_KEYS.join(', ')}.`);
+        throw new Error(`password.validate must be a function, received ${String(validate)}.`);
     }
 
-    if (typeof options.validate !== 'function')
-    {
-        throw new Error(`password.validate must be a function, received ${String(options.validate)}.`);
-    }
+    return { validate };
 }
 
 /**

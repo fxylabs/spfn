@@ -534,6 +534,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: @spfn/auth: every option the application states is read once, through one rule
+  (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
+  `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored
+  `Object.entries(options)` (own, enumerable, getters run again); `configureSignIn`,
+  `configurePasswordChange` and `configurePasswordRule` checked a function on one read and stored
+  another; `configureSecondFactor`, `configureDeletion`, the guards and `configureAuth`'s nested
+  objects refused unknown keys with `Object.keys` but read options with `options.x`; others checked
+  no key at all. So an option the app stated could be dropped for its default (inherited, misspelt,
+  non-enumerable), or stored with a value that never passed the check (a getter answering twice).
+  #476's rule for `channels` is now the one way every reader reads: the object is a plain object
+  (prototype `null` or some realm's `Object.prototype`), every own name it carries — enumerable or
+  not — is an option the reader knows, and each option is read once into a snapshot that alone is
+  checked and stored. A map keyed by the app's own names (`authorizationServer.scopes`,
+  `rolePermissions`) must be a plain object too, and each entry, enumerable or not, is read once.
+  **Refused now, accepted before:**
+  - an options object that is not a plain object — a class instance, `Object.create(base)`, a `Map`,
+    an array — given to `createAuthLifecycle`, `deletion`, `deviceAuth`, `deviceLink`,
+    `authorizationServer` (and its `scopes`), `secondFactor`, `signIn`, `passwordChange`, `password`,
+    `oneTimeToken`, `initializeAuth` (and its `rolePermissions`), `initOneTimeTokenManager`,
+    `createAuthJobRouter`, `configureAuth` and its `csrf`, `oauthProviders`, each provider's policy,
+    `oauthLink` and each `recentAuth`. `authorizationServer: null` (or another falsy value) no
+    longer means "no authorization server": leave it out. A `csrf` that is not an object was
+    ignored; it is refused;
+  - a `Proxy` as any of these objects, whatever its prototype: its names do not say what a read
+    of it finds, so the options its handler answers would be dropped for their defaults;
+  - an unknown key that is non-enumerable or inherited, where `Object.keys` was the check:
+    `deletion`, `secondFactor`, `signIn`, `passwordChange`, `password`, and `configureAuth`'s
+    `oauthProviders`, provider policies, `oauthLink` and `recentAuth`;
+  - an unknown top-level `createAuthLifecycle()` key — a misspelt `chanels` was ignored and every
+    channel took its default; it now throws when `createAuthLifecycle()` is called;
+  - any unknown key in the readers that checked none: `createAuthLifecycle()` itself, `deviceAuth`,
+    `deviceLink`, `authorizationServer`, `oneTimeToken` / `initOneTimeTokenManager`,
+    `initializeAuth`, `createAuthJobRouter` (a misspelt cron ran on its default), and
+    `configureAuth` at its top level and in `csrf`;
+  - an `authorizationServer.defaultScopes` entry naming a member of `Object.prototype`
+    (`toString`), which `in` found among the scopes;
+  - in the declaration records, which were read field by field with no check: a role or
+    permission record in `initializeAuth`'s `roles` / `permissions` naming an unknown key (a
+    misspelt `prority` declared the role at the default priority, `isSytem` as not a system role),
+    and a `defineUserSettings` / `defineProfileFields` entry naming one (`defualt` declared the key
+    with no default). Each list must be an array with no holes, each record a plain object;
+    `roles: null` / `permissions: null` are refused rather than read as none. Each record is read
+    once and the snapshot is what is declared — an entry is no longer kept by reference and read
+    again at install;
+  - in `@spfn/auth/client-proof`, which read `options.x ?? default`: an unknown key, or an options
+    object or `publicKeys` map that is not a plain object, given to `ClientProofState`,
+    `createClientProofDevHandler` (a misspelt `replayWindowMilis` ran on the default window) or
+    `createClientProofGuard` (a misspelt `contractpath` checked every proof against the request
+    path). The guard reads `contractPath` once, when it is built, where it read it on every
+    request; the dev handler builds its state from its own snapshot;
+  - the same for the options of `signedTokenAuth` (whose `iss` and `aud` were checked on one read
+    and kept from another), `opsOrUser` (`opsScopes` checked, then read again for the guard),
+    `roleGuard` (which read its options on every request; it reads them when the route is defined,
+    so a misspelt `alow` throws there), `createRevokeAllLink` (a misspelt `ttlMinute` minted a link
+    at the default lifetime) and `registerMachineVerifier`'s `match`. `registerMachineVerifier`
+    and `registerAuthProfile` keep taking a class instance and read each member once: the
+    `verify` checked is the `verify` bound.
+
+  Honoured now, dropped before: an own non-enumerable option of `deletion`, `configureAuth`,
+  `authorizationServer.scopes` and `rolePermissions`. An `oauthProviders` entry stated `undefined`
+  is now "not set", as `undefined` is everywhere else in `configureAuth`, rather than refused.
+  `authorizationServer.issuer: ''` is now reported by the boot refusal as coming from
+  `authorizationServer.issuer`, where it was named `SPFN_API_URL`. Messages: an unknown key now reads
+  `<option>.<key> is not an option. Known options: …` everywhere — `deletion has no option 'x'.
+  Allowed: …` and `configureAuth: oauthLink has no option 'x'. Allowed: …` are gone; an unknown
+  provider is `configureAuth: oauthProviders.<name> is not a provider. Known providers: …`; an object
+  that is not a plain object is `<option> must be a plain object …; received …` (for `configureAuth`
+  objects this replaces `must be an object, received …`). `channels` messages are unchanged.
+  **Upgrade:** build an options object as a literal — `{ ...defaults, ...overrides }` rather than
+  `Object.create(defaults)` or a class instance — and fix the key a new refusal names.
 - **BREAKING (source, log consumers; security-relevant): @spfn/core: logs and error reports copy
   only values known to be safe (#469).** The request logger and the error handler copied request
   data the framework does not own — a failed write's body, the request headers, the query — and

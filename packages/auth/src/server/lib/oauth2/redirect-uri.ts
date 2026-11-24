@@ -37,7 +37,7 @@ export type RedirectUriRefusal = 'invalid_redirect_uri';
  */
 export function refuseRedirectUriRegistration(
     uri: string,
-    allowedRedirectOrigins: string[],
+    allowedRedirectOrigins: readonly string[],
 ): string | null
 {
     let url: URL;
@@ -67,7 +67,7 @@ export function refuseRedirectUriRegistration(
 }
 
 /** Loopback http, or an https origin this application allows. Nothing else. */
-function refuseRedirectOrigin(url: URL, uri: string, allowedRedirectOrigins: string[]): string | null
+function refuseRedirectOrigin(url: URL, uri: string, allowedRedirectOrigins: readonly string[]): string | null
 {
     if (url.protocol === 'http:')
     {

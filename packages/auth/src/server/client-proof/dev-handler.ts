@@ -29,9 +29,10 @@ import {
     type ListItemsRequest,
 } from './contract-types';
 import { ClientProofRefusal, newHexId } from './refusal';
-import { ClientProofState, type ClientProofStateOptions, TestClock } from './state';
+import { CLIENT_PROOF_STATE_OPTIONS, ClientProofState, type ClientProofStateOptions, TestClock } from './state';
 import { handleControlRequest, CONTROL_PREFIX } from './dev-control';
 import { serverContractHeaders } from './wire-version';
+import { optionKeys, readOptions } from '../lib/stated-options';
 
 /** Far above any contract request and far below anything worth buffering. */
 const MAX_BODY_BYTES = 1 << 20;
@@ -76,12 +77,28 @@ export interface ClientProofDevHandler
     controlToken: string;
 }
 
+const DEV_HANDLER_OPTIONS = optionKeys<ClientProofDevHandlerOptions>({
+    publicKeys: true,
+    clock: true,
+    sessionTtlMillis: true,
+    replayWindowMillis: true,
+    controlToken: true,
+    enableControl: true,
+    log: true,
+});
+
+/**
+ * @throws Error when `options` is not a plain object or carries a name that
+ *   is not an option. It is read once, by `readOptions`, and the state is
+ *   built from that snapshot, never from `options` (#477)
+ */
 export function createClientProofDevHandler(options: ClientProofDevHandlerOptions): ClientProofDevHandler
 {
-    const state = new ClientProofState(options);
-    const controlToken = options.controlToken ?? newHexId();
-    const enableControl = options.enableControl ?? true;
-    const log = options.log ?? (() => undefined);
+    const read = readOptions<ClientProofDevHandlerOptions>('createClientProofDevHandler', options, DEV_HANDLER_OPTIONS);
+    const state = new ClientProofState(stateOptionsOf(read));
+    const controlToken = read.controlToken ?? newHexId();
+    const enableControl = read.enableControl ?? true;
+    const log = read.log ?? (() => undefined);
 
     async function dispatch(request: Request): Promise<Response>
     {
@@ -214,6 +231,19 @@ export function createClientProofDevHandler(options: ClientProofDevHandlerOption
             }
         },
     };
+}
+
+/**
+ * The options of `read` that `ClientProofState` reads, as they were stated —
+ * `publicKeys` too when it was left out, for the state's own refusal.
+ */
+function stateOptionsOf(read: Partial<ClientProofDevHandlerOptions>): ClientProofStateOptions
+{
+    const stated: Partial<ClientProofStateOptions> = Object.fromEntries(CLIENT_PROOF_STATE_OPTIONS
+        .filter(key => Object.hasOwn(read, key))
+        .map(key => [key, read[key]]));
+
+    return stated as ClientProofStateOptions;
 }
 
 /**

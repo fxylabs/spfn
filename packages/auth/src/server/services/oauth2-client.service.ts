@@ -174,7 +174,7 @@ function refuseListedMetadata(
 /** The redirect URIs, refused one at a time so the message names the offender. */
 function refuseRedirectUris(
     uris: unknown,
-    allowedRedirectOrigins: string[],
+    allowedRedirectOrigins: readonly string[],
 ): OAuth2RegisterRefusal | null
 {
     const declared = asStringArray(uris);

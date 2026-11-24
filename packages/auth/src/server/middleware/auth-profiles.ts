@@ -547,7 +547,10 @@ export function registerAuthProfile(profileId: string, verifier: AuthProfileVeri
     {
         throw new Error('registerAuthProfile: profileId must be a non-empty string');
     }
-    if (typeof verifier?.verify !== 'function')
+    // `verify` read once (#477): the function checked is the function bound.
+    const verify: unknown = verifier?.verify;
+
+    if (typeof verify !== 'function')
     {
         throw new Error(`registerAuthProfile: auth profile '${profileId}' needs a verifier with a callable verify(c)`);
     }
@@ -564,7 +567,7 @@ export function registerAuthProfile(profileId: string, verifier: AuthProfileVeri
     // verifier that consults its own mutable state through that function still
     // changes behaviour when the registrant mutates it. This is a footgun guard
     // against an accidental reassignment, not an immutability guarantee.
-    const verify = verifier.verify.bind(verifier);
+    const bound = verify.bind(verifier) as AuthProfileVerifier['verify'];
 
-    AUTH_PROFILES.set(profileId, { admit: c => admitAppProfile(c, profileId, { verify }) });
+    AUTH_PROFILES.set(profileId, { admit: c => admitAppProfile(c, profileId, { verify: bound }) });
 }

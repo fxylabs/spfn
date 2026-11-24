@@ -14,6 +14,8 @@
 import type { DeviceRegistrationChannel } from '../events';
 import type { User } from '../entities/users';
 
+import { optionKeys, readOptions } from './stated-options';
+
 /**
  * Every door a sign-in comes through: the device-registration channels except
  * `renewal` — a renewal continues a session, it does not start one — and
@@ -152,7 +154,7 @@ export interface SignInGuardOptions
     settled?: (outcome: SignInOutcome) => void | Promise<void>;
 }
 
-const OPTION_KEYS = ['admit', 'settled'] as const;
+const OPTION_KEYS = optionKeys<SignInGuardOptions>({ admit: true, settled: true });
 
 let guard: SignInGuardOptions | null = null;
 
@@ -177,16 +179,16 @@ export function configureSignIn(options: SignInGuardOptions | undefined): void
         return;
     }
 
-    assertGuardShape(options);
+    const read = readGuard(options);
 
     if (guard === null)
     {
-        guard = { admit: options.admit, settled: options.settled };
+        guard = read;
 
         return;
     }
 
-    const differing = OPTION_KEYS.filter(key => guard![key] !== options[key]);
+    const differing = OPTION_KEYS.filter(key => guard![key] !== read[key]);
 
     if (differing.length > 0 && contradiction === null)
     {
@@ -195,24 +197,22 @@ export function configureSignIn(options: SignInGuardOptions | undefined): void
     }
 }
 
-function assertGuardShape(options: SignInGuardOptions): void
+/** `options` read once, by `readOptions`: the snapshot is what is checked, compared and kept (#477). */
+function readGuard(options: SignInGuardOptions): SignInGuardOptions
 {
-    const unknown = Object.keys(options).filter(key => !(OPTION_KEYS as readonly string[]).includes(key));
-
-    if (unknown.length > 0)
-    {
-        throw new Error(`signIn.${unknown[0]} is not an option. Known options: ${OPTION_KEYS.join(', ')}.`);
-    }
+    const read = readOptions<SignInGuardOptions>('signIn', options, OPTION_KEYS);
 
     for (const key of OPTION_KEYS)
     {
-        const value: unknown = options[key];
+        const value: unknown = read[key];
 
         if (value !== undefined && typeof value !== 'function')
         {
             throw new Error(`signIn.${key} must be a function, received ${String(value)}.`);
         }
     }
+
+    return { admit: read.admit, settled: read.settled };
 }
 
 /**

@@ -14,6 +14,8 @@ import { assertAppFromThisHono } from './lib/hono-copy';
 import { authLogger } from './logger';
 import { assertRoleEmailDomainPolicy, initializeAuth, normalizeStoredEmails } from './services';
 import { initOneTimeTokenManager } from './lib/one-time-token';
+import { optionKeys, readOptions } from './lib/stated-options';
+import { AUTH_INIT_OPTIONS, readInitOptions } from './services/rbac.service';
 import { settleLinkMail } from './lib/link-mail-delivery';
 import { assertDeletionConsistent, assertSelfDeletionConsistent, configureDeletion } from './lib/deletion-config';
 import { configureDeviceAuth } from './lib/device-auth-config';
@@ -610,8 +612,46 @@ export interface AuthLifecycleOptions extends AuthInitOptions
     password?: PasswordRuleOptions;
 }
 
+/** Every option `createAuthLifecycle` reads: `initializeAuth`'s, and its own. */
+const LIFECYCLE_OPTIONS = optionKeys<AuthLifecycleOptions>({
+    roles: true,
+    permissions: true,
+    rolePermissions: true,
+    sessionTtl: true,
+    userSettings: true,
+    profileFields: true,
+    oneTimeToken: true,
+    deletion: true,
+    deviceAuth: true,
+    deviceLink: true,
+    authorizationServer: true,
+    channels: true,
+    secondFactor: true,
+    signIn: true,
+    passwordChange: true,
+    password: true,
+});
+
+/**
+ * The options of `read` that `initializeAuth` reads, read now as it reads
+ * them: the roles, permissions and mappings boot declares are copies taken at
+ * this call, which a later change to the application's arrays does not reach
+ * (#477).
+ */
+function initOptions(read: Partial<AuthLifecycleOptions>): AuthInitOptions
+{
+    return readInitOptions(Object.fromEntries(AUTH_INIT_OPTIONS.filter(key => Object.hasOwn(read, key)).map(key => [key, read[key]])));
+}
+
 export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLifecycleConfig
 {
+    // Read once, here, as every option object inside it is by its own reader:
+    // a name that is not an option — `chanels` — is refused at this call
+    // rather than left out for its default, and nothing below reads `options`
+    // again (#477).
+    const read = readOptions<AuthLifecycleOptions>('createAuthLifecycle', options, LIFECYCLE_OPTIONS);
+    const init = initOptions(read);
+
     // Synchronous, not inside afterInfrastructure: readers of getDeletionConfig()
     // (routes, the purge job handler) only run later, at request/handler time — but
     // createAuthDeletionJobRouter() may be called by the app right after this
@@ -619,39 +659,39 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
     // immediately. See lib/deletion-config.ts for the full ordering rationale.
     // An omitted option leaves an earlier call's as it is; a contradicting one
     // is refused below, in afterInfrastructure.
-    configureDeletion(options.deletion);
+    configureDeletion(read.deletion);
 
     // Same reason, one step simpler: nothing but request handlers read this, and
     // they all run later — but resolving it here keeps every knob set in one place
     // and rules out a first request that is served under the defaults.
-    configureDeviceAuth(options.deviceAuth);
-    configureDeviceLink(options.deviceLink);
+    configureDeviceAuth(read.deviceAuth);
+    configureDeviceLink(read.deviceLink);
 
     // Same again, and it is also what decides whether the authorization server
     // exists at all: every route under /_auth/oauth2/* reads this and answers
     // 404 on null. Registration of those routes happens at module-import time,
     // before this call, so "registered only when configured" is not available —
     // see routes/oauth2/http.ts.
-    configureAuthorizationServer(options.authorizationServer);
+    configureAuthorizationServer(read.authorizationServer);
 
     // Same again: every gated route reads this at request time and answers 404
     // for a channel that is off — see routes/channels.ts. An unknown key or a
     // value that is not a boolean throws here: that is known from this call
     // alone. An omitted option leaves an earlier call's channels as they are;
     // a contradicting one is refused below, in afterInfrastructure.
-    configureChannels(options.channels);
+    configureChannels(read.channels);
 
     // Same again: the enrolment check in `authenticate`, the method gates and
     // the proof checks read it at request time. Omitted leaves it as it is; a
     // contradicting statement is refused below, in afterInfrastructure.
-    configureSecondFactor(options.secondFactor);
+    configureSecondFactor(read.secondFactor);
 
     // Same again: every sign-in reads it at request time. Omitted leaves it as
     // it is; a contradicting statement is refused below, in afterInfrastructure.
-    configureSignIn(options.signIn);
-    configurePasswordChange(options.passwordChange);
+    configureSignIn(read.signIn);
+    configurePasswordChange(read.passwordChange);
     // Before afterInfrastructure, where admin seeding asks it.
-    configurePasswordRule(options.password);
+    configurePasswordRule(read.password);
 
     return {
         /**
@@ -716,7 +756,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // Same reasoning, for the password rule.
             assertPasswordRuleConsistent();
 
-            await initializeAuth(options);
+            await initializeAuth(init);
             // Before any account is looked up: the repository folds addresses to
             // canonical form now, so a row still stored in mixed case would not
             // be found by its owner.
@@ -753,7 +793,7 @@ export function createAuthLifecycle(options: AuthLifecycleOptions = {}): AuthLif
             // After seeding and RBAC init, so the roles it looks for and the
             // superadmins it counts are the ones this instance will serve.
             await assertRoleEmailDomainPolicy();
-            initOneTimeTokenManager(options.oneTimeToken);
+            initOneTimeTokenManager(read.oneTimeToken);
         },
 
         /**

@@ -80,10 +80,13 @@ function base64url(value: unknown): string
 
 function buildApp(keys: string = keysUrl, clockSkewSec?: number): Hono
 {
-    const surface = defineSurface({
-        namespace: '/_app',
-        auth: signedTokenAuth({ keysUrl: keys, iss: ISS, aud: AUD, clockSkewSec }),
-    });
+    return appWith(signedTokenAuth({ keysUrl: keys, iss: ISS, aud: AUD, clockSkewSec }));
+}
+
+/** A server whose one route sits behind `auth`. */
+function appWith(auth: ReturnType<typeof signedTokenAuth>): Hono
+{
+    const surface = defineSurface({ namespace: '/_app', auth });
 
     const app = new Hono();
     app.onError((err, c) =>
@@ -183,6 +186,23 @@ describe('signedTokenAuth — the request', () =>
 
 describe('signedTokenAuth — claims', () =>
 {
+    it('reads iss once, and verifies every token against what that read answered (#477)', async () =>
+    {
+        const answers = [ISS, 'https://other.example'];
+        let reads = 0;
+        const options = {
+            keysUrl,
+            aud: AUD,
+            get iss()
+            {
+                return answers[reads++];
+            },
+        };
+
+        expect((await call(appWith(signedTokenAuth(options)), await mint(keyA))).status).toBe(200);
+        expect(reads).toBe(1);
+    });
+
     it('refuses a wrong aud', async () =>
     {
         expect(await call(buildApp(), await mint(keyA, { claims: { aud: 'other-app' } })))

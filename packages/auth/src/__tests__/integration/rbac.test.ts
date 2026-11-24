@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb } from '../helpers/db';
 import { initializeAuth } from '@/server/services/rbac.service';
+import { configureAuth, getSessionTtl } from '@/server/lib/config';
 import {
     createRole,
     updateRole,
@@ -174,6 +175,80 @@ describe('RBAC System', () =>
 
             const allRoles = await getAllRoles();
             expect(allRoles).toHaveLength(3);
+        });
+
+        // #477: each record is read once, and what is declared is what that read answered.
+        it('reads a role\'s and a permission\'s name once, and declares what that read answered', async () =>
+        {
+            const roleNames = ['getter-role', 'getter-role-again'];
+            const permissionNames = ['getter:permission', 'getter:permission-again'];
+            let roleReads = 0;
+            let permissionReads = 0;
+
+            await initializeAuth({
+                roles: [{
+                    displayName: 'Getter Role',
+                    get name()
+                    {
+                        return roleNames[roleReads++];
+                    },
+                }],
+                permissions: [{
+                    displayName: 'Getter Permission',
+                    get name()
+                    {
+                        return permissionNames[permissionReads++];
+                    },
+                }],
+            });
+
+            expect(await getRoleByName('getter-role')).toBeDefined();
+            expect(await getRoleByName('getter-role-again')).toBeNull();
+            expect(roleReads).toBe(1);
+            expect((await getDatabase()!.select().from(permissions).where(eq(permissions.name, 'getter:permission'))).length).toBe(1);
+            expect(permissionReads).toBe(1);
+        });
+
+        it('reads a role\'s permission list once, and maps what that read answered (#477)', async () =>
+        {
+            const answers = [['getter:first'], ['getter:second']];
+            let reads = 0;
+
+            await initializeAuth({
+                permissions: [
+                    { name: 'getter:first', displayName: 'First' },
+                    { name: 'getter:second', displayName: 'Second' },
+                ],
+                rolePermissions: {
+                    get admin()
+                    {
+                        return answers[reads++];
+                    },
+                },
+            });
+
+            const adminPerms = await getRolePermissions((await getRoleByName('admin'))!.id);
+
+            expect(adminPerms).toContain('getter:first');
+            expect(adminPerms).not.toContain('getter:second');
+            expect(reads).toBe(1);
+        });
+
+        it('reads sessionTtl once, and configures what that read answered (#477)', async () =>
+        {
+            const answers = ['2d', '3d'];
+            let reads = 0;
+
+            await initializeAuth({
+                get sessionTtl()
+                {
+                    return answers[reads++];
+                },
+            });
+
+            expect(getSessionTtl()).toBe(2 * 24 * 60 * 60);
+            expect(reads).toBe(1);
+            configureAuth({ sessionTtl: undefined });
         });
 
         it('should extend built-in roles with custom permissions', async () =>

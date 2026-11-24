@@ -22,6 +22,7 @@ import { SecondFactorMethodDisabledError } from '@spfn/auth/errors';
 
 import { isChannelEnabled } from './channels-config';
 import { getEncryptionKeyring } from './oauth/token-cipher';
+import { optionKeys, readList, readOptions } from './stated-options';
 
 /** The methods that count as a second factor. */
 export const SECOND_FACTOR_METHODS = ['totp', 'passkey'] as const;
@@ -54,7 +55,7 @@ export interface SecondFactorPolicy
     recoveryCodes: boolean;
 }
 
-const OPTION_KEYS = ['required', 'methods', 'recoveryCodes'];
+const OPTION_KEYS = optionKeys<SecondFactorOptions>({ required: true, methods: true, recoveryCodes: true });
 
 let policy: SecondFactorPolicy = defaultPolicy();
 
@@ -108,20 +109,15 @@ export function configureSecondFactor(options: SecondFactorOptions | undefined):
     }
 }
 
+/** `options` read once, by `readOptions`; the policy is resolved from that snapshot alone (#477). */
 function resolvePolicy(options: SecondFactorOptions): SecondFactorPolicy
 {
-    const unknown = Object.keys(options).filter(key => !OPTION_KEYS.includes(key));
-
-    if (unknown.length > 0)
-    {
-        throw new Error(`secondFactor.${unknown[0]} is not an option. Known options: ${OPTION_KEYS.join(', ')}.`);
-    }
-
+    const read = readOptions<SecondFactorOptions>('secondFactor', options, OPTION_KEYS);
     const resolved = defaultPolicy();
 
-    resolved.required = booleanOption('required', options.required, resolved.required);
-    resolved.recoveryCodes = booleanOption('recoveryCodes', options.recoveryCodes, resolved.recoveryCodes);
-    resolved.methods = options.methods === undefined ? resolved.methods : resolveMethods(options.methods);
+    resolved.required = booleanOption('required', read.required, resolved.required);
+    resolved.recoveryCodes = booleanOption('recoveryCodes', read.recoveryCodes, resolved.recoveryCodes);
+    resolved.methods = read.methods === undefined ? resolved.methods : resolveMethods(read.methods);
 
     return resolved;
 }
@@ -136,13 +132,14 @@ function booleanOption(name: string, value: unknown, fallback: boolean): boolean
     return value ?? fallback;
 }
 
-/** The listed methods, deduplicated in the package's order. `[]` is kept for the boot refusal. */
-function resolveMethods(methods: unknown): SecondFactorMethod[]
+/**
+ * The listed methods, deduplicated in the package's order. `[]` is kept for
+ * the boot refusal. The list is read once, by `readList`, and only that copy
+ * is checked and filtered (#477).
+ */
+function resolveMethods(stated: unknown): SecondFactorMethod[]
 {
-    if (!Array.isArray(methods))
-    {
-        throw new Error(`secondFactor.methods must be an array, received ${String(methods)}.`);
-    }
+    const methods = readList<unknown>('secondFactor.methods', stated, 'of second-factor methods');
 
     for (const method of methods)
     {

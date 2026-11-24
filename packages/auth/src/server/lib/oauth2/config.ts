@@ -15,6 +15,7 @@
 
 import { authLogger } from '../../logger';
 import { resolveAppUrl } from '../app-url';
+import { optionKeys, readEntries, readList, readOptions } from '../stated-options';
 
 /**
  * Everything the authorization server needs, resolved.
@@ -41,10 +42,10 @@ export interface AuthorizationServerConfig
     scopes: Record<string, string>;
 
     /** What an authorize request with no `scope` asks for. All of them by default. */
-    defaultScopes: string[];
+    defaultScopes: readonly string[];
 
     /** `https://` origins a client may register a redirect URI on. Loopback needs no entry. */
-    allowedRedirectOrigins: string[];
+    allowedRedirectOrigins: readonly string[];
 
     accessTokenTtlMs: number;
     refreshTokenTtlMs: number;
@@ -95,6 +96,18 @@ export const DEFAULT_CODE_TTL_MS = 60 * 1000;
 /** Path the consent screen is served at on the web app. */
 export const AUTHORIZE_PATH = '/oauth/authorize';
 
+const AUTHORIZATION_SERVER_OPTIONS = optionKeys<AuthorizationServerOptions>({
+    issuer: true,
+    authorizeUrl: true,
+    scopes: true,
+    defaultScopes: true,
+    allowedRedirectOrigins: true,
+    accessTokenTtlMs: true,
+    refreshTokenTtlMs: true,
+    codeTtlMs: true,
+    grantLifetimeMs: true,
+});
+
 let config: AuthorizationServerConfig | null = null;
 
 /** The API origin every default is derived from, and the boot check's subject. */
@@ -122,7 +135,13 @@ function resolveAuthorizeUrl(env: Record<string, string | undefined>): string
  * `assertAuthorizationServerIssuer` from `afterInfrastructure`, beside the
  * other boot refusals. See `lifecycle.ts`.
  *
- * @throws When `scopes` is empty, `defaultScopes` names an unknown scope or
+ * `options` is read once, by `readOptions`, `scopes` — a map keyed by the
+ * application's scope names — once, by `readEntries`, and `defaultScopes` and
+ * `allowedRedirectOrigins` each once, by `readList`, into a copy; only those
+ * snapshots are checked and stored (#477).
+ *
+ * @throws When `options` or `scopes` is not a plain object, `options` carries
+ *         a name that is not an option, `scopes` is empty, `defaultScopes` names an unknown scope or
  *         `grantLifetimeMs` is not a positive whole number of milliseconds, and
  *         when `authorizeUrl` is not given and neither `NEXT_PUBLIC_SPFN_APP_URL`
  *         nor `SPFN_APP_URL` is set to derive it from.
@@ -132,14 +151,16 @@ export function configureAuthorizationServer(
     env: Record<string, string | undefined> = process.env,
 ): void
 {
-    if (!options)
+    if (options === undefined)
     {
         config = null;
 
         return;
     }
 
-    const scopeNames = Object.keys(options.scopes ?? {});
+    const read = readOptions<AuthorizationServerOptions>('authorizationServer', options, AUTHORIZATION_SERVER_OPTIONS);
+    const scopes = read.scopes === undefined ? {} : readEntries<string>('authorizationServer.scopes', read.scopes, 'naming each scope');
+    const scopeNames = Object.keys(scopes);
 
     if (scopeNames.length === 0)
     {
@@ -150,17 +171,22 @@ export function configureAuthorizationServer(
         );
     }
 
+    const issuer = read.issuer === undefined ? resolveIssuerSource(env) : { value: read.issuer, variable: 'authorizationServer.issuer' };
     const resolved: AuthorizationServerConfig = {
-        issuer: canonicalIssuer(options.issuer ?? resolveIssuerSource(env).value ?? ''),
-        issuerSource: options.issuer ? 'authorizationServer.issuer' : resolveIssuerSource(env).variable,
-        authorizeUrl: options.authorizeUrl ?? resolveAuthorizeUrl(env),
-        scopes: { ...options.scopes },
-        defaultScopes: options.defaultScopes ?? scopeNames,
-        allowedRedirectOrigins: options.allowedRedirectOrigins ?? [],
-        accessTokenTtlMs: options.accessTokenTtlMs ?? DEFAULT_ACCESS_TOKEN_TTL_MS,
-        refreshTokenTtlMs: options.refreshTokenTtlMs ?? DEFAULT_REFRESH_TOKEN_TTL_MS,
-        codeTtlMs: options.codeTtlMs ?? DEFAULT_CODE_TTL_MS,
-        grantLifetimeMs: options.grantLifetimeMs ?? DEFAULT_GRANT_LIFETIME_MS,
+        issuer: canonicalIssuer(issuer.value ?? ''),
+        issuerSource: issuer.variable,
+        authorizeUrl: read.authorizeUrl ?? resolveAuthorizeUrl(env),
+        scopes,
+        defaultScopes: read.defaultScopes === undefined
+            ? scopeNames
+            : readList<string>('authorizationServer.defaultScopes', read.defaultScopes, 'of scope names'),
+        allowedRedirectOrigins: read.allowedRedirectOrigins === undefined
+            ? []
+            : readList<string>('authorizationServer.allowedRedirectOrigins', read.allowedRedirectOrigins, 'of https origins'),
+        accessTokenTtlMs: read.accessTokenTtlMs ?? DEFAULT_ACCESS_TOKEN_TTL_MS,
+        refreshTokenTtlMs: read.refreshTokenTtlMs ?? DEFAULT_REFRESH_TOKEN_TTL_MS,
+        codeTtlMs: read.codeTtlMs ?? DEFAULT_CODE_TTL_MS,
+        grantLifetimeMs: read.grantLifetimeMs ?? DEFAULT_GRANT_LIFETIME_MS,
     };
 
     // Validated before it is stored: a refused configuration must leave nothing
@@ -189,7 +215,7 @@ function assertGrantLifetime(grantLifetimeMs: number): void
 
 function assertKnownDefaultScopes(resolved: AuthorizationServerConfig): void
 {
-    const unknown = resolved.defaultScopes.filter(scope => !(scope in resolved.scopes));
+    const unknown = resolved.defaultScopes.filter(scope => !Object.hasOwn(resolved.scopes, scope));
 
     if (unknown.length > 0)
     {

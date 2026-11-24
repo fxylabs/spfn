@@ -42,6 +42,7 @@ import { ForbiddenError, UnauthorizedError } from '@spfn/core/errors';
 
 import { clientProofRefusalResponse } from '../client-proof/refusal-response';
 import { authLogger } from '../logger';
+import { optionKeys, readOptions } from '../lib/stated-options';
 import { clientProofRefusalOf, selectAuthProfile } from './auth-profiles';
 
 /** What a verified machine request acts as. Not a user, by construction. */
@@ -98,11 +99,28 @@ const REGISTERED_IDS = new Set<string>();
 
 type DiscriminatorKind = 'tokenPrefix' | 'kidPrefix';
 
-/** The discriminator as (kind, prefix) — null unless exactly one is named. */
-function readDiscriminator(match: MachineVerifierRegistration['match']): { kind: DiscriminatorKind; prefix: string } | null
+/** Every key a `match` may name, either of the two discriminators. */
+interface MatchOptions
 {
-    const tokenPrefix = (match as { tokenPrefix?: unknown } | undefined)?.tokenPrefix;
-    const kidPrefix = (match as { kidPrefix?: unknown } | undefined)?.kidPrefix;
+    tokenPrefix?: unknown;
+    kidPrefix?: unknown;
+}
+
+/** The discriminator as (kind, prefix) — null unless exactly one is named. */
+function readDiscriminator(match: MachineVerifierRegistration['match'] | undefined): { kind: DiscriminatorKind; prefix: string } | null
+{
+    if (match === undefined)
+    {
+        return null;
+    }
+
+    // Read once, by `readOptions` (#477): a `match` inheriting its prefix, or
+    // naming another key beside it, is refused rather than read as stated.
+    const { tokenPrefix, kidPrefix } = readOptions<MatchOptions>(
+        'registerMachineVerifier: match',
+        match,
+        optionKeys<MatchOptions>({ tokenPrefix: true, kidPrefix: true }),
+    );
 
     if (tokenPrefix !== undefined && kidPrefix !== undefined)
     {
@@ -162,23 +180,29 @@ function prefixesCollide(a: string, b: string): boolean
  */
 export function registerMachineVerifier(reg: MachineVerifierRegistration): void
 {
-    if (typeof reg?.id !== 'string' || reg.id.length === 0)
+    // Each member read once (#477): the id, discriminator and function checked
+    // are the ones registered. `reg` may be a class instance — `verify` is
+    // bound to it — so it is not held to the plain-object rule; `match` is
+    // plain data, and is.
+    const { id, match, verify } = reg ?? ({} as Partial<MachineVerifierRegistration>);
+
+    if (typeof id !== 'string' || id.length === 0)
     {
         throw new Error('registerMachineVerifier: id must be a non-empty string');
     }
-    if (typeof reg.verify !== 'function')
+    if (typeof verify !== 'function')
     {
-        throw new Error(`registerMachineVerifier: '${reg.id}' needs a verifier with a callable verify(token, c)`);
+        throw new Error(`registerMachineVerifier: '${id}' needs a verifier with a callable verify(token, c)`);
     }
 
-    const discriminator = readDiscriminator(reg.match);
+    const discriminator = readDiscriminator(match);
     if (discriminator === null)
     {
-        throw new Error(`registerMachineVerifier: '${reg.id}' needs exactly one non-empty discriminator — { tokenPrefix } or { kidPrefix }`);
+        throw new Error(`registerMachineVerifier: '${id}' needs exactly one non-empty discriminator — { tokenPrefix } or { kidPrefix }`);
     }
-    if (REGISTERED_IDS.has(reg.id))
+    if (REGISTERED_IDS.has(id))
     {
-        throw new Error(`registerMachineVerifier: '${reg.id}' is already registered`);
+        throw new Error(`registerMachineVerifier: '${id}' is already registered`);
     }
 
     const peers = discriminator.kind === 'tokenPrefix' ? TOKEN_PREFIX_VERIFIERS : KID_PREFIX_VERIFIERS;
@@ -186,7 +210,7 @@ export function registerMachineVerifier(reg: MachineVerifierRegistration): void
     if (shadowed !== undefined)
     {
         throw new Error(
-            `registerMachineVerifier: '${reg.id}' ${discriminator.kind} '${discriminator.prefix}' `
+            `registerMachineVerifier: '${id}' ${discriminator.kind} '${discriminator.prefix}' `
             + `collides with '${shadowed.id}' — one prefix would shadow the other`,
         );
     }
@@ -194,8 +218,8 @@ export function registerMachineVerifier(reg: MachineVerifierRegistration): void
     // Stored as a bound copy, as the auth-profile registry does: the checks
     // above passed on this discriminator and this function, and neither should
     // stay reassignable through the registrant's own reference afterwards.
-    peers.push({ id: reg.id, prefix: discriminator.prefix, verify: reg.verify.bind(reg) });
-    REGISTERED_IDS.add(reg.id);
+    peers.push({ id, prefix: discriminator.prefix, verify: verify.bind(reg) });
+    REGISTERED_IDS.add(id);
 }
 
 /**

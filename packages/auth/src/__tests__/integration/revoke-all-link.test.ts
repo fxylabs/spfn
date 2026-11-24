@@ -229,6 +229,25 @@ describe.skipIf(!dbAvailable)('signed revoke-all link (case table 7b)', () =>
         expect((await linkRows(user.id))[0].consumedAt).not.toBeNull();
     });
 
+    it('reads ttlMinutes once, and the link expires after what that read answered (#477)', async () =>
+    {
+        const user = await seedUser('ttl-getter@test.com');
+        const answers = [5, 60];
+        let reads = 0;
+        const before = Date.now();
+
+        const { expiresAt } = await createRevokeAllLink(user.id, {
+            get ttlMinutes()
+            {
+                return answers[reads++];
+            },
+        });
+
+        expect(expiresAt.getTime() - before).toBeLessThan(6 * 60_000);
+        expect(expiresAt.getTime() - before).toBeGreaterThanOrEqual(5 * 60_000);
+        expect(reads).toBe(1);
+    });
+
     it('a live token for an account with no active keys: confirm answers activeKeyCount 0 and consume answers revokedCount 0, which is a success — the epoch still moves and the link is spent', async () =>
     {
         const user = await seedUser('b2@test.com');

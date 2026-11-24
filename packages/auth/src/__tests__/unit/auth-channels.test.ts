@@ -12,12 +12,12 @@
  * application turns it on. D1 pins that `passkeyLogin`, `invitations` and
  * `selfDeletion` are off for an application that states nothing and for one
  * that states only another channel; D2 that a channel added to
- * `AUTH_CHANNELS` alone is off. `channels` is a plain object, so the read
- * reaches only its own names: a non-enumerable misspelling is refused, and an
- * object with another prototype — where an inherited key would be lost or
- * applied unchecked — is refused whole, as is a prototype posing as
- * `Object.prototype` by naming `Object`, or a function named `Object`, as its
- * constructor.
+ * `AUTH_CHANNELS` alone is off.
+ *
+ * `channels` is read by the shared reader (#477): the rows for a value that is
+ * not a plain object, a prototype posing as `Object.prototype` and a
+ * non-enumerable misspelling are its own, in stated-options.test.ts, with the
+ * row proving `configureChannels` reads through it.
  */
 
 import { describe, it, expect, afterEach, onTestFinished } from 'vitest';
@@ -188,29 +188,6 @@ describe('channels (#308)', () =>
     {
         expect(() => configureChannels({ totp: false } as AuthChannelsOptions)).toThrow(/channels\.totp is not a channel/);
         expect(() => configureChannels({ signup: 'false' } as unknown as AuthChannelsOptions)).toThrow(/must be true or false/);
-    });
-
-    it('#475: an own key that is not a channel is refused when not enumerable — the read reaches it, so a misspelt false would be lost', () =>
-    {
-        expect(() => configureChannels(Object.defineProperty({}, 'sigup', { value: false, enumerable: false })))
-            .toThrow('channels.sigup is not a channel.');
-    });
-
-    it('#475: an object whose prototype is not an Object.prototype is refused — an inherited key would be lost or applied unchecked', () =>
-    {
-        expect(() => configureChannels(Object.create({ sigup: false }))).toThrow('channels must be a plain object');
-        expect(() => configureChannels(Object.create({ signup: false }))).toThrow('channels must be a plain object');
-    });
-
-    it('#475: a prototype posing as Object.prototype is refused — the fake would apply an inherited signup unchecked', () =>
-    {
-        const namesObject = Object.assign(Object.create(null), { constructor: Object, signup: false });
-        const namedBack = Object.assign(Object.create(null), { signup: false });
-        namedBack.constructor = Object.defineProperty(() => undefined, 'name', { value: 'Object' });
-        namedBack.constructor.prototype = namedBack;
-
-        expect(() => configureChannels(Object.create(namesObject))).toThrow('channels must be a plain object');
-        expect(() => configureChannels(Object.create(namedBack))).toThrow('channels must be a plain object');
     });
 
     it('createAuthLifecycle resolves the option in its constructor', () =>

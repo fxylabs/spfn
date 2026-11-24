@@ -78,9 +78,11 @@ export function defineProfileFields<const TEntries extends readonly ProfileField
     entries: TEntries,
 ): ProfileFieldsDeclaration<TEntries>
 {
+    const declared = indexDeclaredEntries('defineProfileFields', entries, RESERVED_PROFILE_FIELD_KEYS);
+
     return Object.freeze({
-        keys: Object.freeze(entries.map(entry => entry.key)),
-        entries: indexDeclaredEntries('defineProfileFields', entries, RESERVED_PROFILE_FIELD_KEYS),
+        keys: Object.freeze([...declared.keys()]),
+        entries: declared,
     });
 }
 

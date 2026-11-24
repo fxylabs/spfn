@@ -12,9 +12,12 @@ import { BOUND_KEY_RENEW_GRACE_HOURS, BOUND_KEY_TTL_HOURS, CONCURRENT_USE_WINDOW
 import { normalizeOptionalEmail } from '../helpers/email';
 import { parseDuration } from '../../lib/duration';
 import { authLogger } from '../logger';
-import { assertPolicyValues } from './auth-config-values';
+import { readPolicyValues } from './auth-config-values';
+import type { AuthCsrfConfig, CsrfMode, OAuthLinkConfig, OAuthLinkRecentAuth, OAuthProviderPolicy } from './auth-config-values';
+import { optionKeys, readOptions } from './stated-options';
 
 export { parseDuration };
+export type { AuthCsrfConfig, CsrfMode, OAuthLinkConfig, OAuthLinkRecentAuth, OAuthProviderPolicy } from './auth-config-values';
 
 /**
  * Cookie name suffix derived from the server port, so several local dev
@@ -165,96 +168,6 @@ export interface BeforeRegisterContext
 }
 
 /**
- * How the Next.js proxy treats a cookie-authenticated mutation that arrives
- * without a valid CSRF header.
- *
- * - `off`: no check
- * - `warn`: allow it through, log one line per request that would be refused
- * - `enforce`: refuse it with 403
- */
-export type CsrfMode = 'off' | 'warn' | 'enforce';
-
-/**
- * CSRF configuration for the Next.js proxy
- */
-export interface AuthCsrfConfig
-{
-    /**
-     * @default 'warn' — an existing app gets signal before it gets breakage.
-     *          `SPFN_AUTH_CSRF` sets it when this is not; new apps scaffolded by
-     *          `spfn init` are given `enforce`. The consent POST
-     *          (`/_auth/oauth2/authorize`) is checked in every mode regardless.
-     */
-    mode?: CsrfMode;
-
-    /**
-     * Backend paths that skip the check, matched exactly.
-     *
-     * These are route paths as the backend sees them (`/webhooks/stripe`), not
-     * `/api/rpc/...` URLs, with route params already substituted. Intended for
-     * endpoints a browser session never calls — webhook receivers and the like.
-     * A path listed here is unprotected for cookie callers too, so list only
-     * endpoints that carry their own authentication. `/_auth/oauth2/authorize`
-     * cannot be exempted: an entry naming it is ignored with a warning.
-     */
-    exemptPaths?: string[];
-}
-
-/**
- * Whether linking or unlinking a provider from a signed-in session needs a
- * recent authentication: a session key younger than the link window, or the
- * current password. The MFA step-up runs either way.
- */
-export interface OAuthLinkRecentAuth
-{
-    /** @default true */
-    link?: boolean;
-    /** @default true */
-    unlink?: boolean;
-}
-
-/**
- * What one social provider is allowed to do (#155, #157)
- */
-export interface OAuthProviderPolicy
-{
-    /**
-     * Whether the provider is a way to sign in.
-     *
-     * `false` makes it link-only: it can be linked to and unlinked from a
-     * signed-in account, every sign-in start and sign-in callback for it is
-     * refused with `OAuthProviderLinkOnlyError` (`reason=link_only`), it is
-     * listed under `linkOnly` instead of `providers`, and a linked identity of
-     * it does not count as a way into the account when another credential is
-     * removed.
-     *
-     * @default true
-     */
-    signIn?: boolean;
-
-    /** Overrides `oauthLink.recentAuth` for this provider. */
-    recentAuth?: OAuthLinkRecentAuth;
-}
-
-/**
- * Settings for linking a provider to a signed-in account
- */
-export interface OAuthLinkConfig
-{
-    /** The default for every provider; `oauthProviders[p].recentAuth` overrides it. */
-    recentAuth?: OAuthLinkRecentAuth;
-
-    /**
-     * How young the session key must be for a link or unlink to go through
-     * without the current password, in minutes.
-     *
-     * @default `SPFN_AUTH_PASSKEY_RECENT_AUTH_MINUTES` when set (the window
-     *          0.3.0-beta.49 used), else 10
-     */
-    recentAuthMinutes?: number;
-}
-
-/**
  * What a first sign-in with a provider does when its email matches an
  * existing account (#156)
  *
@@ -375,6 +288,15 @@ export interface AuthConfig
  */
 let globalConfig: AuthConfig = {};
 
+const AUTH_CONFIG_OPTIONS = optionKeys<AuthConfig>({
+    sessionTtl: true,
+    beforeRegister: true,
+    csrf: true,
+    oauthProviders: true,
+    oauthLink: true,
+    oauthEmailMatch: true,
+});
+
 /**
  * Configure global auth settings
  *
@@ -383,8 +305,14 @@ let globalConfig: AuthConfig = {};
  * before anything is stored, with an error naming the option and the values it
  * accepts.
  *
+ * `config` and every object inside it are read once, by `readOptions`: each
+ * must be a plain object whose every own name is an option, and only the
+ * snapshots are checked and stored (#477). An option stated `undefined` puts
+ * it back to its default; one left out keeps what an earlier call set.
+ *
  * @param config - Auth configuration
- * @throws Error for a policy value outside its declared set
+ * @throws Error for a policy value outside its declared set, an object that is
+ *   not a plain object, or a name in one that is not an option
  *
  * @example
  * ```typescript
@@ -395,11 +323,9 @@ let globalConfig: AuthConfig = {};
  */
 export function configureAuth(config: AuthConfig): void
 {
-    assertPolicyValues(config);
-
     globalConfig = {
         ...globalConfig,
-        ...config,
+        ...readPolicyValues(readOptions<AuthConfig>('configureAuth', config, AUTH_CONFIG_OPTIONS)),
     };
 }
 

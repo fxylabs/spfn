@@ -45,9 +45,14 @@ export type AuthApiConfig = Omit<ApiConfig, 'errorRegistry'> & { errorRegistry?:
  */
 export function createAuthApi(config: AuthApiConfig = {}): AuthApi
 {
+    // One read of `errorRegistry`, in the same step that copies the rest: the
+    // registry merged is the one the app's object answered (#477). The rest are
+    // `createApi`'s options, and `createApi`'s to check.
+    const { errorRegistry, ...apiConfig } = config;
+
     return createApi<typeof mainAuthRouter>({
-        ...config,
-        errorRegistry: [...(config.errorRegistry ?? []), authErrorRegistry],
+        ...apiConfig,
+        errorRegistry: [...(errorRegistry ?? []), authErrorRegistry],
     });
 }
 

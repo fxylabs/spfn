@@ -8,6 +8,14 @@
 import { SSETokenManager } from '@spfn/core/event/sse';
 import type { SSETokenStore } from '@spfn/core/event/sse';
 import { admitPrincipal } from '../services/admission.service';
+import { optionKeys, readOptions } from './stated-options';
+
+/** What `initOneTimeTokenManager` reads: `createAuthLifecycle`'s `oneTimeToken`. */
+export interface OneTimeTokenOptions
+{
+    ttl?: number;
+    store?: SSETokenStore;
+}
 
 let manager: SSETokenManager | null = null;
 
@@ -26,17 +34,22 @@ let manager: SSETokenManager | null = null;
  * person it was minted for is admitted on that key now (`admitPrincipal`): a
  * token minted just before a revocation, or a suspension, cannot open a
  * stream after it.
+ *
+ * `config` is read once, by `readOptions`: a plain object whose every own
+ * name is `ttl` or `store` (#477).
  */
-export function initOneTimeTokenManager(config?: { ttl?: number; store?: SSETokenStore }): void
+export function initOneTimeTokenManager(config?: OneTimeTokenOptions): void
 {
     if (manager)
     {
         manager.destroy();
     }
 
+    const read = config === undefined ? {} : readOptions<OneTimeTokenOptions>('oneTimeToken', config, optionKeys<OneTimeTokenOptions>({ ttl: true, store: true }));
+
     manager = new SSETokenManager({
-        ttl: config?.ttl,
-        store: config?.store,
+        ttl: read.ttl,
+        store: read.store,
         verifyKey: admitsTokenHolder,
     });
 }

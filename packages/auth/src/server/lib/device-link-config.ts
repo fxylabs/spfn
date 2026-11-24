@@ -10,6 +10,8 @@
  * only be two chances to get it wrong.
  */
 
+import { optionKeys, readOptions } from './stated-options';
+
 export interface AuthDeviceLinkConfig
 {
     /** How long a link code stays usable, in milliseconds. */
@@ -35,11 +37,13 @@ let config: AuthDeviceLinkConfig = {
  *
  * `ttlMs` leaves as `expiresAtMillis`, an integer in the issue and redeem
  * answers, so a value that is not a positive whole number of milliseconds is
- * refused here rather than served.
+ * refused here rather than served. `options` is read once, by `readOptions`:
+ * a plain object whose only own name may be `ttlMs` (#477).
  */
 export function configureDeviceLink(options?: Partial<AuthDeviceLinkConfig>): void
 {
-    const ttlMs = options?.ttlMs ?? DEFAULT_DEVICE_LINK_TTL_MS;
+    const read = options === undefined ? {} : readOptions<AuthDeviceLinkConfig>('deviceLink', options, optionKeys<AuthDeviceLinkConfig>({ ttlMs: true }));
+    const ttlMs = read.ttlMs ?? DEFAULT_DEVICE_LINK_TTL_MS;
 
     if (!Number.isInteger(ttlMs) || ttlMs <= 0)
     {

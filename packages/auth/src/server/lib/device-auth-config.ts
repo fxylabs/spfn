@@ -11,6 +11,8 @@
  * served, not read from an environment variable at each use.
  */
 
+import { optionKeys, readOptions } from './stated-options';
+
 export interface AuthDeviceAuthConfig
 {
     /** How long a device code stays usable, in milliseconds. */
@@ -40,6 +42,8 @@ export const DEFAULT_DEVICE_AUTH_INTERVAL_MS = 5 * 1000;
  */
 export const DEFAULT_DEVICE_AUTH_MAX_WAIT_MS = 20 * 1000;
 
+const DEVICE_AUTH_OPTIONS = optionKeys<AuthDeviceAuthConfig>({ ttlMs: true, intervalMs: true, maxWaitMs: true });
+
 let config: AuthDeviceAuthConfig = {
     ttlMs: DEFAULT_DEVICE_AUTH_TTL_MS,
     intervalMs: DEFAULT_DEVICE_AUTH_INTERVAL_MS,
@@ -57,12 +61,16 @@ let config: AuthDeviceAuthConfig = {
  * declares an integer and the mobile contract exports as one, so a fractional
  * value configured here would reach a generated client as a number its decoder
  * refuses — at the one moment the flow depends on that client asking again.
+ *
+ * `options` is read once, by `readOptions`: a plain object whose every own
+ * name is one of these knobs (#477).
  */
 export function configureDeviceAuth(options?: Partial<AuthDeviceAuthConfig>): void
 {
-    const ttlMs = options?.ttlMs ?? DEFAULT_DEVICE_AUTH_TTL_MS;
-    const intervalMs = options?.intervalMs ?? DEFAULT_DEVICE_AUTH_INTERVAL_MS;
-    const maxWaitMs = options?.maxWaitMs ?? DEFAULT_DEVICE_AUTH_MAX_WAIT_MS;
+    const read = options === undefined ? {} : readOptions<AuthDeviceAuthConfig>('deviceAuth', options, DEVICE_AUTH_OPTIONS);
+    const ttlMs = read.ttlMs ?? DEFAULT_DEVICE_AUTH_TTL_MS;
+    const intervalMs = read.intervalMs ?? DEFAULT_DEVICE_AUTH_INTERVAL_MS;
+    const maxWaitMs = read.maxWaitMs ?? DEFAULT_DEVICE_AUTH_MAX_WAIT_MS;
 
     assertWholeMillis('ttlMs', ttlMs);
     assertWholeMillis('intervalMs', intervalMs);

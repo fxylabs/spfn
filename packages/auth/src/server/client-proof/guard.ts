@@ -18,6 +18,7 @@ import { admitClientProofRequest, type ClientProofCredentials } from './admissio
 import type { CanonicalValue } from './canonical-json';
 import { clientProofRefusalResponse } from './refusal-response';
 import type { ClientProofState } from './state';
+import { optionKeys, readOptions } from '../lib/stated-options';
 
 /** What the guard leaves in the context for the route handler. */
 export interface ClientProofContext
@@ -42,12 +43,23 @@ export interface ClientProofGuardOptions
  * A guard for operations with `requiresSession: true`.
  *
  * Refusals are answered with the contract envelope and never reach the route.
+ *
+ * @throws Error when `options` is not a plain object or carries a name that
+ *   is not an option — a misspelt `contractpath` would otherwise check every
+ *   proof against the request path. It is read once, here, by `readOptions`,
+ *   not on each request (#477)
  */
 export function createClientProofGuard(
     state: ClientProofState,
     options: ClientProofGuardOptions = {},
 ): MiddlewareHandler
 {
+    const { contractPath } = readOptions<ClientProofGuardOptions>(
+        'createClientProofGuard',
+        options,
+        optionKeys<ClientProofGuardOptions>({ contractPath: true }),
+    );
+
     return async (c: Context, next: Next) =>
     {
         const body = new Uint8Array(await c.req.arrayBuffer());
@@ -55,7 +67,7 @@ export function createClientProofGuard(
             state,
             headers: c.req.raw.headers,
             method: c.req.method,
-            path: options.contractPath ?? c.req.path,
+            path: contractPath ?? c.req.path,
             requiresSession: true,
             body,
         });

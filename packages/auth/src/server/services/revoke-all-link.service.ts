@@ -28,6 +28,7 @@ import { RevokeAllLinkError } from '@spfn/auth/errors';
 
 import { authLogger } from '../logger';
 import { buildConfirmUrl, hashCredential, mintCredential } from '../lib/link-credentials';
+import { optionKeys, readOptions } from '../lib/stated-options';
 import { keyRevokeAllTokensRepository, keysRepository, usersRepository } from '../repositories';
 import { revokeAllKeysService } from './key.service';
 
@@ -78,6 +79,9 @@ export interface RevokeAllLinkDescription
  * the password that let them start.
  *
  * @param userId - The account to issue for
+ * @throws Error `options` that is not a plain object, or carries a name that
+ *   is not an option — a misspelt `ttlMinute` would otherwise mint a link at
+ *   the default lifetime. It is read once, by `readOptions` (#477)
  * @throws ValidationError `ttlMinutes` that is not a positive integer — no row is written
  * @throws NotFoundError no such account, rather than a foreign-key failure at the insert
  */
@@ -86,7 +90,12 @@ export async function createRevokeAllLink(
     options: CreateRevokeAllLinkOptions = {},
 ): Promise<RevokeAllLink>
 {
-    const ttlMinutes = options.ttlMinutes ?? env.SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES ?? DEFAULT_LINK_TTL_MINUTES;
+    const { ttlMinutes: stated } = readOptions<CreateRevokeAllLinkOptions>(
+        'createRevokeAllLink',
+        options,
+        optionKeys<CreateRevokeAllLinkOptions>({ ttlMinutes: true }),
+    );
+    const ttlMinutes = stated ?? env.SPFN_AUTH_REVOKE_ALL_LINK_TTL_MINUTES ?? DEFAULT_LINK_TTL_MINUTES;
 
     if (!Number.isInteger(ttlMinutes) || ttlMinutes <= 0)
     {

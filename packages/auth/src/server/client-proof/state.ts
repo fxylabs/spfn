@@ -32,6 +32,7 @@ import {
 } from './proof';
 import { ClientProofRefusal, newHexId } from './refusal';
 import { MemoryReplayLedger } from './replay-store';
+import { optionKeys, readEntries, readOptions } from '../lib/stated-options';
 
 /** Millisecond clock. Injectable so expiry paths are testable without waiting. */
 export interface ClientProofClock
@@ -108,6 +109,14 @@ export interface ClientProofStateOptions
 
 export const DEFAULT_SESSION_TTL_MILLIS = 600_000;
 
+/** Every option `ClientProofState` reads; `createClientProofDevHandler` hands it these of its own. */
+export const CLIENT_PROOF_STATE_OPTIONS = optionKeys<ClientProofStateOptions>({
+    publicKeys: true,
+    clock: true,
+    sessionTtlMillis: true,
+    replayWindowMillis: true,
+});
+
 export class ClientProofState
 {
     readonly replayWindowMillis: number;
@@ -132,16 +141,26 @@ export class ClientProofState
     private itemsListCount = 0;
     private refusalCount = 0;
 
+    /**
+     * @throws Error when `options` or `publicKeys` is not a plain object,
+     *   `options` carries a name that is not an option — a misspelt
+     *   `replayWindowMilis` would otherwise run on the default window — or a
+     *   key is not P-256 SPKI. Each is read once, by `readOptions` and
+     *   `readEntries` (#477)
+     */
     constructor(options: ClientProofStateOptions)
     {
-        this.clock = options.clock ?? systemClock();
-        this.initialSessionTtlMillis = options.sessionTtlMillis ?? DEFAULT_SESSION_TTL_MILLIS;
+        const read = readOptions<ClientProofStateOptions>('ClientProofState', options, CLIENT_PROOF_STATE_OPTIONS);
+
+        this.clock = read.clock ?? systemClock();
+        this.initialSessionTtlMillis = read.sessionTtlMillis ?? DEFAULT_SESSION_TTL_MILLIS;
         this.sessionTtlMillis = this.initialSessionTtlMillis;
-        this.replayWindowMillis = options.replayWindowMillis ?? DEFAULT_REPLAY_WINDOW_MILLIS;
+        this.replayWindowMillis = read.replayWindowMillis ?? DEFAULT_REPLAY_WINDOW_MILLIS;
         // Parsed once here, so a key that is not P-256 SPKI fails loudly at
         // construction rather than as a PROOF_INVALID mystery at request time.
         this.initialPublicKeys = new Map(
-            Object.entries(options.publicKeys).map(([keyId, spki]) => [keyId, parseClientProofPublicKey(spki)]),
+            Object.entries(readEntries<string>('ClientProofState.publicKeys', read.publicKeys, 'naming each key id'))
+                .map(([keyId, spki]) => [keyId, parseClientProofPublicKey(spki)]),
         );
         for (const [keyId, key] of this.initialPublicKeys)
         {

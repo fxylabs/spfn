@@ -54,4 +54,26 @@ describe('opsOrUser at two levels', () =>
         expect(await statusWith(app, '/write', ['read', 'write'])).toBe(200);
         expect(await statusWith(app, '/read', ['read'])).toBe(200);
     });
+
+    it('reads opsScopes once, and requires what that read answered (#477)', async () =>
+    {
+        const answers = [['write'], []];
+        let reads = 0;
+        const config = {
+            roles: ['admin'],
+            get opsScopes()
+            {
+                return answers[reads++];
+            },
+        };
+        const app = new Hono();
+
+        app.onError((error, c) => c.json({ error: error.message }, (error as { statusCode?: 401 | 403 }).statusCode ?? 500));
+        registerRoutes(app, defineRouter({
+            write: route.get('/write').use([opsOrUser(config as never)]).handler(async () => ({ ok: true })),
+        }), [authenticate]);
+
+        expect(await statusWith(app, '/write', ['read'])).toBe(403);
+        expect(reads).toBe(1);
+    });
 });

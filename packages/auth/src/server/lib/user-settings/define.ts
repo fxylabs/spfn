@@ -69,9 +69,11 @@ export function defineUserSettings<const TEntries extends readonly UserSettingEn
     entries: TEntries,
 ): UserSettingsDeclaration<TEntries>
 {
+    const declared = indexDeclaredEntries('defineUserSettings', entries, BUILTIN_USER_SETTING_KEYS);
+
     return Object.freeze({
-        keys: Object.freeze(entries.map(entry => entry.key)),
-        entries: indexDeclaredEntries('defineUserSettings', entries, BUILTIN_USER_SETTING_KEYS),
+        keys: Object.freeze([...declared.keys()]),
+        entries: declared,
         get: async (userId: UserId, key: string) => await getUserSetting(userId, key) as never,
         set: async (userId: UserId, key: string, value: unknown, options?: SetUserSettingOptions) =>
         {

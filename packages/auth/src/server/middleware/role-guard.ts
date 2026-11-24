@@ -10,6 +10,8 @@ import { getAuth, authLogger } from '@spfn/auth/server';
 import { ForbiddenError } from '@spfn/core/errors';
 import { InsufficientRoleError } from '@spfn/auth/errors';
 
+import { optionKeys, readList, readOptions } from '../lib/stated-options';
+
 /**
  * Role guard options
  */
@@ -57,11 +59,18 @@ export interface RoleGuardOptions
  *   .handler(async (c) => { ... });
  * ```
  */
-export const roleGuard = defineMiddlewareFactory('roleGuard',
-    (options: RoleGuardOptions) => async (c: Context, next: Next) =>
-    {
-        const { allow, deny } = options;
+export const roleGuard = defineMiddlewareFactory('roleGuard', (options: RoleGuardOptions) =>
+{
+    // Read once, here, not on each request: a misspelt `alow` is refused when
+    // the route is defined, and a getter cannot answer one request differently
+    // from the next. Each list is read into a copy, so a later change to the
+    // application's array changes nothing either (#477).
+    const read = readOptions<RoleGuardOptions>('roleGuard', options, optionKeys<RoleGuardOptions>({ allow: true, deny: true }));
+    const allow = read.allow === undefined ? undefined : readList<string>('roleGuard.allow', read.allow, 'of role names');
+    const deny = read.deny === undefined ? undefined : readList<string>('roleGuard.deny', read.deny, 'of role names');
 
+    return async (c: Context, next: Next) =>
+    {
         // Validate options
         if (!allow && !deny)
         {
@@ -91,7 +100,7 @@ export const roleGuard = defineMiddlewareFactory('roleGuard',
                     deniedRoles: deny,
                     path: c.req.path,
                 });
-                throw new InsufficientRoleError({ requiredRoles: allow || [] });
+                throw new InsufficientRoleError({ requiredRoles: [...allow ?? []] });
             }
         }
 
@@ -106,7 +115,7 @@ export const roleGuard = defineMiddlewareFactory('roleGuard',
                     allowedRoles: allow,
                     path: c.req.path,
                 });
-                throw new InsufficientRoleError({ requiredRoles: allow });
+                throw new InsufficientRoleError({ requiredRoles: [...allow] });
             }
         }
 
@@ -119,5 +128,5 @@ export const roleGuard = defineMiddlewareFactory('roleGuard',
         });
 
         await next();
-    },
-);
+    };
+});

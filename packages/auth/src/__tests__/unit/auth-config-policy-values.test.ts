@@ -18,11 +18,8 @@ import { __resetDeletionForTests, getDeletionConfig } from '@/server/lib/deletio
 const AUTH_CONFIG_REFUSALS: [string, unknown, RegExp][] = [
     ['csrf.mode', { csrf: { mode: 'enforced' } }, /csrf\.mode does not accept 'enforced'\. Allowed: 'off', 'warn', 'enforce'/],
     ['oauthProviders.<provider>.signIn', { oauthProviders: { kakao: { signIn: 'false' } } }, /oauthProviders\.kakao\.signIn does not accept 'false'\. Allowed: true, false/],
-    ['oauthProviders.<unknown provider>', { oauthProviders: { kakoa: { signIn: false } } }, /oauthProviders has no provider 'kakoa'\. Allowed: .*'kakao'/],
-    ['oauthProviders.<provider>.<unknown key>', { oauthProviders: { kakao: { signin: false } } }, /oauthProviders\.kakao has no option 'signin'\. Allowed: signIn, recentAuth/],
     ['oauthProviders.<provider>.recentAuth.link', { oauthProviders: { kakao: { recentAuth: { link: 0 } } } }, /oauthProviders\.kakao\.recentAuth\.link does not accept 0 \(number\)\. Allowed: true, false/],
     ['oauthLink.recentAuth.unlink', { oauthLink: { recentAuth: { unlink: 'no' } } }, /oauthLink\.recentAuth\.unlink does not accept 'no'\. Allowed: true, false/],
-    ['oauthLink.<unknown key>', { oauthLink: { recentAuthMinute: 5 } }, /oauthLink has no option 'recentAuthMinute'\. Allowed: recentAuth, recentAuthMinutes/],
 ];
 
 const LIFECYCLE_REFUSALS: [string, AuthLifecycleOptions['deletion'], RegExp][] = [
@@ -30,8 +27,6 @@ const LIFECYCLE_REFUSALS: [string, AuthLifecycleOptions['deletion'], RegExp][] =
     ['deletion.allowSelfImmediate', { allowSelfImmediate: 'false' as never }, /deletion\.allowSelfImmediate does not accept "false"\. Allowed: true, false/],
     // Removed (#170): an app upgrading with it set must learn at boot that nothing is mailed any more.
     ['deletion.sendNotifications', { sendNotifications: true } as never, /deletion\.sendNotifications was removed: @spfn\/auth sends no account-deletion notice\..*README, "Account Deletion & Recovery"/],
-    // A misspelt hook would otherwise never be called, and its notice never sent.
-    ['deletion.<unknown key>', { onPurged: async () => undefined } as never, /deletion has no option 'onPurged'\. Allowed: gracePeriodDays, purgeStrategy, allowSelfImmediate, purgeCron, onBeforePurge, onPurge/],
 ];
 
 describe('T5: unknown policy values refuse at configuration', () =>

@@ -13,6 +13,8 @@
 
 import type { User } from '../entities/users';
 
+import { optionKeys, readOptions } from './stated-options';
+
 /**
  * How the person set the password:
  *
@@ -70,7 +72,7 @@ export interface PasswordChangeGuardOptions
     changed?: (attempt: PasswordChangeAttempt) => void | Promise<void>;
 }
 
-const OPTION_KEYS = ['admit', 'changed'] as const;
+const OPTION_KEYS = optionKeys<PasswordChangeGuardOptions>({ admit: true, changed: true });
 
 let guard: PasswordChangeGuardOptions | null = null;
 
@@ -95,16 +97,16 @@ export function configurePasswordChange(options: PasswordChangeGuardOptions | un
         return;
     }
 
-    assertGuardShape(options);
+    const read = readGuard(options);
 
     if (guard === null)
     {
-        guard = { admit: options.admit, changed: options.changed };
+        guard = read;
 
         return;
     }
 
-    const differing = OPTION_KEYS.filter(key => guard![key] !== options[key]);
+    const differing = OPTION_KEYS.filter(key => guard![key] !== read[key]);
 
     if (differing.length > 0 && contradiction === null)
     {
@@ -113,24 +115,22 @@ export function configurePasswordChange(options: PasswordChangeGuardOptions | un
     }
 }
 
-function assertGuardShape(options: PasswordChangeGuardOptions): void
+/** `options` read once, by `readOptions`: the snapshot is what is checked, compared and kept (#477). */
+function readGuard(options: PasswordChangeGuardOptions): PasswordChangeGuardOptions
 {
-    const unknown = Object.keys(options).filter(key => !(OPTION_KEYS as readonly string[]).includes(key));
-
-    if (unknown.length > 0)
-    {
-        throw new Error(`passwordChange.${unknown[0]} is not an option. Known options: ${OPTION_KEYS.join(', ')}.`);
-    }
+    const read = readOptions<PasswordChangeGuardOptions>('passwordChange', options, OPTION_KEYS);
 
     for (const key of OPTION_KEYS)
     {
-        const value: unknown = options[key];
+        const value: unknown = read[key];
 
         if (value !== undefined && typeof value !== 'function')
         {
             throw new Error(`passwordChange.${key} must be a function, received ${String(value)}.`);
         }
     }
+
+    return { admit: read.admit, changed: read.changed };
 }
 
 /**

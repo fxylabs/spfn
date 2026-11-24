@@ -25,6 +25,8 @@
 
 import { ChannelDisabledError } from '@spfn/auth/errors';
 
+import { readOptions, type OptionTerms } from './stated-options';
+
 /** The channels an application can turn on or off. */
 export const AUTH_CHANNELS = [
     'signup',
@@ -132,23 +134,18 @@ export function configureChannels(options: AuthChannelsOptions | undefined): voi
     enabled = Object.fromEntries(AUTH_CHANNELS.map(name => [name, current[name] && resolved[name]])) as Record<AuthChannel, boolean>;
 }
 
+/** How the shared reader's refusals name a channel. */
+const CHANNEL_TERMS: OptionTerms = { noun: 'a channel', plural: 'channels', giving: 'giving channels true or false' };
+
 /**
- * Each channel read once, into the snapshot both checked and resolved: an own
- * getter or a Proxy cannot pass the checks with one value and resolve to
- * another. A channel the snapshot holds as `undefined` takes
- * its default.
+ * Each channel read once, by `readOptions`, into the snapshot both checked
+ * and resolved: an own getter or a Proxy cannot pass the checks with one
+ * value and resolve to another. A channel the snapshot holds as `undefined`,
+ * or does not hold, takes its default.
  */
 function resolveChannels(options: AuthChannelsOptions): Record<AuthChannel, boolean>
 {
-    if (!isPlainObject(options))
-    {
-        throw new Error(`channels must be a plain object giving channels true or false — ${AUTH_CHANNELS.join(', ')}; `
-            + `received ${describeNotPlain(options)}.`);
-    }
-
-    refuseUnknownChannels(options);
-
-    const read = Object.fromEntries(AUTH_CHANNELS.map(name => [name, options[name]])) as Record<AuthChannel, unknown>;
+    const read = readOptions<AuthChannelsOptions>('channels', options, AUTH_CHANNELS, CHANNEL_TERMS);
     const notBoolean = AUTH_CHANNELS.find(name => read[name] !== undefined && typeof read[name] !== 'boolean');
 
     if (notBoolean !== undefined)
@@ -159,83 +156,6 @@ function resolveChannels(options: AuthChannelsOptions): Record<AuthChannel, bool
     const defaults = defaultChannels();
 
     return Object.fromEntries(AUTH_CHANNELS.map(name => [name, read[name] ?? defaults[name]])) as Record<AuthChannel, boolean>;
-}
-
-/**
- * An object literal, `JSON.parse` output, `Object.create(null)`, or one of
- * these from another realm (`vm`, an iframe): its prototype is `null` or the
- * `Object.prototype` of some realm. The read `options[name]` then reaches the
- * object's own names and that `Object.prototype`, which holds no channel — so
- * the own names are every name the read can find.
- *
- * Anything else — a class instance, a `Map`, an array, an object made by
- * `Object.create` from another object — has a prototype the read reaches
- * into, where a channel or a misspelt one would be found or lost unseen.
- */
-function isPlainObject(options: unknown): options is object
-{
-    if (typeof options !== 'object' || options === null)
-    {
-        return false;
-    }
-
-    const prototype = Object.getPrototypeOf(options);
-
-    return prototype === null || isObjectPrototype(prototype);
-}
-
-/**
- * The source text of the built-in `Object`, as this engine prints it. Every
- * realm's `Object` prints the same, and no function written in JavaScript
- * prints `[native code]`.
- */
-const OBJECT_SOURCE = Function.prototype.toString.call(Object);
-
-/**
- * Whether `candidate` is the `Object.prototype` of some realm. Each realm's
- * `Object` keeps its `prototype` in a property that can be neither written
- * nor redefined, so `candidate` is one when its `constructor` is a realm's
- * built-in `Object` — the only function whose source reads as `Object`'s
- * does in this realm (`OBJECT_SOURCE`); not a class, a bound function or a
- * Proxy — and that `Object`'s `prototype` is `candidate`. An
- * `Object.create(null)` given a `constructor` still fails: no `Object` names
- * it as its `prototype`.
- */
-function isObjectPrototype(candidate: object): boolean
-{
-    const constructor: unknown = Object.getOwnPropertyDescriptor(candidate, 'constructor')?.value;
-
-    return Object.getPrototypeOf(candidate) === null
-        && typeof constructor === 'function'
-        && Function.prototype.toString.call(constructor) === OBJECT_SOURCE
-        && Object.getOwnPropertyDescriptor(constructor, 'prototype')?.value === candidate;
-}
-
-function describeNotPlain(options: unknown): string
-{
-    if (Array.isArray(options))
-    {
-        return 'an array';
-    }
-
-    return typeof options === 'object' && options !== null ? 'an object with another prototype' : String(options);
-}
-
-/**
- * A name the object carries that is not a channel — a misspelt channel would
- * otherwise be read as left out. Every own name, enumerable or not: for a
- * plain object those are all the read reaches besides `Object.prototype`.
- * Symbols are passed over: the read never reaches one, and none is a
- * misspelt channel.
- */
-function refuseUnknownChannels(options: object): void
-{
-    const unknown = Object.getOwnPropertyNames(options).find(name => !(AUTH_CHANNELS as readonly string[]).includes(name));
-
-    if (unknown !== undefined)
-    {
-        throw new Error(`channels.${unknown} is not a channel. Known channels: ${AUTH_CHANNELS.join(', ')}.`);
-    }
 }
 
 /**

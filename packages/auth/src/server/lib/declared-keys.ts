@@ -9,6 +9,8 @@
 import { CloneType, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 
+import { optionKeys, readRecords } from './stated-options';
+
 export const DECLARED_KEY_PATTERN = /^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)*$/;
 
 export const DECLARED_KEY_MAX_LENGTH = 120;
@@ -19,6 +21,8 @@ export interface DeclaredEntry
     schema: TSchema;
     default?: unknown;
 }
+
+const DECLARED_ENTRY_OPTIONS = optionKeys<DeclaredEntry>({ key: true, schema: true, default: true });
 
 /**
  * Declared entries by key, with no way to add, replace or remove one.
@@ -55,21 +59,29 @@ function deepFreeze<T>(value: T): T
 }
 
 /**
- * A private copy of the entries behind a frozen read-only facade. Each entry
- * is copied and frozen, with its own deep-frozen clone of the schema and a
- * deep-frozen clone of the default: neither the caller's schema object nor
- * its default instance is shared by reference, and the stored default
- * cannot itself be mutated, so nothing the caller still holds can change
- * what was declared or installed. Reads still hand out `Value.Clone` of
- * this frozen default, so callers keep getting a value they may change.
+ * `entry` copied and frozen, with its own deep-frozen clone of the schema and
+ * a deep-frozen clone of the default: neither the caller's schema object nor
+ * its default instance is shared by reference, and the stored default cannot
+ * itself be mutated, so nothing the caller still holds can change what was
+ * declared or installed.
+ */
+function ownCopy<T extends DeclaredEntry>(entry: T): T
+{
+    return Object.freeze({
+        ...entry,
+        schema: deepFreeze(CloneType(entry.schema)),
+        ...(Object.hasOwn(entry, 'default') ? { default: deepFreeze(Value.Clone(entry.default)) } : {}),
+    }) as T;
+}
+
+/**
+ * A private copy of the entries, each by `ownCopy`, behind a frozen read-only
+ * facade. Reads still hand out `Value.Clone` of the frozen default, so
+ * callers keep getting a value they may change.
  */
 export function readOnlyEntries<T extends DeclaredEntry>(source: Iterable<[string, T]>): DeclaredEntries<T>
 {
-    const own = new Map<string, T>([...source].map(([key, entry]) => [key, Object.freeze({
-        ...entry,
-        schema: deepFreeze(CloneType(entry.schema)),
-        ...('default' in entry ? { default: deepFreeze(Value.Clone(entry.default)) } : {}),
-    }) as T]));
+    const own = new Map<string, T>([...source].map(([key, entry]) => [key, ownCopy(entry)]));
 
     return Object.freeze({
         size: own.size,
@@ -126,7 +138,7 @@ function assertKeyFormat(label: string, key: string): void
 
 function assertDefaultPasses(label: string, entry: DeclaredEntry): void
 {
-    if ('default' in entry && !Value.Check(entry.schema, entry.default))
+    if (Object.hasOwn(entry, 'default') && !Value.Check(entry.schema, entry.default))
     {
         throw new Error(`${label}: the default of '${entry.key}' does not pass its own schema`);
     }
@@ -135,9 +147,19 @@ function assertDefaultPasses(label: string, entry: DeclaredEntry): void
 /**
  * Checks a declaration list and indexes it by key
  *
+ * The list and each entry in it are read once, by `readRecords` (#477): the
+ * list must be an array, each entry a plain object naming only `key`,
+ * `schema` and `default`, and only those snapshots are checked and kept — a
+ * misspelt `defualt` is refused rather than read as "no default". Whether an
+ * entry states a default — `undefined` included — is whether its snapshot
+ * holds the key. The schema and the default are objects of the caller's too:
+ * each is cloned once, by `ownCopy`, before the default is checked against
+ * the schema, so the clone checked is the clone kept.
+ *
  * @param label - The declaring function's name, for the error message
  * @param reservedKeys - Keys the declaration may not use, with the reason
- * @throws Error on a malformed key, a duplicate, a reserved key, or a default that fails its schema
+ * @throws Error on a list or entry the rule refuses, a malformed key, a
+ *   duplicate, a reserved key, or a default that fails its schema
  */
 export function indexDeclaredEntries<T extends DeclaredEntry>(
     label: string,
@@ -147,7 +169,7 @@ export function indexDeclaredEntries<T extends DeclaredEntry>(
 {
     const byKey = new Map<string, T>();
 
-    for (const entry of entries)
+    for (const entry of (readRecords<DeclaredEntry>(label, entries, DECLARED_ENTRY_OPTIONS) as T[]).map(ownCopy))
     {
         assertKeyFormat(label, entry.key);
         if (reservedKeys.has(entry.key))

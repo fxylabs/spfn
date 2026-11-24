@@ -54,6 +54,7 @@ import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JWTPayload }
 import { defineMiddlewareFactory } from '@spfn/core/route';
 import { UnauthorizedError } from '@spfn/core/errors';
 import { authLogger } from '../logger';
+import { optionKeys, readOptions } from '../lib/stated-options';
 
 /** How long an unknown `kid` waits before the key set is read again. */
 const KEY_SET_COOLDOWN_MS = 60_000;
@@ -153,19 +154,21 @@ export const signedTokenAuth = defineMiddlewareFactory('signedTokenAuth', (optio
     };
 }, { skips: ['auth'] });
 
+const SIGNED_TOKEN_AUTH_OPTIONS = optionKeys<SignedTokenAuthOptions>({ keysUrl: true, iss: true, aud: true, clockSkewSec: true });
+
+/**
+ * `options` read once, by `readOptions` (#477): the `iss` and `aud` checked
+ * are the ones every token is verified against, and a misspelt `clockSkew`
+ * is refused rather than left at the default.
+ */
 function verifierOf(options: SignedTokenAuthOptions): Verifier
 {
-    const keysUrl = keysUrlOf(options?.keysUrl);
+    const read = readOptions<SignedTokenAuthOptions>('signedTokenAuth', options, SIGNED_TOKEN_AUTH_OPTIONS);
+    const keysUrl = keysUrlOf(read.keysUrl);
+    const iss = requiredClaim('iss', read.iss);
+    const aud = requiredClaim('aud', read.aud);
 
-    for (const claim of ['iss', 'aud'] as const)
-    {
-        if (typeof options[claim] !== 'string' || options[claim].length === 0)
-        {
-            throw new Error(`signedTokenAuth requires a non-empty ${claim}.`);
-        }
-    }
-
-    const clockSkewSec = options.clockSkewSec ?? DEFAULT_CLOCK_SKEW_SEC;
+    const clockSkewSec = read.clockSkewSec ?? DEFAULT_CLOCK_SKEW_SEC;
     if (!Number.isFinite(clockSkewSec) || clockSkewSec < 0)
     {
         throw new Error('signedTokenAuth clockSkewSec must be a non-negative number of seconds.');
@@ -173,10 +176,20 @@ function verifierOf(options: SignedTokenAuthOptions): Verifier
 
     return {
         keys: createRemoteJWKSet(keysUrl, { cooldownDuration: KEY_SET_COOLDOWN_MS }),
-        iss: options.iss,
-        aud: options.aud,
+        iss,
+        aud,
         clockSkewSec,
     };
+}
+
+function requiredClaim(claim: 'iss' | 'aud', value: unknown): string
+{
+    if (typeof value !== 'string' || value.length === 0)
+    {
+        throw new Error(`signedTokenAuth requires a non-empty ${claim}.`);
+    }
+
+    return value;
 }
 
 function keysUrlOf(value: string | undefined): URL

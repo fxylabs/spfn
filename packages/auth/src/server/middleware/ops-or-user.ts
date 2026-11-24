@@ -65,6 +65,7 @@ import { authenticate } from './authenticate';
 import { opsTokenAuth, requireOpsScope } from './ops-token-auth';
 import { requireRole } from './require-role';
 import { requirePermissions } from './require-permission';
+import { optionKeys, readList, readOptions } from '../lib/stated-options';
 
 /** What a route admits, on each of the two branches. */
 export interface OpsOrUserConfig
@@ -85,15 +86,26 @@ export interface OpsOrUserConfig
  * it is a boot-time error rather than a request-time surprise — the same
  * posture `registerMachineVerifier` takes.
  *
- * @throws Error when `opsScopes` is empty, or when neither `roles` nor
+ * `config` is read once, by `readOptions`, and each list in it once, by
+ * `readList`, into a copy (#477): the scopes checked are the scopes required,
+ * and a misspelt `permisions` is refused rather than left out.
+ *
+ * @throws Error when `config` is not a plain object or carries a name that is
+ *   not an option, when `opsScopes` is empty, or when neither `roles` nor
  *   `permissions` names anything.
  */
 export const opsOrUser = defineMiddlewareFactory('opsOrUser', (config: OpsOrUserConfig): MiddlewareHandler =>
 {
-    const roles = config.roles ?? [];
-    const permissions = config.permissions ?? [];
+    const read = readOptions<OpsOrUserConfig>(
+        'opsOrUser',
+        config,
+        optionKeys<OpsOrUserConfig>({ opsScopes: true, roles: true, permissions: true }),
+    );
+    const opsScopes = listOf('opsScopes', read.opsScopes);
+    const roles = listOf('roles', read.roles);
+    const permissions = listOf('permissions', read.permissions);
 
-    if (!config.opsScopes || config.opsScopes.length === 0)
+    if (opsScopes.length === 0)
     {
         throw new Error('opsOrUser: opsScopes must name at least one scope — an ops token would otherwise be admitted unchecked.');
     }
@@ -104,7 +116,7 @@ export const opsOrUser = defineMiddlewareFactory('opsOrUser', (config: OpsOrUser
     }
 
     // The guards are built once here, not per request.
-    const ops = chain([opsTokenAuth.handler, requireOpsScope(...config.opsScopes).handler]);
+    const ops = chain([opsTokenAuth.handler, requireOpsScope(...opsScopes).handler]);
     const user = chain([
         authenticate.handler,
         ...(roles.length > 0 ? [requireRole(...roles).handler] : []),
@@ -114,6 +126,12 @@ export const opsOrUser = defineMiddlewareFactory('opsOrUser', (config: OpsOrUser
     return (c, next) =>
         isOpsToken(bearerOf(c.req.header('Authorization'))) ? ops(c, next) : user(c, next);
 }, { skips: ['auth'] });
+
+/** `opsOrUser`'s list `option` as a copy read by `readList`, or `[]` when it is not stated. */
+function listOf(option: keyof OpsOrUserConfig, list: unknown): readonly string[]
+{
+    return list === undefined ? [] : readList<string>(`opsOrUser.${option}`, list, 'of names');
+}
 
 /**
  * The bearer as presented, or '' — never null, so the shape test in the

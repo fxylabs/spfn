@@ -19,6 +19,7 @@
 
 import { PURGE_STRATEGIES, type PurgeStrategy } from '../types';
 import { isChannelEnabled } from './channels-config';
+import { OPTION_TERMS, optionKeys, readOptions, type OptionTerms } from './stated-options';
 
 export interface AccountDeletionPurgeUser
 {
@@ -92,18 +93,21 @@ export const DEFAULT_DELETION_PURGE_STRATEGY: PurgeStrategy = 'anonymize';
 export const DEFAULT_DELETION_ALLOW_SELF_IMMEDIATE = false;
 export const DEFAULT_DELETION_PURGE_CRON = '0 4 * * *';
 
-const DELETION_OPTIONS: ReadonlyArray<keyof AuthDeletionConfig> = [
-    'gracePeriodDays',
-    'purgeStrategy',
-    'allowSelfImmediate',
-    'purgeCron',
-    'onBeforePurge',
-    'onPurge',
-];
+const DELETION_OPTIONS = optionKeys<AuthDeletionConfig>({
+    gracePeriodDays: true,
+    purgeStrategy: true,
+    allowSelfImmediate: true,
+    purgeCron: true,
+    onBeforePurge: true,
+    onPurge: true,
+});
 
 const SEND_NOTIFICATIONS_REMOVED = 'deletion.sendNotifications was removed: @spfn/auth sends no account-deletion notice. '
     + 'Send your own from the auth.deletion.requested / auth.deletion.cancelled events and the deletion.onPurge hook — '
     + 'see the @spfn/auth README, "Account Deletion & Recovery", recipe "Telling the person".';
+
+/** `sendNotifications`, removed, is refused by name: an app that relied on it learns nothing is mailed. */
+const DELETION_TERMS: OptionTerms = { ...OPTION_TERMS, removed: new Map([['sendNotifications', SEND_NOTIFICATIONS_REMOVED]]) };
 
 const DEFAULTS: AuthDeletionConfig = {
     gracePeriodDays: DEFAULT_DELETION_GRACE_PERIOD_DAYS,
@@ -134,9 +138,13 @@ let config: AuthDeletionConfig = { ...DEFAULTS };
  * meanwhile. A hook stated twice is two owners of one hook, refused the same
  * way unless it is the same function.
  *
- * @throws Error for an option it does not know — `sendNotifications`, removed,
- *   named as such, so an app that relied on it learns at boot that nothing is
- *   mailed any more — a `purgeStrategy` outside `PURGE_STRATEGIES`, or an
+ * `options` is read once, by `readOptions`, and only that snapshot is checked
+ * and stored (#477).
+ *
+ * @throws Error for an `options` that is not a plain object, an option it does
+ *   not know, enumerable or not — `sendNotifications`, removed, named as such,
+ *   so an app that relied on it learns at boot that nothing is mailed any
+ *   more — a `purgeStrategy` outside `PURGE_STRATEGIES`, or an
  *   `allowSelfImmediate` that is not a boolean (the string `'false'` would
  *   otherwise read as true)
  */
@@ -147,11 +155,12 @@ export function configureDeletion(options?: Partial<AuthDeletionConfig>): void
         return;
     }
 
-    assertKnownDeletionOptions(options);
-    assertDeletionOption('purgeStrategy', options.purgeStrategy, PURGE_STRATEGIES);
-    assertDeletionOption('allowSelfImmediate', options.allowSelfImmediate, [true, false]);
+    const read = readOptions<AuthDeletionConfig>('deletion', options, DELETION_OPTIONS, DELETION_TERMS);
 
-    const statedNow: Partial<AuthDeletionConfig> = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+    assertDeletionOption('purgeStrategy', read.purgeStrategy, PURGE_STRATEGIES);
+    assertDeletionOption('allowSelfImmediate', read.allowSelfImmediate, [true, false]);
+
+    const statedNow: Partial<AuthDeletionConfig> = Object.fromEntries(Object.entries(read).filter(([, value]) => value !== undefined));
     contradiction ??= contradictionWith(statedNow);
     stated = { ...statedNow, ...stated };
     config = { ...DEFAULTS, ...stated };
@@ -186,20 +195,6 @@ function describeClash(key: keyof AuthDeletionConfig, first: unknown, second: un
 function functionName(value: unknown): string
 {
     return typeof value === 'function' && value.name ? `'${value.name}'` : 'an anonymous function';
-}
-
-function assertKnownDeletionOptions(options: object): void
-{
-    if ('sendNotifications' in options)
-    {
-        throw new Error(SEND_NOTIFICATIONS_REMOVED);
-    }
-
-    const unknown = Object.keys(options).find((key) => !(DELETION_OPTIONS as readonly string[]).includes(key));
-    if (unknown !== undefined)
-    {
-        throw new Error(`deletion has no option '${unknown}'. Allowed: ${DELETION_OPTIONS.join(', ')}.`);
-    }
 }
 
 function assertDeletionOption(name: string, value: unknown, allowed: readonly unknown[]): void

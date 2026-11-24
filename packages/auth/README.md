@@ -106,6 +106,45 @@ export default defineServerConfig()
     .build();
 ```
 
+#### How every options object is read
+
+One rule for every object of options the app hands this package — `createAuthLifecycle(options)`
+and each object inside it (`deletion`, `deviceAuth`, `deviceLink`, `authorizationServer`,
+`channels`, `secondFactor`, `signIn`, `passwordChange`, `password`, `oneTimeToken`),
+`initializeAuth` with each record in `roles` and `permissions`, `initOneTimeTokenManager`,
+`createAuthJobRouter`, `configureAuth` with `csrf`, `oauthProviders`, each provider's policy,
+`oauthLink` and each `recentAuth`, each entry given to `defineUserSettings` and
+`defineProfileFields`, the middleware options of `signedTokenAuth`, `opsOrUser` and `roleGuard`,
+`createRevokeAllLink`'s options, `registerMachineVerifier`'s `match`, and from
+`@spfn/auth/client-proof` the options of `ClientProofState`, `createClientProofDevHandler` and
+`createClientProofGuard`:
+
+- it is a **plain object** — a literal, `JSON.parse` output, `Object.create(null)`, or one of these
+  from another realm. A class instance, a `Map`, an array, or an object made with `Object.create`
+  from another object is refused: an option it inherits would otherwise be applied or dropped for
+  its default unseen. So is a `Proxy`, whatever its prototype: it answers what names it has and
+  what a read finds each from its handler, so its names do not say what a read finds;
+- a name it carries that is not an option — **enumerable or not** — is refused, so a misspelt
+  option (`chanels`, `purgeCron` as `purgecron`) is an error rather than an option left out;
+- **each option is read once**, and the value checked is the value used: a getter runs once.
+
+A refusal throws from the call — `createAuthLifecycle()` before it returns, so before any route can
+answer; a middleware factory when the route is defined, never on a request. A map keyed by the app's
+own names — `authorizationServer.scopes`, `rolePermissions`, `ClientProofState`'s `publicKeys` —
+has no option names to check, but is a plain object too, and each entry is read once. A list —
+`authorizationServer.defaultScopes` and `allowedRedirectOrigins`, `csrf.exemptPaths`,
+`secondFactor.methods`, `opsOrUser`'s `opsScopes`, `roles` and `permissions`, `roleGuard`'s `allow`
+and `deny`, each role's list in `rolePermissions` — is an array, not a `Proxy`, with no holes, and
+each element is read once into a copy: that copy is what is checked and used, so a later `push` or
+index assignment on the app's array changes nothing. A list of records — `roles`, `permissions`,
+the entries of `defineUserSettings` and `defineProfileFields` — is read the same way, and each
+record in it under the rule above; an entry states a default exactly when it has its own `default`
+key, `default: undefined` included, and its default and schema are cloned once, before the default
+is checked, so the clone checked is the clone kept. `createAuthLifecycle` reads its `roles`,
+`permissions` and `rolePermissions` when it is called, not at boot.
+`registerMachineVerifier` and `registerAuthProfile` may be given a class instance, whose `verify`
+is bound to it; each member is read once.
+
 ### 2. Router + global middleware — `router.ts`
 
 `authRouter` (the package's `mainAuthRouter`) is merged via `.packages()`; `authenticate` is
@@ -431,12 +470,11 @@ upgrade never opens a way into your accounts.
 | `selfDeletion` | **off** | 0.4.0-beta.2 |
 | any channel added later | **off** | — |
 
-Every key is optional; one left out, or given as `undefined`, takes its default. `channels` is a
-plain object — a literal, `JSON.parse` output, `Object.create(null)`, or one of these from another
-realm. A key that is not one of these seven (own, enumerable or not), a value that is not a boolean,
-and a `channels` that is not a plain object — a class instance, a `Map`, an array, an object made
-with `Object.create` from another object — are refused when `createAuthLifecycle()` is called, before any route can answer — each would leave a
-channel in a state the app never decided on.
+Every key is optional; one left out, or given as `undefined`, takes its default. `channels` is read
+under [the rule for every options object](#how-every-options-object-is-read): a plain object, a key
+that is not one of these seven refused, each read once. A value that is not a boolean is refused too,
+when `createAuthLifecycle()` is called, before any route can answer — each would leave a channel in
+a state the app never decided on.
 
 > **Upgrading from 0.4.0-beta.5 or earlier**, which served every channel unless told otherwise:
 > an app that uses passkey sign-in, invitations or self-service deletion adds `true` for each —

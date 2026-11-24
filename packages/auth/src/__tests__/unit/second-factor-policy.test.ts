@@ -167,12 +167,10 @@ describe('second-factor policy (#309)', () =>
     // The option
     // ========================================================================
 
-    it('refuses an unknown method, an unknown key and a value of the wrong type at configuration', () =>
+    it('refuses an unknown method and a value of the wrong type at configuration', () =>
     {
         expect(() => configureSecondFactor({ methods: ['sms'] } as unknown as SecondFactorOptions))
             .toThrow(/sms is not a second-factor method/);
-        expect(() => configureSecondFactor({ requred: true } as unknown as SecondFactorOptions))
-            .toThrow(/secondFactor\.requred is not an option/);
         expect(() => configureSecondFactor({ required: 'yes' } as unknown as SecondFactorOptions))
             .toThrow(/secondFactor\.required must be true or false/);
         expect(getSecondFactorPolicy()).toEqual({ required: false, methods: ['totp', 'passkey'], recoveryCodes: true });

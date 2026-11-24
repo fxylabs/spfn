@@ -15,6 +15,7 @@
  * | A6  | `createAuthApi({ errorRegistry: [AppError] })`         | AppError body restores AppError; an auth error body the auth class    |
  * | A7  | app class with the same name as an auth error          | the auth class is restored                                            |
  * | A8  | core built-in (`NotFoundError` body)                   | restores NotFoundError                                                |
+ * | A8b | `errorRegistry` as a getter answering differently each read | read once; the classes of that read are restored (#477)         |
  * | A9  | type: `errorRegistry: someRegistryInstance`            | compile error (`@ts-expect-error`)                                    |
  * | A10 | type: `useMfaConfirm({ api: createAuthApi() })`, passkeys | compile                                                            |
  * | A11 | existing `authApi`                                     | existing tests unchanged and green (passkey-client, mfa-confirm-flow) |
@@ -204,6 +205,22 @@ describe('createAuthApi — error registry', () =>
         }));
 
         expect(error).toBeInstanceOf(NotFoundError);
+    });
+
+    it('A8b: errorRegistry is read once, and the registry merged is the one that read answered (#477)', async () =>
+    {
+        const answers = [[AppError], []];
+        let reads = 0;
+        const config = {
+            fetch: respondWith({ __type: 'AppError', message: 'app conflict' }, 409) as unknown as typeof fetch,
+            get errorRegistry()
+            {
+                return answers[reads++];
+            },
+        };
+
+        expect(await settle(createAuthApi(config))).toBeInstanceOf(AppError);
+        expect(reads).toBe(1);
     });
 });
 
