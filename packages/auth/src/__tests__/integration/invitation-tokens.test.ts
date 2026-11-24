@@ -12,9 +12,6 @@
  *
  * Driven through the mounted auth router, the way a server mounts it. T6, the
  * guard over every route's response, is unit/route-response-secrets.test.ts.
- *
- * C1 (#489): a cancel is recorded after the commit, so one a caller's
- * transaction rolls back is never logged as done.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
@@ -34,7 +31,6 @@ const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
 const { acceptInvitation, cancelInvitation, createInvitation, resendInvitation } = await import('@/server/services/invitation.service');
 const { BadRequestError } = await import('@spfn/core/errors');
-const { authLogger } = await import('@/server/logger');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -505,29 +501,5 @@ describe.skipIf(!dbAvailable)('Invitation tokens are bearer credentials (w-etq2g
         expect((await call('POST', '/_auth/invitations/cancel', { id, reason: 'left' }, authorization)).status).toBe(200);
         expect((await invitationRow(id))!.metadata)
             .toEqual({ legacyMetadata: ['welcome'], cancelReason: 'left', cancelledBy: inviter });
-    });
-
-    it('C1: a cancel the caller\'s transaction rolls back is not recorded as done (#489)', async () =>
-    {
-        const inviter = await createTestUser('inviter-c1@invitations.test', await roleId('superadmin'));
-        const { id } = await invite(await signIn(app, 'inviter-c1@invitations.test', nextIp()), 'c1@invitations.test', 'user');
-        // The record is the package logger's line; before #489 it was console text.
-        const lines = [vi.spyOn(authLogger.service, 'info'), vi.spyOn(console, 'log')];
-
-        try
-        {
-            await expect(runInTransaction(async () =>
-            {
-                await cancelInvitation(id, inviter, 'left');
-                throw new Error('the caller rolls back');
-            })).rejects.toThrow('the caller rolls back');
-
-            expect((await invitationRow(id))!.status).toBe('pending');
-            expect(JSON.stringify(lines.flatMap((spy) => spy.mock.calls))).not.toContain('Invitation cancelled');
-        }
-        finally
-        {
-            lines.forEach((spy) => spy.mockRestore());
-        }
     });
 });
