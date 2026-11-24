@@ -37,4 +37,4 @@ export * from './oauth2-clients.repository';
 export * from './oauth2-grants.repository';
 export * from './oauth2-authorization-codes.repository';
 export * from './oauth2-tokens.repository';
-export { SecondAccountLockError } from './account-lock';
+export { AccountLockOutsideTransactionError, SecondAccountLockError } from './account-lock';

@@ -556,6 +556,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: @spfn/auth: the account lock refuses to be taken outside a transaction (#494).**
+  `usersRepository.lockAccount` and `lockAccountByEmailOrPhone` ran with no transaction open and
+  did nothing useful: the row lock ended with its own statement, the transaction-local
+  `lock_timeout` never reached the `SELECT`, the record of which account the transaction holds was
+  skipped, and nothing reported it — so whether an act was atomic depended on whether its caller
+  happened to have opened a transaction. Both now throw **`AccountLockOutsideTransactionError`**
+  (new, exported from `@spfn/auth/server` beside `SecondAccountLockError`; an internal error,
+  answered 500) before any statement when no transaction is open, in every run — a known account
+  and an unknown identifier are refused alike. The message names the method and, for
+  `lockAccount(id)`, the account id; never an email, a phone or other caller text. Every exported
+  service that takes the lock already opens its own transaction (#494, above), so calling one of
+  them is unaffected. What now throws: application code that calls `usersRepository.lockAccount`,
+  `usersRepository.lockAccountByEmailOrPhone`, `assertNotLastListedFactor` (while the policy
+  requires a second factor) or a passkey proof's `spend()` (`checkPasskeyProof`) with no
+  transaction open. **Migration:** wrap the call and the writes it protects in `runInTransaction`
+  from `@spfn/core/db`:
+  `await runInTransaction(async () => { await usersRepository.lockAccount(userId); /* writes */ });`.
+  Same for `Transactional()`, a `requiresNew` transaction and a savepoint inside one; a
+  transaction opened directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
+  `db.transaction`) is not one the repositories run on, so the call is refused as if none were
+  open. No schema change, no migration; the mobile contract does not move.
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored
