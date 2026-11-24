@@ -303,22 +303,10 @@ export function verifyKeyFingerprint(
     expectedFingerprint: string,
 ): boolean
 {
-    try
-    {
-        const publicKeyDER = Buffer.from(publicKeyB64, 'base64');
-        const fingerprint = crypto
-            .createHash('sha256')
-            .update(publicKeyDER)
-            .digest('hex');
-
-        return fingerprint === expectedFingerprint;
-    }
-    catch (error)
-    {
-        console.error('Failed to verify key fingerprint:', error);
-
-        return false;
-    }
+    return crypto
+        .createHash('sha256')
+        .update(Buffer.from(publicKeyB64, 'base64'))
+        .digest('hex') === expectedFingerprint;
 }
 
 /** The key, or null when the bytes are not a readable SPKI public key. */

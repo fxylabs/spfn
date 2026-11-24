@@ -590,6 +590,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction opened directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
   `db.transaction`) is not one the repositories run on, so the call is refused as if none were
   open. No schema change, no migration; the mobile contract does not move.
+- **@spfn/auth: admin actions are logged through the package logger, after the commit (#489).** Five
+  `console.log` lines are gone: `[Auth] ⚠️  Invitation cancelled: <email> (reason: <reason>)`,
+  `[Auth] 🗑️  Invitation deleted: <id>`, `[Auth] ⏰ Expired <n> old invitations`,
+  `[Auth] ✅ Created custom role: <name>` and `[Auth] 🗑️  Deleted role: <name>`. In their place
+  `@spfn/auth:service` writes info lines — `Invitation cancelled { invitationId, cancelledBy }`,
+  `Invitation deleted { invitationId }`, `Invitations expired { count }`,
+  `Role created { roleId, name }` and `Role deleted { roleId, name }` — so `SPFN_LOG_LEVEL` and the
+  logger's transports apply to them. Each is written once the transaction that made the change has
+  committed (`onAfterCommit`): the cancel and role lines used to be printed inside it, so a change
+  that rolled back — its own, or that of an application transaction around the call — was still
+  reported as done. The cancel line no longer names the invitee's address, and the cancellation
+  reason, stored on the row, is not copied into it. `verifyKeyFingerprint` loses its `try`/`catch`
+  and its `console.error('Failed to verify key fingerprint:', …)`: hashing a string's base64 bytes
+  does not throw, and the result for every string is unchanged. A log query that matched the console
+  text matches the new messages instead. Held by a test row for the rolled-back cancel.
+
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored

@@ -4,6 +4,7 @@
  * Role management functions for runtime role creation and modification
  */
 
+import { onAfterCommit } from '@spfn/core/db';
 import { ConflictError } from '@spfn/core/errors';
 import { ConfigOwnedMappingError, ConfigOwnedRoleError, RoleInUseError } from '@spfn/auth/errors';
 
@@ -15,6 +16,7 @@ import {
 import type { Role } from '../entities/roles';
 import { CONFIG_OWNED, OPERATOR_OWNED, type RolePermission } from '../entities/role-permissions';
 import { getRoleEmailDomainPolicy } from '../lib/role-email-domains';
+import { authLogger } from '../logger';
 import {
     assertAuthorityChangeAllowed,
     assertCanChangeAuthority,
@@ -141,7 +143,7 @@ export async function createRole(callerId: number, data: {
 
         await rolePermissionsRepository.createMany(permissionIds.map(permissionId => ({ roleId: role.id, permissionId, source: OPERATOR_OWNED })));
 
-        console.log(`[Auth] ✅ Created custom role: ${data.name}`);
+        onAfterCommit(() => authLogger.service.info('Role created', { roleId: role.id, name: role.name }));
 
         return role;
     }, { context: 'auth:role-create' });
@@ -256,7 +258,7 @@ export async function deleteRole(callerId: number, roleId: number): Promise<void
         // role_permissions cascade: a mapping is part of its role
         await rolesRepository.deleteById(role.id);
 
-        console.log(`[Auth] 🗑️  Deleted role: ${role.name}`);
+        onAfterCommit(() => authLogger.service.info('Role deleted', { roleId: role.id, name: role.name }));
     }, { context: 'auth:role-delete' });
 }
 
