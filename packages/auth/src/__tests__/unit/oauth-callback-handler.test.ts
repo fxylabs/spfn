@@ -237,14 +237,16 @@ describe('createOAuthCallbackHandler - the error page (#489)', () =>
         expect([params.get('reason'), params.get('error')]).toEqual(['cancelled', 'The sign-in was cancelled at the provider.']);
     });
 
-    it('O4 (handler): the app\'s refusal code beside sign_in_refused travels as code; a forged one, or one beside another reason, does not', async () =>
+    it('O4 (handler): the app\'s refusal code beside sign_in_refused travels as refusalCode; a forged one, one beside another reason, or one named code does not', async () =>
     {
-        const refused = await errorPageFor('error=Sign-in+refused&reason=sign_in_refused&code=LOCKED');
-        const forged = await errorPageFor('error=x&reason=sign_in_refused&code=Call+us+at+555');
-        const elsewhere = await errorPageFor('error=x&reason=cancelled&code=LOCKED');
+        const refused = await errorPageFor('error=Sign-in+refused&reason=sign_in_refused&refusalCode=LOCKED');
+        const forged = await errorPageFor('error=x&reason=sign_in_refused&refusalCode=Call+us+at+555');
+        const elsewhere = await errorPageFor('error=x&reason=cancelled&refusalCode=LOCKED');
+        const named = await errorPageFor('error=x&reason=sign_in_refused&code=LOCKED');
 
-        expect([refused.get('reason'), refused.get('code')]).toEqual(['sign_in_refused', 'LOCKED']);
-        expect([forged.get('reason'), forged.has('code')]).toEqual(['sign_in_refused', false]);
-        expect(elsewhere.has('code')).toBe(false);
+        expect([refused.get('reason'), refused.get('refusalCode'), refused.has('code')]).toEqual(['sign_in_refused', 'LOCKED', false]);
+        expect([forged.get('reason'), forged.has('refusalCode')]).toEqual(['sign_in_refused', false]);
+        expect(elsewhere.has('refusalCode')).toBe(false);
+        expect([named.has('refusalCode'), named.has('code')]).toEqual([false, false]);
     });
 });

@@ -673,19 +673,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untyped one. Both readers ignore the URL's `error` text: the handler forwards the sentence for the
   reason it read, and `onError` / `errorComponent` receive that sentence. An app's `signIn.admit`
   refusal keeps a channel — its `code`, not its message: on `reason=sign_in_refused` the redirect
-  carries `code` (`{code}` in `SPFN_AUTH_OAUTH_ERROR_URL`, else appended), the handler passes it on,
-  and `onError(message, reason, code?)` / `errorComponent(message, reason, code?)` receive it; a
-  reader drops a `code` beside another reason or outside the `admit` code shape. A provider error
-  read as `provider_error` now leaves one warn line on `@spfn/auth:service`, `OAuth provider
-  returned an error { provider, reason, providerError }`, `providerError` being the provider's
-  `error` when it is a registered code and `unrecognised` otherwise; `error_description` is logged
-  nowhere. **Migration:** render the error page by `reason` (and `code` on `sign_in_refused`) —
+  carries it as `refusalCode` (`{refusalCode}` in `SPFN_AUTH_OAUTH_ERROR_URL`, else appended), the
+  handler forwards it under that name, and `onError(message, reason, refusalCode?)` /
+  `errorComponent(message, reason, refusalCode?)` receive it; a reader drops a refusal code beside
+  another reason or outside the `admit` code shape. It is not named `code`: the README and the guide
+  recommended `SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}&code={reason}`, where `code` is the
+  reason, and a second `code` would have made the refusal code unreachable by `get('code')` and
+  turned a Next.js page's `searchParams.code` into an array. An operator who kept that template sees
+  `code` carry the reason as before, and on `sign_in_refused` one more parameter,
+  `refusalCode=<the app's code>`. A provider error read as `provider_error` now leaves one warn line
+  on `@spfn/auth:service`, `OAuth provider returned an error { provider, reason, providerError }`,
+  on a sign-in's callback and on a link's alike, `providerError` being the provider's `error` when
+  it is a registered code and `unrecognised` otherwise; `error_description` is logged nowhere. A
+  sign-in start for a provider that is not configured no longer names it on the redirect (it said
+  `Google OAuth is not configured` / `OAuth provider '<id>' is not configured`); it redirects with
+  `reason=failed`, and the operator finds the provider in the warn line `OAuth provider is not
+  configured { provider }` on `@spfn/auth:service` — written for Google's route and, on
+  `/_auth/oauth/:provider`, only when the segment names a registered provider.
+  **Migration:** render the error page by `reason` (and `refusalCode` on `sign_in_refused`) —
   show your own copy per reason, or `OAUTH_ERROR_MESSAGES[reason]`; `error` is the default English
   sentence for it, and a page that renders `error` from its own URL shows whatever a forged link put
   there. Code that branched on a typed error's message on the redirect, or on `onError`'s message,
   branches on `reason` instead. `buildOAuthErrorUrl(error, reason?)` (from `@spfn/auth/server`) is
-  now `buildOAuthErrorUrl(reason, code?)`; `oauthFailureUrl(error, logMessage)` no longer puts any
-  message on the redirect. New exports: `OAUTH_ERROR_MESSAGES` from `@spfn/auth`,
+  now `buildOAuthErrorUrl(reason, refusalCode?)`; `oauthFailureUrl(error, logMessage)` no longer
+  puts any message on the redirect. New exports: `OAUTH_ERROR_MESSAGES` from `@spfn/auth`,
   `@spfn/auth/server` and `@spfn/auth/nextjs/client`. The mobile contract does not move.
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked

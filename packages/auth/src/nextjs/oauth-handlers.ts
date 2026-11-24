@@ -15,7 +15,7 @@ import {
     OAUTH_ERROR_MESSAGES,
     callbackQueryReason,
     isOAuthErrorReason,
-    oauthErrorCode,
+    oauthRefusalCode,
     type OAuthErrorReason,
 } from '../lib/oauth-error-reason';
 import { routeMap as authRouteMap } from '../generated/route-map';
@@ -32,8 +32,8 @@ export interface OAuthCallbackOptions
     /**
      * Error redirect URL. Every redirect to it carries `reason` (an
      * `OAuthErrorReason` code), `error` (the fixed sentence for it,
-     * `OAUTH_ERROR_MESSAGES`) and, on `sign_in_refused`, `code` (the app's
-     * `signIn.admit` refusal code) when the callback carried a valid one.
+     * `OAUTH_ERROR_MESSAGES`) and, on `sign_in_refused`, `refusalCode` (the
+     * app's `signIn.admit` refusal code) when the callback carried a valid one.
      * Never the callback URL's own `error` text (#489).
      * @default '/auth/error'
      */
@@ -130,16 +130,16 @@ function mfaRedirect(
  * The error page, with the reason code, its fixed sentence and the app's
  * refusal code on its query (#489).
  */
-function errorRedirect(request: NextRequest, errorUrl: string, reason: OAuthErrorReason, code?: string): NextResponse
+function errorRedirect(request: NextRequest, errorUrl: string, reason: OAuthErrorReason, refusalCode?: string): NextResponse
 {
     const target = new URL(errorUrl, request.url);
 
     target.searchParams.set('error', OAUTH_ERROR_MESSAGES[reason]);
     target.searchParams.set('reason', reason);
 
-    if (code !== undefined)
+    if (refusalCode !== undefined)
     {
-        target.searchParams.set('code', code);
+        target.searchParams.set('refusalCode', refusalCode);
     }
 
     return NextResponse.redirect(target);
@@ -170,8 +170,8 @@ function errorRedirect(request: NextRequest, errorUrl: string, reason: OAuthErro
  * `cancelled`, `failed`, `expired`, `invalid_state` or `no_cookie` (#129) — or
  * the code the backend's own redirect already carried — and `error`, the fixed
  * sentence for it. The callback URL's `error` text is never passed on: anyone
- * can write it (#489). Its `code` is, on `sign_in_refused`, when it has the
- * shape of an app's refusal code (`oauthErrorCode`).
+ * can write it (#489). Its `refusalCode` is, on `sign_in_refused`, when it has
+ * the shape of an app's refusal code (`oauthRefusalCode`).
  *
  * @example
  * ```typescript
@@ -203,7 +203,7 @@ export function createOAuthCallbackHandler(options?: OAuthCallbackOptions)
         {
             const reason = callbackQueryReason(searchParams.get('reason'), error);
 
-            return errorRedirect(request, errorUrl, reason, oauthErrorCode(reason, searchParams.get('code')));
+            return errorRedirect(request, errorUrl, reason, oauthRefusalCode(reason, searchParams.get('refusalCode')));
         }
 
         if (mfaChallenge)

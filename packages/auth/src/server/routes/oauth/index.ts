@@ -25,7 +25,6 @@ import { KEY_ALGORITHM, SOCIAL_PROVIDERS, type SessionBindingType, type SocialPr
 import { DeviceNameSchema, OAuthNativeProfileSchema, PasskeyProofResponseSchema, PlatformSchema } from '../schema';
 import { buildStartCookieName, namesEvictedByStart } from '../../lib/oauth/start-cookies';
 import { packageCookieAttributes } from '../../lib/cookie-attributes';
-import { providerErrorReason } from '../../../lib/oauth-error-reason';
 import { byIpAndCaller, byIpAndIdToken } from '../../lib/rate-limit-keys';
 import { getAuth } from '../../helpers';
 import { oauthFinalizeAuth } from '../../middleware/oauth-finalize-auth';
@@ -52,7 +51,11 @@ import {
     oauthLinkResultUrl,
     unlinkOAuthService,
 } from '../../services';
-import { logOAuthFailure, providerErrorUrl } from '../../services/oauth.service';
+import {
+    logOAuthFailure,
+    providerCallbackErrorReason,
+    providerNotConfiguredUrl,
+} from '../../services/oauth.service';
 import { assertSignInProvider, isSignInProvider } from '../../lib/config';
 import { isGoogleOAuthEnabled, getOAuthProvider, UnlinkNotifyRejection } from '../../lib/oauth';
 import {
@@ -117,7 +120,7 @@ async function oauthCallbackRedirect(c: Context, provider: SocialProvider, query
     // provider에서 에러가 반환된 경우
     if (query.error)
     {
-        return providerErrorUrl(provider, query.error);
+        return buildOAuthErrorUrl(providerCallbackErrorReason(provider, query.error));
     }
 
     // code와 state 필수 확인
@@ -191,7 +194,7 @@ async function oauthLinkCallbackRedirect(
 
     if (query.error)
     {
-        return oauthLinkResultUrl(link, providerErrorReason(query.error) === 'cancelled' ? 'cancelled' : 'provider_error');
+        return oauthLinkResultUrl(link, providerCallbackErrorReason(provider, query.error));
     }
 
     if (!query.code || !query.state)
@@ -244,7 +247,7 @@ export const oauthGoogleStart = route.get('/_auth/oauth/google')
 
         if (!isGoogleOAuthEnabled())
         {
-            return c.redirect(buildOAuthErrorUrl('failed'));
+            return c.redirect(providerNotConfiguredUrl('google'));
         }
 
         if (!isSignInProvider('google'))
@@ -585,7 +588,8 @@ export const oauthProviderStart = route.get('/_auth/oauth/:provider')
 
         if (!provider?.isEnabled())
         {
-            return c.redirect(buildOAuthErrorUrl('failed'));
+            // Named by the registry, never by the segment: one no provider is registered under is the caller's text
+            return c.redirect(provider ? providerNotConfiguredUrl(provider.id) : buildOAuthErrorUrl('failed'));
         }
 
         if (!isSignInProvider(params.provider))

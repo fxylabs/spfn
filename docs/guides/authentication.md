@@ -817,7 +817,7 @@ SPFN_AUTH_GOOGLE_CLIENT_SECRET=GOCSPX-...
 # Optional
 SPFN_AUTH_GOOGLE_SCOPES=email,profile               # Default: email,profile
 SPFN_AUTH_OAUTH_SUCCESS_URL=/auth/callback           # Default: /auth/callback
-SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}; {reason} and {code} optional (else appended as reason= / code=)
+SPFN_AUTH_OAUTH_ERROR_URL=/auth/error?error={error}  # Default: /auth/error?error={error}; {reason} and {refusalCode} optional (else appended as reason= / refusalCode=)
 SPFN_AUTH_GOOGLE_REDIRECT_URI=                       # Default: {NEXT_PUBLIC_SPFN_APP_URL||SPFN_APP_URL}/_auth/oauth/google/callback (an override is checked at boot)
 ```
 
@@ -931,24 +931,30 @@ shows whatever that link said. The codes are the closed union `OAuthErrorReason`
 | `signup_disabled` | a first sign-in would have created an account and the app set `channels.signup: false` (#308) |
 | `provider_already_linked` | a first sign-in matched an account by email that already holds another identity of the same provider — an account holds one per provider |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does |
-| `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361); the redirect carries the app's refusal code as `code` |
+| `sign_in_refused` | the app refused the sign-in in its `signIn.admit` (#361); the redirect carries the app's refusal code as `refusalCode` |
 | `failed` | anything else |
 
 A refused sign-in writes nothing — no account, social row, key, stored token or event: the callback
 asks the provider first, does every write in one transaction, and redirects only after it rolled back.
 
 The `error` text is never a provider's, a library's, a typed error's or your `admit`'s message (#489).
-On `sign_in_refused` the `code` your `admit` refused with travels as `code` — a key for your page to
-look its own copy up by; a reader drops a `code` beside another reason or outside the `admit` code
-shape. Every caught error the redirect answers — and every failure of a link callback, which answers
+On `sign_in_refused` the `code` your `admit` refused with travels as `refusalCode` — a key for your
+page to look its own copy up by; a reader drops a refusal code beside another reason or outside the
+`admit` code shape. It is not called `code`: this guide once recommended
+`/auth/error?error={error}&code={reason}`, where `code` is the reason, and with that template a
+`sign_in_refused` redirect now reads `code=sign_in_refused&refusalCode=<your code>`. Every caught error the redirect answers — and every failure of a link callback, which answers
 only `oauthLink=failed` — is logged by `@spfn/auth:service` as core's error handler would log it
 (`errorLogLevel`): at error level for a fault (an untyped error, a typed 5xx), at warn for a refusal
 (#382). A provider error read as `provider_error` leaves a warn line naming the provider's `error`
-when it is a registered code, `unrecognised` otherwise. Put `{reason}` and `{code}` in the template
-(`/auth/error?error={error}&why={reason}&key={code}`) to place them yourself; without them they are
-appended as query parameters. `OAuthCallback`'s `onError(message, reason, code?)` and
-`errorComponent(message, reason, code?)` receive the reason's sentence, the reason and the code; the
-handler and the component ignore the `error` text on their own URL.
+when it is a registered code, `unrecognised` otherwise, on a sign-in's callback and a link's alike. A
+sign-in start for a provider that is not configured redirects with `failed` and leaves the warn line
+`OAuth provider is not configured { provider }` (a `/_auth/oauth/:provider` segment that names no
+registered provider is not logged). Put `{reason}` and `{refusalCode}` in the template
+(`/auth/error?error={error}&why={reason}&key={refusalCode}`) to place them yourself; without them
+they are appended as query parameters. `createOAuthCallbackHandler` forwards `refusalCode`, and
+`OAuthCallback`'s `onError(message, reason, refusalCode?)` and
+`errorComponent(message, reason, refusalCode?)` receive the reason's sentence, the reason and the
+refusal code; the handler and the component ignore the `error` text on their own URL.
 
 ### Callback Page
 

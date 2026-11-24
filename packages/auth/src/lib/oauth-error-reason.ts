@@ -93,7 +93,7 @@ export function isOAuthErrorReason(value: unknown): value is OAuthErrorReason
  * The reason for a provider's own `error=` parameter (RFC 6749 §4.1.2.1).
  * Apple reports a declined sign-in with its own `user_cancelled_authorize`.
  */
-export function providerErrorReason(error: string): OAuthErrorReason
+export function providerErrorReason(error: string): 'cancelled' | 'provider_error'
 {
     return error === 'access_denied' || error === 'user_cancelled_authorize' ? 'cancelled' : 'provider_error';
 }
@@ -112,14 +112,16 @@ export function callbackQueryReason(reason: string | null, error: string): OAuth
  * `sign_in_refused` and only in the shape `signIn.admit` must answer
  * (`SIGN_IN_REFUSAL_CODE`), `undefined` otherwise (#489).
  *
- * A forged link can put anything in `code`. A value outside that shape — a
- * sentence, markup, an address — is no code an application issued, so it is
- * dropped rather than passed on: what reaches a page is at most an identifier
- * it looks up in its own table, never text to show.
+ * A forged link can put anything in `refusalCode`. A value outside that shape
+ * — a sentence, markup, an address — is no code an application issued, so it
+ * is dropped rather than passed on: what reaches a page is at most an
+ * identifier it looks up in its own table, never text to show.
  */
-export function oauthErrorCode(reason: OAuthErrorReason, code: unknown): string | undefined
+export function oauthRefusalCode(reason: OAuthErrorReason, refusalCode: unknown): string | undefined
 {
-    return reason === 'sign_in_refused' && typeof code === 'string' && SIGN_IN_REFUSAL_CODE.test(code) ? code : undefined;
+    return reason === 'sign_in_refused' && typeof refusalCode === 'string' && SIGN_IN_REFUSAL_CODE.test(refusalCode)
+        ? refusalCode
+        : undefined;
 }
 
 /**
@@ -137,14 +139,21 @@ export function withOAuthErrorReason(url: string, reason: OAuthErrorReason): str
 }
 
 /**
- * Put the application's refusal `code` on an error URL the way `reason` is put
- * (#489): into `{code}`, else appended. Without a code a `{code}` placeholder is
- * emptied and nothing is appended. The code is held to `SIGN_IN_REFUSAL_CODE`
- * (`oauthErrorCode`), whose characters need no encoding.
+ * Put the application's refusal code on an error URL the way `reason` is put
+ * (#489): into `{refusalCode}`, else appended as `refusalCode=<code>`. Without
+ * one a `{refusalCode}` placeholder is emptied and nothing is appended. The code
+ * is held to `SIGN_IN_REFUSAL_CODE` (`oauthRefusalCode`), whose characters need
+ * no encoding.
+ *
+ * Not `code`: the template this package once documented,
+ * `/auth/error?error={error}&code={reason}`, gives `code` the reason, and a
+ * second `code` would make the refusal code unreachable by `get('code')`.
  */
-export function withOAuthErrorCode(url: string, code: string | undefined): string
+export function withOAuthRefusalCode(url: string, refusalCode: string | undefined): string
 {
-    return code === undefined ? url.replaceAll('{code}', '') : withTemplateParameter(url, 'code', code);
+    return refusalCode === undefined
+        ? url.replaceAll('{refusalCode}', '')
+        : withTemplateParameter(url, 'refusalCode', refusalCode);
 }
 
 /** `value` into the template's `{name}`, else appended as `name=value` before any fragment. */

@@ -98,13 +98,14 @@ import { createOAuthLinkState, createOAuthState } from '../../server/lib/oauth/s
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
-import { buildOAuthErrorUrl, matchOAuthCallbackCsrf, oauthErrorReason } from '../../server/services/oauth.service';
+import { buildOAuthErrorUrl, matchOAuthCallbackCsrf, oauthErrorReason, oauthFailureUrl } from '../../server/services/oauth.service';
 import { mainAuthRouter } from '../../server/routes';
 import { authLogger } from '../../server/logger';
 import { authInterceptors } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import {
+    oauthCallbackErrorArguments,
     readCallbackInput,
     runOAuthCallback,
     type CallbackOptions,
@@ -127,6 +128,7 @@ import {
     OAuthSignInContendedError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
+    SignInRefusedError,
     SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
@@ -229,8 +231,8 @@ async function pastTheGate(app: Hono): Promise<URLSearchParams>
     );
 }
 
-/** The link callback's redirect for a link state whose CSRF gate passes */
-async function linkPastTheGate(app: Hono): Promise<URLSearchParams>
+/** The link callback's redirect for a link state whose CSRF gate passes, `query` beside the state */
+async function linkPastTheGate(app: Hono, query = 'code=c'): Promise<URLSearchParams>
 {
     const state = await createOAuthLinkState({
         provider: 'superself',
@@ -243,7 +245,7 @@ async function linkPastTheGate(app: Hono): Promise<URLSearchParams>
         keyEpoch: null,
     });
 
-    return await errorRedirect(app, `code=c&state=${state}`, `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`);
+    return await errorRedirect(app, `${query}&state=${state}`, `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`);
 }
 
 /** The core console transport's lines at each level while `work` runs, colours stripped */
@@ -529,6 +531,66 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect([...lines.error, ...lines.warn].join('\n')).not.toContain('Call us');
     });
 
+    it('O9 (#489): a provider error on a link callback leaves the warn line the sign-in path leaves, and nothing else of the query', async () =>
+    {
+        vi.stubEnv('SPFN_APP_URL', 'https://app.example');
+        const spies = (['debug', 'info', 'warn', 'error', 'fatal'] as const)
+            .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
+        let params = new URLSearchParams();
+        let calls: unknown[][][] = [];
+
+        await levelLinesDuring(async () =>
+        {
+            params = await linkPastTheGate(app, 'error=invalid_scope&error_description=Call+us');
+            calls = spies.map(spy => [...spy.mock.calls]);
+        }).finally(() => spies.forEach(spy => spy.mockRestore()));
+
+        expect([params.get('oauthLink'), params.get('provider')]).toEqual(['provider_error', 'superself']);
+        expect(calls[2]!.filter(([message]) => message === 'OAuth provider returned an error')).toEqual([
+            ['OAuth provider returned an error', { provider: 'superself', reason: 'provider_error', providerError: 'invalid_scope' }],
+        ]);
+        expect(JSON.stringify(calls)).not.toContain('Call us');
+    });
+
+    it('O10 (#489): a sign-in start for a registered provider that is not configured leaves a warn line naming it; a segment naming none leaves no line carrying it', async () =>
+    {
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', '');
+        registerOAuthProvider({ ...provider(), isEnabled: () => false });
+        const spies = (['debug', 'info', 'warn', 'error', 'fatal'] as const)
+            .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
+        const start = (path: string) => app.request(path, { headers: { 'x-forwarded-for': clientIp() } });
+        let redirects: (string | null)[] = [];
+        let refused: boolean[] = [];
+        let calls: unknown[][][] = [];
+
+        const lines = await levelLinesDuring(async () =>
+        {
+            const answers = [await start('/_auth/oauth/superself?state=s'), await start('/_auth/oauth/google?state=s')];
+
+            refused = [
+                (await start('/_auth/oauth/capabilitySecret123?state=s')).headers.has('location'),
+                (await start('/_auth/oauth/capabilitySecret123/callback?error=x')).headers.has('location'),
+            ];
+            redirects = answers.map(answer => new URL(answer.headers.get('location')!, 'https://app.example').searchParams.get('reason'));
+            calls = spies.map(spy => [...spy.mock.calls]);
+        }).finally(() =>
+        {
+            spies.forEach(spy => spy.mockRestore());
+            registerOAuthProvider(provider());
+        });
+
+        expect(redirects).toEqual(['failed', 'failed']);
+        // A segment that names no provider is refused by the route's param schema: no handler runs, nothing redirects
+        expect(refused).toEqual([false, false]);
+        expect(calls[2]!.filter(([message]) => message === 'OAuth provider is not configured')).toEqual([
+            ['OAuth provider is not configured', { provider: 'superself' }],
+            ['OAuth provider is not configured', { provider: 'google' }],
+        ]);
+        // Core's rate limiter names every request's path at debug; no line at warn or above carries the segment
+        expect(JSON.stringify(calls.slice(2))).not.toContain('capabilitySecret123');
+        expect([...lines.error, ...lines.warn].join('\n')).not.toContain('capabilitySecret123');
+    });
+
     it('R6c: a provider error shaped like a typed one (numeric statusCode, toJSON) redirects with the fixed text, not its own (#382)', async () =>
     {
         seams.callbackFailure = () => Object.assign(new Error('invalid_grant: refresh token of tenant internal-42 revoked'), {
@@ -630,9 +692,9 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
         expect(buildOAuthErrorUrl('expired')).toBe(expected);
     });
 
-    it('O6 (#489): the app\'s refusal code takes {code}, else is appended after reason; without one {code} is emptied and nothing appended', () =>
+    it('O6 (#489): the app\'s refusal code takes {refusalCode}, else is appended after reason as refusalCode; without one {refusalCode} is emptied and nothing appended', () =>
     {
-        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?r={reason}&c={code}#top');
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?r={reason}&c={refusalCode}#top');
         const placed = buildOAuthErrorUrl('sign_in_refused', 'LOCKED');
         const emptied = buildOAuthErrorUrl('failed');
 
@@ -641,7 +703,28 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
         const none = buildOAuthErrorUrl('failed');
 
         expect([placed, emptied]).toEqual(['/auth/error?r=sign_in_refused&c=LOCKED#top', '/auth/error?r=failed&c=#top']);
-        expect([appended, none]).toEqual(['/auth/error?reason=sign_in_refused&code=LOCKED#top', '/auth/error?reason=failed#top']);
+        expect([appended, none]).toEqual(['/auth/error?reason=sign_in_refused&refusalCode=LOCKED#top', '/auth/error?reason=failed#top']);
+    });
+
+    it('O7 (#489): the template main documented, /auth/error?error={error}&code={reason}, on sign_in_refused — one code, the reason, and one refusalCode', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}&code={reason}');
+        const params = new URL(buildOAuthErrorUrl('sign_in_refused', 'LOCKED'), 'https://app.example').searchParams;
+
+        expect([params.getAll('code'), params.getAll('refusalCode')]).toEqual([['sign_in_refused'], ['LOCKED']]);
+    });
+
+    it('O8 (#489): a refusal whose code is outside the shape — the reason and its sentence, no refusal code, nothing of the code or the message', async () =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}');
+        let url = '';
+
+        await levelLinesDuring(async () =>
+        {
+            url = oauthFailureUrl(new SignInRefusedError({ message: 'Call us at 555', details: { code: 'x&reason=cancelled' } }), 'OAuth callback failed');
+        });
+
+        expect(url).toBe('/auth/error?error=Sign-in%20refused&reason=sign_in_refused');
     });
 });
 
@@ -763,10 +846,20 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
 
     it('O4 (page): the app\'s refusal code beside sign_in_refused reaches onError; a forged one, or one beside another reason, does not', () =>
     {
-        expect(readCallbackInput('?error=x&reason=sign_in_refused&code=LOCKED'))
-            .toEqual({ kind: 'error', message: 'Sign-in refused', reason: 'sign_in_refused', code: 'LOCKED' });
-        expect(readCallbackInput('?error=x&reason=sign_in_refused&code=%3Cb%3ECall+us%3C%2Fb%3E')).not.toHaveProperty('code');
-        expect(readCallbackInput('?error=x&reason=cancelled&code=LOCKED')).not.toHaveProperty('code');
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=LOCKED'))
+            .toEqual({ kind: 'error', message: 'Sign-in refused', reason: 'sign_in_refused', refusalCode: 'LOCKED' });
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=%3Cb%3ECall+us%3C%2Fb%3E')).not.toHaveProperty('refusalCode');
+        expect(readCallbackInput('?error=x&reason=cancelled&refusalCode=LOCKED')).not.toHaveProperty('refusalCode');
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&code=LOCKED')).not.toHaveProperty('refusalCode');
+    });
+
+    it('O11 (#489): onError and errorComponent are handed the reason\'s sentence, the reason and the refusal code', async () =>
+    {
+        const refused = await outcomeFor('?error=x&reason=sign_in_refused&refusalCode=LOCKED');
+        const cancelled = await outcomeFor('?error=Call+us&reason=cancelled');
+
+        expect(refused.kind === 'error' && oauthCallbackErrorArguments(refused)).toEqual(['Sign-in refused', 'sign_in_refused', 'LOCKED']);
+        expect(cancelled.kind === 'error' && oauthCallbackErrorArguments(cancelled)).toEqual([CANCELLED, 'cancelled', undefined]);
     });
 
     /** The finalize a callback page posts, through the proxy rules, answered by the real route. */

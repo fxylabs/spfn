@@ -22,7 +22,7 @@ import {
     OAUTH_ERROR_MESSAGES,
     callbackQueryReason,
     isOAuthErrorReason,
-    oauthErrorCode,
+    oauthRefusalCode,
     type OAuthErrorReason,
 } from '../../lib/oauth-error-reason';
 
@@ -37,15 +37,18 @@ export const DEFAULT_MFA_CONFIRM_PATH = '/auth/mfa';
  * `expired`, `invalid_state` or `no_cookie` (#129) for the finalize refusals the
  * proxy names, and `failed` for anything else — so an app page can branch on it.
  * `message` is the fixed sentence for that reason, never text off the URL or a
- * server body (#489). `code` is the app's `signIn.admit` refusal code, present
- * only on `sign_in_refused` when the query carried one in its shape.
+ * server body (#489). `refusalCode` is the app's `signIn.admit` refusal code,
+ * present only on `sign_in_refused` when the query carried one in its shape.
  */
 export type CallbackOutcome =
     | { kind: 'navigate'; to: string; userId?: string }
     | OAuthCallbackError;
 
 /** A failed callback: the reason, its fixed sentence, and the app's refusal code when there is one. */
-type OAuthCallbackError = { kind: 'error'; message: string; reason: OAuthErrorReason; code?: string };
+type OAuthCallbackError = { kind: 'error'; message: string; reason: OAuthErrorReason; refusalCode?: string };
+
+/** What `OAuthCallback`'s `onError` and `errorComponent` are called with. */
+export type OAuthCallbackErrorArguments = [message: string, reason: OAuthErrorReason, refusalCode: string | undefined];
 
 type CallbackInput =
     | OAuthCallbackError
@@ -66,10 +69,20 @@ export interface CallbackOptions
     fetch: typeof fetch;
 }
 
-/** The error outcome for `reason`: its fixed sentence, and the code when one was carried. */
-function callbackError(reason: OAuthErrorReason, code?: string): OAuthCallbackError
+/** The error outcome for `reason`: its fixed sentence, and the refusal code when one was carried. */
+function callbackError(reason: OAuthErrorReason, refusalCode?: string): OAuthCallbackError
 {
-    return { kind: 'error', message: OAUTH_ERROR_MESSAGES[reason], reason, ...(code === undefined ? {} : { code }) };
+    return { kind: 'error', message: OAUTH_ERROR_MESSAGES[reason], reason, ...(refusalCode === undefined ? {} : { refusalCode }) };
+}
+
+/**
+ * What `OAuthCallback` hands `onError` and `errorComponent` for an error
+ * outcome, both from here so the two cannot drift: the reason's sentence, the
+ * reason, and the app's refusal code when there is one (#489).
+ */
+export function oauthCallbackErrorArguments(outcome: OAuthCallbackError): OAuthCallbackErrorArguments
+{
+    return [outcome.message, outcome.reason, outcome.refusalCode];
 }
 
 /**
@@ -93,7 +106,7 @@ export function readCallbackInput(search: string): CallbackInput
     {
         const reason = callbackQueryReason(params.get('reason'), error);
 
-        return callbackError(reason, oauthErrorCode(reason, params.get('code')));
+        return callbackError(reason, oauthRefusalCode(reason, params.get('refusalCode')));
     }
 
     if (mfaChallenge)

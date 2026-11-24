@@ -32,10 +32,10 @@ import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import {
     OAUTH_ERROR_MESSAGES,
-    oauthErrorCode,
+    oauthRefusalCode,
     providerErrorReason,
-    withOAuthErrorCode,
     withOAuthErrorReason,
+    withOAuthRefusalCode,
     type OAuthErrorReason,
 } from '../../lib/oauth-error-reason';
 import { timingSafeEqualString } from '../lib/csrf';
@@ -1094,19 +1094,20 @@ function buildRedirectUrl(
  * OAuth 에러 리다이렉트 URL 생성
  *
  * `SPFN_AUTH_OAUTH_ERROR_URL` is a template: `{reason}` takes the code (#126),
- * `{error}` the fixed sentence for it (`OAUTH_ERROR_MESSAGES`), and `{code}` the
- * application's refusal code on `sign_in_refused` (#489). A template without
- * `{reason}` gets it as a query parameter, and `code` the same way when there
- * is one. `code` is kept only beside `sign_in_refused` and in the shape
- * `signIn.admit` must answer (`oauthErrorCode`). The redirect carries no text a
- * provider, a request or the application wrote.
+ * `{error}` the fixed sentence for it (`OAUTH_ERROR_MESSAGES`), and
+ * `{refusalCode}` the application's refusal code on `sign_in_refused` (#489). A
+ * template without `{reason}` gets it as a query parameter, and `refusalCode`
+ * the same way when there is one. The refusal code is kept only beside
+ * `sign_in_refused` and in the shape `signIn.admit` must answer
+ * (`oauthRefusalCode`). The redirect carries no text a provider, a request or
+ * the application wrote.
  */
-export function buildOAuthErrorUrl(reason: OAuthErrorReason, code?: unknown): string
+export function buildOAuthErrorUrl(reason: OAuthErrorReason, refusalCode?: unknown): string
 {
     const errorUrl = env.SPFN_AUTH_OAUTH_ERROR_URL || '/auth/error?error={error}';
     const withError = errorUrl.replace('{error}', encodeURIComponent(OAUTH_ERROR_MESSAGES[reason]));
 
-    return withOAuthErrorCode(withOAuthErrorReason(withError, reason), oauthErrorCode(reason, code));
+    return withOAuthRefusalCode(withOAuthErrorReason(withError, reason), oauthRefusalCode(reason, refusalCode));
 }
 
 /**
@@ -1125,15 +1126,17 @@ const REGISTERED_PROVIDER_ERRORS = new Set([
 ]);
 
 /**
- * The error page for a provider's own `error=` on the callback (#489).
+ * The reason for a provider's own `error=` on a callback, a sign-in's or a
+ * link's (#489): `cancelled` or `provider_error`.
  *
  * A `provider_error` leaves the operator one warn line naming the provider's
- * code when it is a registered one and `unrecognised` otherwise. The callback is
- * unauthenticated and reached before any state check, so nothing else of the
- * query is read: `error_description` is text for the client's developer that
- * anyone can write, and reaches neither the log nor the page.
+ * code when it is a registered one and `unrecognised` otherwise: the redirect,
+ * a sign-in's error page or a link's outcome, carries only the reason. The
+ * callback is unauthenticated and reached before any state check, so nothing
+ * else of the query is read: `error_description` is text for the client's
+ * developer that anyone can write, and reaches neither the log nor the page.
  */
-export function providerErrorUrl(provider: SocialProvider, error: string): string
+export function providerCallbackErrorReason(provider: SocialProvider, error: string): 'cancelled' | 'provider_error'
 {
     const reason = providerErrorReason(error);
 
@@ -1146,7 +1149,22 @@ export function providerErrorUrl(provider: SocialProvider, error: string): strin
         });
     }
 
-    return buildOAuthErrorUrl(reason);
+    return reason;
+}
+
+/**
+ * The error page for a sign-in start whose provider is not configured (#489).
+ *
+ * The redirect carries `failed` only, so the operator's warn line is where the
+ * provider is named. The caller passes a name the route fixes or the registry
+ * holds, never a path segment: one no provider is registered under is the
+ * caller's text, and is not logged.
+ */
+export function providerNotConfiguredUrl(provider: SocialProvider): string
+{
+    authLogger.service.warn('OAuth provider is not configured', { provider });
+
+    return buildOAuthErrorUrl('failed');
 }
 
 /** Error classes the callback names a reason for; anything else is `failed`. */

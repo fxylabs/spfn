@@ -914,7 +914,7 @@ export const authEnvSchema = defineEnvSchema({
 
     SPFN_AUTH_OAUTH_ERROR_URL: {
         ...envString({
-            description: 'URL to redirect after OAuth error. Placeholders: {reason} the reason code (appended as reason= when absent), {error} the fixed sentence for that reason, {code} the app\'s signIn.admit refusal code on sign_in_refused (appended as code= when absent). Never carries provider or request text.',
+            description: 'URL to redirect after OAuth error. Placeholders: {reason} the reason code (appended as reason= when absent), {error} the fixed sentence for that reason, {refusalCode} the app\'s signIn.admit refusal code on sign_in_refused (appended as refusalCode= when absent). Never carries provider or request text.',
             required: false,
             default: '/auth/error?error={error}',
             examples: [
