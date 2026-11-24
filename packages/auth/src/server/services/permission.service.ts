@@ -39,14 +39,15 @@
  */
 
 import { getTransaction, runInTransaction } from '@spfn/core/db';
-import { ConflictError, ForbiddenError, NotFoundError, type SerializedError } from '@spfn/core/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, type SerializedError } from '@spfn/core/errors';
 import { AuthorityContendedError } from '@spfn/auth/errors';
 
-import { permissionsRepository, rolePermissionsRepository, rolesRepository, userPermissionsRepository, usersRepository } from '../repositories';
+import { permissionsRepository, rolesRepository, userPermissionsRepository, usersRepository } from '../repositories';
 import type { AuthorityRead, GrantExpiry, PermissionSummary, StoredRole } from '../repositories/users.repository';
+import type { StoredRoleWithPermissions } from '../repositories/roles.repository';
 import type { Role } from '../entities/roles';
 import { BUILTIN_ROLES } from '../rbac/builtin';
-import { resolveRoleInForce } from './role-email-domain.service';
+import { fallbackRoleFor, roleInForceWith } from './role-email-domain.service';
 import { updateUserService } from './user.service';
 
 /** A role as an authority names it. */
@@ -75,9 +76,11 @@ const NO_AUTHORITY: Authority = { role: null, priority: null, permissions: [], e
  * The authority a person holds now.
  *
  * One read of the primary (`findAuthorityOnPrimary`), and a second only when
- * the email-domain policy resolves the account as another role than it stores:
+ * the email-domain policy resolves the account as another role than it stores.
+ * The rule is `authorityFrom`'s, which `resolveAuthorities` applies to many
+ * accounts:
  *
- * - the role is the role in force (`resolveRoleInForce`): a deactivated role is
+ * - the role is the role in force (`roleInForceWith`): a deactivated role is
  *   no role — no name, no priority, no permissions;
  * - permissions = the active permissions of that role + the person's own
  *   grants that are of an active permission and unexpired − their own
@@ -87,19 +90,81 @@ const NO_AUTHORITY: Authority = { role: null, priority: null, permissions: [], e
  *   confers nothing through what they issued.
  *
  * @param userId - User ID (string, number, or bigint)
+ * @throws BadRequestError naming the id, before any read, when it is not a
+ *   user id (`userIdOf`)
  */
 export async function resolveAuthority(userId: string | number | bigint): Promise<Authority>
 {
-    const read = await usersRepository.findAuthorityOnPrimary(Number(userId));
+    const read = await usersRepository.findAuthorityOnPrimary(userIdOf(userId));
 
-    if (read === null || read.user.status !== 'active')
+    return authorityFrom(read, await fallbackRoleFor([read].filter(holdsAuthority)));
+}
+
+/**
+ * The authority each of many people holds now — `resolveAuthority` for every
+ * id, in at most two statements whatever their number: one read of the
+ * primary for every account (`findAuthoritiesOnPrimary`), and one more only
+ * when the email-domain policy resolves any of them as another role than it
+ * stores.
+ *
+ * @param userIds - User IDs (string, number, or bigint); repeats are allowed
+ * @returns every id asked for, keyed by its number — one with no user, or
+ *   whose account is not active, holds no authority
+ * @throws BadRequestError naming the first id that is not a user id
+ *   (`userIdOf`), before any read: one such id refuses the whole list
+ */
+export async function resolveAuthorities(userIds: ReadonlyArray<string | number | bigint>): Promise<ReadonlyMap<number, Authority>>
+{
+    const ids = [...new Set(userIds.map(userIdOf))];
+    const reads = new Map((await usersRepository.findAuthoritiesOnPrimary(ids)).map(read => [read.user.id, read]));
+    const fallback = await fallbackRoleFor([...reads.values()].filter(holdsAuthority));
+
+    return new Map(ids.map(id => [id, authorityFrom(reads.get(id) ?? null, fallback)]));
+}
+
+/**
+ * The number a user id names, the same for every function that takes one,
+ * the single and the many-account reads alike, and before anything else reads
+ * it (`getAuthSessionService`) — a function that converted the id first would
+ * refuse the number it made, not the id it was given. Anything that does not
+ * convert to a safe integer is refused before the read: the database would
+ * fail the whole statement on `'abc'`, `NaN` or `1.5`, without saying which
+ * id, and an id beyond `Number.MAX_SAFE_INTEGER` cannot be held exactly — it
+ * would read, and key the answer as, another number than the one asked for.
+ * A safe integer with no user (`-1`, `0`) is a user id that holds nothing.
+ */
+export function userIdOf(userId: string | number | bigint): number
+{
+    const id = Number(userId);
+
+    if (!Number.isSafeInteger(id))
+    {
+        throw new BadRequestError({ message: `Not a user id: '${String(userId)}'` });
+    }
+
+    return id;
+}
+
+/** An account that holds authority: one that exists and is active. */
+function holdsAuthority(read: AuthorityRead | null): read is AuthorityRead
+{
+    return read !== null && read.user.status === 'active';
+}
+
+/**
+ * The rule for what a person may do now, decided on their authority read and
+ * the policy's fallback role (as `fallbackRoleFor` read it).
+ */
+function authorityFrom(read: AuthorityRead | null, fallback: StoredRoleWithPermissions | null): Authority
+{
+    if (!holdsAuthority(read))
     {
         return NO_AUTHORITY;
     }
 
-    const role = await resolveRoleInForce(read);
+    const role = roleInForceWith(read, fallback);
     const revoked = new Set(read.revokes);
-    const fromRole = await permissionsOfRole(role, read);
+    const fromRole = permissionsOfRole(role, read, fallback);
     const permissions = uniqueByName([...fromRole, ...read.grants])
         .filter(permission => !revoked.has(permission.name));
 
@@ -121,15 +186,15 @@ function expiringOnly(grantExpiries: GrantExpiry[], fromRole: PermissionSummary[
         .map(grant => [grant.permissionId, grant.expiresAt]));
 }
 
-/** The role's active permissions: read with the account, unless the policy put it in another role. */
-async function permissionsOfRole(role: StoredRole | null, read: AuthorityRead): Promise<PermissionSummary[]>
+/** The role's active permissions: read with the account, unless the policy put it in the fallback role. */
+function permissionsOfRole(role: StoredRole | null, read: AuthorityRead, fallback: StoredRoleWithPermissions | null): PermissionSummary[]
 {
     if (role === null)
     {
         return [];
     }
 
-    return role.id === read.role?.id ? read.rolePermissions : rolePermissionsRepository.findActivePermissionsOnPrimary(role.id);
+    return role === fallback ? fallback.permissions : read.rolePermissions;
 }
 
 function uniqueByName(permissions: PermissionSummary[]): PermissionSummary[]
@@ -154,6 +219,23 @@ async function permissionNamesOf(userId: string | number | bigint): Promise<stri
 export async function getUserPermissions(userId: string | number | bigint): Promise<string[]>
 {
     return permissionNamesOf(userId);
+}
+
+/**
+ * The names of the permissions each of many users holds now —
+ * `resolveAuthorities`' lists, keyed as it keys them.
+ *
+ * @example
+ * ```typescript
+ * const perms = await getUsersPermissions(accountIds);
+ * const canExport = accountIds.map(id => perms.get(Number(id))!.includes('report:export'));
+ * ```
+ */
+export async function getUsersPermissions(userIds: ReadonlyArray<string | number | bigint>): Promise<ReadonlyMap<number, string[]>>
+{
+    const authorities = await resolveAuthorities(userIds);
+
+    return new Map([...authorities].map(([id, authority]) => [id, authority.permissions.map(permission => permission.name)]));
 }
 
 /**
@@ -205,10 +287,11 @@ export async function getUserRole(userId: string | number | bigint): Promise<str
  * email-domain policy says
  *
  * @returns Stored role name or null if user has no role
+ * @throws BadRequestError naming the id when it is not a user id (`userIdOf`)
  */
 export async function getStoredUserRole(userId: string | number | bigint): Promise<string | null>
 {
-    return (await usersRepository.findByIdWithRole(Number(userId)))?.role?.name ?? null;
+    return (await usersRepository.findByIdWithRole(userIdOf(userId)))?.role?.name ?? null;
 }
 
 /**

@@ -561,7 +561,35 @@ export class UsersRepository extends AccountStateRepository
      */
     async findAuthorityOnPrimary(id: number): Promise<AuthorityRead | null>
     {
-        const result = await this.db
+        const [read] = await this.selectAuthorities(eq(users.id, id));
+
+        return read ?? null;
+    }
+
+    /**
+     * `findAuthorityOnPrimary` for many accounts, in one statement whatever
+     * their number: the ids travel as one array parameter (`= any($1)`), not
+     * one parameter each as `in (...)` would, so the protocol's 65 535
+     * parameters a statement do not bound the list.
+     *
+     * An empty list is answered without a statement.
+     *
+     * @returns one read per existing user, in no particular order; an id with
+     *   no user has none
+     */
+    async findAuthoritiesOnPrimary(ids: readonly number[]): Promise<AuthorityRead[]>
+    {
+        if (ids.length === 0)
+        {
+            return [];
+        }
+
+        return this.selectAuthorities(sql`${users.id} = any(${sql.param(ids)}::bigint[])`);
+    }
+
+    private async selectAuthorities(where: SQL): Promise<AuthorityRead[]>
+    {
+        const rows = await this.db
             .select({
                 user: users,
                 ...ROLE_COLUMNS,
@@ -572,21 +600,16 @@ export class UsersRepository extends AccountStateRepository
             })
             .from(users)
             .leftJoin(roles, eq(users.roleId, roles.id))
-            .where(eq(users.id, id))
-            .limit(1);
+            .where(where);
 
-        const row = result[0];
-
-        return row
-            ? {
-                user: row.user,
-                role: storedRole(row),
-                rolePermissions: row.rolePermissions.map(toPermissionSummary),
-                grants: row.grants.map(toPermissionSummary),
-                grantExpiries: row.grantExpiries.map(grant => ({ permissionId: Number(grant.permissionId), expiresAt: new Date(grant.expiresAt) })),
-                revokes: row.revokes,
-            }
-            : null;
+        return rows.map(row => ({
+            user: row.user,
+            role: storedRole(row),
+            rolePermissions: row.rolePermissions.map(toPermissionSummary),
+            grants: row.grants.map(toPermissionSummary),
+            grantExpiries: row.grantExpiries.map(grant => ({ permissionId: Number(grant.permissionId), expiresAt: new Date(grant.expiresAt) })),
+            revokes: row.revokes,
+        }));
     }
 
     /**

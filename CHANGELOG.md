@@ -76,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same body after the schema's, so the two failures cannot read differently. `validateField`
   builds its message with it; nothing it answers changes. `@spfn/auth`'s password rule (#458)
   refuses with it.
+- **@spfn/auth: many users' authority in one read — `resolveAuthorities(userIds)` (#479).** Every
+  authority read took one user (`usersRepository.findAuthorityOnPrimary(id)`, one statement each),
+  so a page listing accounts with a permission flag ran 1 + N statements, or read the package's
+  tables and copied its rule. `resolveAuthorities(userIds)` answers `resolveAuthority` for every id
+  in at most two statements whatever their number: one read of the primary for all the accounts
+  (`= any($1)`, the ids as one array parameter, so no limit on the list but the database's), and one
+  more only when the email-domain policy resolves any of them as `user`; an empty list sends
+  none. Both decide through the same
+  function, so the rule exists once. It answers a `ReadonlyMap<number, Authority>` holding every id
+  asked for, keyed by its number; repeats are allowed, and an id with no user or an account that is
+  not active holds no authority. `getUsersPermissions(userIds)` answers the permission names, keyed
+  the same way. New exports from `@spfn/auth/server`: `resolveAuthorities`, `getUsersPermissions`,
+  `usersRepository.findAuthoritiesOnPrimary(ids)`,
+  `rolesRepository.findByNameWithActivePermissionsOnPrimary(name)` and the type
+  `StoredRoleWithPermissions`. `resolveAuthority` now reads the policy's fallback role and its
+  permissions in one statement instead of two; what it answers is unchanged. An id that is not a
+  safe integer is refused (see Changed).
 - **@spfn/auth: `listPasskeys` answers each passkey's `aaguid` (#470).** The `passkeys` table kept
   the AAGUID an authenticator reports at registration, but `PasskeySummary` left it out, so an app
   could not say where a passkey is kept ("iCloud Keychain", "Google Password Manager", a security
@@ -550,6 +567,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard that does nothing, a wrong password sent six statements more for an account than for an
   unknown identifier, two of them row locks; both now send the same ones. `user: null` still names no
   account; your `admit` and `settled` doing different work for it is yours to equalise (README).
+- **BREAKING: @spfn/auth: a user id that is not a safe integer is refused with `400
+  BadRequestError` naming it, before any read (#479).** On `main` an unsafe integer (`2 ** 53 + 2`,
+  `9007199254740993n`, `'9007199254740993'`) was read as the nearest double — another number than
+  the one asked for — and answered as that account, usually `NO_AUTHORITY` or `null`; a value that
+  is not an integer at all (`'abc'`, `NaN`, `1.5`) failed with a `DrizzleQueryError` naming no id.
+  Both now throw `BadRequestError` (`Not a user id: '<the id as given>'`) before any statement; a
+  safe integer with no user (`0`, `-1`) still holds nothing. The refusal reaches every public
+  function of `@spfn/auth/server` that takes a user id into an authority read:
+  - the id read: `resolveAuthority`, `resolveAuthorities` (new; one bad id refuses the whole list),
+    `getStoredUserRole`, and `getAuthSessionService` — which on `main` never answered for a bad id
+    either: an unsafe integer gave `404 NotFoundError` (`User not found`) and a non-integer the
+    `DrizzleQueryError`, so for it only the error changes;
+  - through `resolveAuthority`: `getUserPermissions`, `getUsersPermissions` (new), `hasPermission`,
+    `hasAnyPermission`, `hasAllPermissions`, `getUserRole`, `hasRole`, `hasAnyRole`;
+  - the caller's id, typed `number`, so only for `NaN`, a fraction or an unsafe integer, where
+    `main` judged the caller as one holding no authority or failed the query:
+    `roleChangeRefusal`, `assertCanChangeRole`, `assertCanChangeAuthority`, `changeUserRole`,
+    `grantUserPermission`, `revokeUserPermission`, `createRole`, `updateRole`, `deleteRole`,
+    `addPermissionToRole`, `removePermissionFromRole`, `setRolePermissions`, `createInvitation`
+    (`invitedBy`), `cancelInvitation`, `resendInvitation` and `issueOpsTokenService`
+    (`issuer.userId`).
+
+  The routes pass the authenticated principal's id, always a safe integer, so no route answers
+  differently. Code that passes ids from outside gets the 400 where it caught a query error, and
+  where it read `NO_AUTHORITY` or `null` for an unsafe integer.
+- **BREAKING (log consumers): @spfn/auth: the email-domain policy's warning is one line a call,
+  naming every account it covers (#479).** `Stored role not applied: …` was logged once for each
+  account resolved, with `{ reason, userId, storedRole }`. It is now logged once for each call
+  that resolves accounts — the admission, `resolveAuthority`, `resolveAuthorities`,
+  `findUserWithEffectiveRole` — as `Stored role not applied: accounts outside the email-domain
+  policy for it`, with `{ reason: 'role_email_domain_policy', count, storedRoles, userIds }`:
+  `userIds` the accounts the policy refused their stored role in that call — the one account of a
+  single read, every one of a list, with no cap — `count` their number and `storedRoles` the
+  distinct roles refused them. `resolveAuthority` and `resolveAuthorities` leave out an account that
+  is not active, which holds nothing either way. A log query on `userId` or `storedRole` matches
+  nothing now; `userIds` and `storedRoles` hold the same values. Never an email.
 - **BREAKING (clients reading `fields[].value`; security-relevant): @spfn/core: the framework's
   validation errors name the field and the rule, and no longer the value (#467).** Every TypeBox
   failure in path parameters, query, headers, cookies, body or form data answered with the submitted

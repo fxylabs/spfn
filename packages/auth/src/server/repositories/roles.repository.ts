@@ -7,6 +7,8 @@
 
 import { NewRoleEntity, roles, type Role } from '../entities/roles';
 import { users } from '../entities/users';
+import { permissions } from '../entities/permissions';
+import { rolePermissions } from '../entities/role-permissions';
 import { userInvitations } from '../entities/user-invitations';
 import { claimableAt } from './invitations.repository';
 import { CONFIG_OWNED, OPERATOR_OWNED } from '../entities/ownership';
@@ -15,6 +17,13 @@ import { and, asc, count, eq, inArray, not, notInArray, sql, type SQL } from 'dr
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { isLockTimeout } from '../lib/lock-timeout';
 import { RbacSyncBusyError } from '@spfn/auth/errors';
+import type { PermissionSummary, StoredRole } from './users.repository';
+
+/** A role as an authority read loads it, with the active permissions mapped to it. */
+export interface StoredRoleWithPermissions extends StoredRole
+{
+    permissions: PermissionSummary[];
+}
 
 /** A role as the configuration declares it: every field `upsertDeclared` makes equal to it. */
 export type DeclaredRole = Pick<NewRoleEntity, 'name' | 'displayName' | 'description' | 'priority' | 'isSystem' | 'isBuiltin'>;
@@ -226,6 +235,33 @@ export class RolesRepository extends BaseRepository
             .limit(1);
 
         return result[0] ?? null;
+    }
+
+    /**
+     * A role by name with its active permissions, on the primary, in one
+     * statement — for the role the email-domain policy resolves an account as
+     * when it refuses the one the account stores.
+     *
+     * @returns null when no role has the name
+     */
+    async findByNameWithActivePermissionsOnPrimary(name: string): Promise<StoredRoleWithPermissions | null>
+    {
+        const rows = await this.db
+            .select({
+                role: { id: roles.id, name: roles.name, displayName: roles.displayName, priority: roles.priority, isActive: roles.isActive },
+                permission: { id: permissions.id, name: permissions.name, displayName: permissions.displayName, category: permissions.category },
+            })
+            .from(roles)
+            .leftJoin(rolePermissions, eq(rolePermissions.roleId, roles.id))
+            .leftJoin(permissions, and(eq(permissions.id, rolePermissions.permissionId), eq(permissions.isActive, true)))
+            .where(eq(roles.name, name));
+
+        return rows.length === 0
+            ? null
+            : {
+                ...rows[0].role,
+                permissions: rows.flatMap(({ permission }) => permission ? [{ ...permission, category: permission.category ?? undefined }] : []),
+            };
     }
 
     /**

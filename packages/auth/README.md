@@ -6156,7 +6156,8 @@ createAuthLifecycle({
 Programmatic checks (server): `resolveAuthority(userId)` — `{ role, priority, permissions, expiringPermissions }`, the
 one answer every check below and `GET /_auth/session` read — and `hasPermission`,
 `hasAnyPermission`, `hasAllPermissions`, `hasRole`, `hasAnyRole`, `getUserRole`,
-`getUserPermissions` over it; `getStoredUserRole`. Runtime authority admin — each takes the
+`getUserPermissions` over it; `getStoredUserRole`. For many users at once, `resolveAuthorities(userIds)`
+and `getUsersPermissions(userIds)` (see *Many users at once* below). Runtime authority admin — each takes the
 caller's user id first and holds them to the rule below: `createRole`, `updateRole`,
 `deleteRole`, `setRolePermissions`, `addPermissionToRole`, `removePermissionFromRole`,
 `changeUserRole`, `grantUserPermission`, `revokeUserPermission`; and `getAllRoles`,
@@ -6168,6 +6169,46 @@ caller's user id first and holds them to the rule below: `createRole`, `updateRo
   Permissions = the active permissions of that role + the person's own grants of active
   permissions that have not expired − their own revocations that have not expired. An account
   that is not active holds nothing. Read on the primary.
+- **Many users at once.** `resolveAuthorities(userIds)` answers `resolveAuthority` for each id, by
+  the same rule, in at most two statements whatever the number of ids: one read of every account,
+  and one of the `user` role when the email-domain policy puts any of them in it; an empty list
+  sends none. It answers a
+  `ReadonlyMap<number, Authority>` with every id asked for, keyed by its number (`Number(id)` for a
+  string or bigint id); repeats are allowed, and an id with no user holds no authority, as does an
+  account that is not active. `getUsersPermissions(userIds)` answers the permission names the same
+  way — for a page that lists accounts with "holds permission X":
+
+  ```typescript
+  const held = await getUsersPermissions(accounts.map(account => account.id));
+  const rows = accounts.map(account => ({ ...account, canExport: held.get(account.id)!.includes('report:export') }));
+  ```
+
+  The ids travel as one array parameter, so the list is not bound by the 65 535 parameters a
+  statement may carry; a million ids are one statement. Read on the primary, like
+  `resolveAuthority`, so the two cannot answer differently for the same moment.
+
+  Memory grows with the accounts found, not with the ids asked for: each loads its `users` row,
+  its role's permissions, grants and revocations. Measured on 10 000 accounts in the built-in
+  `user` role with no grants, the answer held about 0.7 kB an account (7 MB), and the heap grew
+  about 2.8 kB an account (28 MB) during the read, before collection; a role with more
+  permissions, or more grants, costs more. The package sets no cap: bound the list as the page
+  that asks bounds what it shows.
+
+  An id is what `Number(id)` makes of it. One that is not a safe integer — `'abc'`, `NaN`, `1.5`,
+  `1e20`, a bigint beyond `Number.MAX_SAFE_INTEGER` — is refused before any read with
+  `400 BadRequestError` naming it as given; in a list, it refuses the whole list. A safe integer
+  with no user holds no authority. **Breaking against earlier releases**, which read an unsafe
+  integer as another number (usually answering no authority or `null`) and failed on the rest with
+  a query error naming no id. The refusal reaches every function that reads authority for an id:
+  `resolveAuthority`, `resolveAuthorities`, `getStoredUserRole`, `getAuthSessionService`; through
+  `resolveAuthority`, `getUserPermissions`, `getUsersPermissions`, `hasPermission`,
+  `hasAnyPermission`, `hasAllPermissions`, `getUserRole`, `hasRole`, `hasAnyRole`; and, for the
+  caller's id (typed `number`, so `NaN`, a fraction or an unsafe integer), `roleChangeRefusal`,
+  `assertCanChangeRole`, `assertCanChangeAuthority`, `changeUserRole`, `grantUserPermission`,
+  `revokeUserPermission`, `createRole`, `updateRole`, `deleteRole`, `addPermissionToRole`,
+  `removePermissionFromRole`, `setRolePermissions`, `createInvitation`, `cancelInvitation`,
+  `resendInvitation` and `issueOpsTokenService`. The routes pass the authenticated principal's id,
+  always a safe integer.
 - **Who may change authority.** One rule: a caller changes only what ranks strictly below them,
   by `priority`, and confers only what they hold. Judged inside the transaction that writes the
   change, on the caller's authority as it is then.
@@ -6273,9 +6314,13 @@ SPFN_AUTH_ROLE_EMAIL_DOMAINS="admin=example.com;support=example.com,partner.exam
   the rule to the current row and the current configuration. An account outside it resolves as
   the built-in `user` role (`getAuth(c).role === 'user'`, the `user` role's permissions; direct
   user permission grants still apply), so it keeps signing in. One `warn` is logged per
-  resolution with `reason: 'role_email_domain_policy'`, the user id and the stored role — never
-  the email. `users.roleId` is not touched: reverting the configuration restores the role on
-  the next request. The check reads the row the request already loads; only a downgrade reads
+  resolution — per call of `resolveAuthorities`, however many accounts it refuses — with
+  `{ reason: 'role_email_domain_policy', count, storedRoles, userIds }`: `userIds` the accounts
+  the policy refused in that call (one for a single resolution, every one for a list, no cap),
+  `count` their number, `storedRoles` the roles refused them — never the email.
+  `resolveAuthority` and `resolveAuthorities` do not name an account that is not active, which
+  holds nothing either way. `users.roleId` is not touched: reverting the
+  configuration restores the role on the next request. The check reads the row the request already loads; only a downgrade reads
   the `user` role.
 - **Authority.** A caller is judged by the role in force; a **target** by the stored one, so
   an out-of-policy superadmin's row still only yields to someone who outranks superadmin — nobody.

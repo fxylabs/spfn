@@ -5,7 +5,7 @@
  * Returns minimal user info with role and permissions
  */
 import { usersRepository } from '../repositories';
-import { resolveAuthority } from './permission.service';
+import { resolveAuthority, userIdOf } from './permission.service';
 import { secondFactorEnrolmentFields } from './second-factor-policy.service';
 
 /**
@@ -25,6 +25,8 @@ import { secondFactorEnrolmentFields } from './second-factor-policy.service';
  *
  * @param userId - User ID (string, number, or bigint)
  * @returns Auth session data (minimal user info + role + permissions)
+ * @throws BadRequestError naming the id, before any read, when it is not a
+ *   user id (`userIdOf`)
  *
  * @example
  * ```typescript
@@ -36,7 +38,7 @@ import { secondFactorEnrolmentFields } from './second-factor-policy.service';
  */
 export async function getAuthSessionService(userId: string | number | bigint)
 {
-    const userIdNum = Number(userId);
+    const userIdNum = userIdOf(userId);
 
     const [user, authority] = await Promise.all([
         usersRepository.fetchMinimalUserData(userIdNum),

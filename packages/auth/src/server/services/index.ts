@@ -252,6 +252,7 @@ export type { EmailNormalizationResult } from './email-normalization.service';
 // Permission Service
 export {
     getUserPermissions,
+    getUsersPermissions,
     hasPermission,
     hasAnyPermission,
     hasAllPermissions,
@@ -260,6 +261,7 @@ export {
     hasRole,
     hasAnyRole,
     resolveAuthority,
+    resolveAuthorities,
     roleChangeRefusal,
     assertCanChangeRole,
     assertCanChangeAuthority,

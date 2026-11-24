@@ -16,6 +16,7 @@
 import { authLogger } from '../logger';
 import { rolesRepository, usersRepository } from '../repositories';
 import type { StoredRole, UserWithStoredRole } from '../repositories/users.repository';
+import type { StoredRoleWithPermissions } from '../repositories/roles.repository';
 import {
     getRoleEmailDomainPolicy,
     isEmailAllowedForRole,
@@ -37,13 +38,6 @@ export interface RoleEmailDomainViolation
     userId: number;
     roleName: string;
     reason: RoleEmailDomainViolationReason;
-}
-
-async function fallbackRole(): Promise<StoredRole | null>
-{
-    const role = await rolesRepository.findByNameOnPrimary(FALLBACK_ROLE);
-
-    return role && { id: role.id, name: role.name, displayName: role.displayName, priority: role.priority, isActive: role.isActive };
 }
 
 /**
@@ -75,40 +69,78 @@ async function withRoleInForce(result: UserWithStoredRole | null): Promise<UserW
 }
 
 /**
- * The role a loaded account holds now — the one place that is decided. The
- * admission resolves its principal's role here, on the row its own read
- * loaded, and `resolveAuthority` the role whose permissions apply, so a role
- * check and a permission check cannot disagree on it.
+ * The role a loaded account holds now — the one place that is decided
+ * (`roleInForceWith`), reading the policy's fallback role only when the rule
+ * needs it. The admission resolves its principal's role here, on the row its
+ * own read loaded, and `resolveAuthority` the role whose permissions apply, so
+ * a role check and a permission check cannot disagree on it.
+ *
+ * Check time never writes: `users.roleId` keeps the stored role either way.
+ */
+export async function resolveRoleInForce(account: UserWithStoredRole): Promise<StoredRole | null>
+{
+    const role = roleInForceWith(account, await fallbackRoleFor([account]));
+
+    return role && { id: role.id, name: role.name, displayName: role.displayName, priority: role.priority, isActive: role.isActive };
+}
+
+/**
+ * The policy's fallback role (`FALLBACK_ROLE`) with its active permissions,
+ * for loaded accounts whose role is about to be resolved — read once, and only
+ * when the policy refuses one of them the active role it stores. The one way
+ * the single and the many-account reads reach it, so the two log alike: one
+ * warning a call, naming the accounts refused in it by id, with their number
+ * and the stored roles refused them — never an email. An operator who finds an
+ * account refused at sign-in finds it here by its id, whether the call read
+ * one account or many.
+ *
+ * @returns null when the policy refuses none of them, or the role is missing
+ */
+export async function fallbackRoleFor(accounts: readonly UserWithStoredRole[]): Promise<StoredRoleWithPermissions | null>
+{
+    const refused = accounts.filter(needsFallbackRole);
+
+    if (refused.length === 0)
+    {
+        return null;
+    }
+
+    authLogger.service.warn('Stored role not applied: accounts outside the email-domain policy for it', {
+        reason: 'role_email_domain_policy',
+        count: refused.length,
+        storedRoles: [...new Set(refused.map(account => account.role!.name))],
+        userIds: refused.map(account => account.user.id),
+    });
+
+    return rolesRepository.findByNameWithActivePermissionsOnPrimary(FALLBACK_ROLE);
+}
+
+/**
+ * Whether the policy refuses a loaded account the active role it stores — the
+ * one case `roleInForceWith` answers with the fallback role. Decided on the row
+ * already loaded, so an account inside the policy costs no query.
+ */
+function needsFallbackRole(account: UserWithStoredRole): boolean
+{
+    return account.role?.isActive === true && !isEmailAllowedForRole(account.user, account.role.name);
+}
+
+/**
+ * The rule for the role a loaded account holds now, given the fallback role
+ * as `fallbackRoleFor` read it for that account's call:
  *
  * - **A deactivated role is no role**: no name, no priority, no permissions.
  *   The account still signs in, as an account with no role, and reactivating
  *   the role restores it — nothing is written.
  * - **A role the email-domain policy refuses the account** resolves as the
  *   built-in `user` role (or none, should that role be missing or inactive).
- *   The rule is evaluated on the row already loaded, so an account inside the
- *   policy costs no query; only a downgrade reads the `user` role.
- *
- * Check time never writes: `users.roleId` keeps the stored role either way.
  */
-export async function resolveRoleInForce(account: UserWithStoredRole): Promise<StoredRole | null>
+export function roleInForceWith<Fallback extends StoredRole>(account: UserWithStoredRole, fallback: Fallback | null): StoredRole | Fallback | null
 {
-    if (!account.role?.isActive)
+    if (!needsFallbackRole(account))
     {
-        return null;
+        return account.role?.isActive ? account.role : null;
     }
-
-    if (isEmailAllowedForRole(account.user, account.role.name))
-    {
-        return account.role;
-    }
-
-    authLogger.service.warn('Stored role not applied: the account is outside the email-domain policy for it', {
-        reason: 'role_email_domain_policy',
-        userId: account.user.id,
-        storedRole: account.role.name,
-    });
-
-    const fallback = await fallbackRole();
 
     return fallback?.isActive ? fallback : null;
 }

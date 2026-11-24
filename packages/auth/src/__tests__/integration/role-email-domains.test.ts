@@ -480,7 +480,7 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
                 expect(after.updatedAt).toEqual(before.updatedAt);
             });
 
-            it('logs one warn per downgrade with the reason, user id and stored role — never the email', async () =>
+            it('logs one warn per downgrade with the reason, the count, the stored role and the account — never the email', async () =>
             {
                 const warn = vi.spyOn(authLogger.service, 'warn');
 
@@ -489,8 +489,9 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
                 expect(warn).toHaveBeenCalledTimes(1);
                 expect(warn.mock.calls[0][1]).toEqual({
                     reason: 'role_email_domain_policy',
-                    userId: admin.id,
-                    storedRole: 'admin',
+                    count: 1,
+                    storedRoles: ['admin'],
+                    userIds: [admin.id],
                 });
                 expect(JSON.stringify(warn.mock.calls)).not.toContain('gmail.test');
             });
@@ -516,7 +517,8 @@ describe.skipIf(!dbAvailable)('Per-role email-domain policy', () =>
 
             const onPrimary = await findUserWithEffectiveRoleOnPrimary(admin.id);
 
-            expect(onPrimary?.role?.name).toBe('user');
+            // The role as it is stored, and nothing the authority read loads with it.
+            expect(onPrimary?.role).toEqual({ id: await roleId('user'), name: 'user', displayName: expect.any(String), priority: expect.any(Number), isActive: true });
             expect(onPrimary).toEqual(await findUserWithEffectiveRole(admin.id));
             expect(await storedRoleOf(admin.id)).toBe(await roleId('admin'));
         });
