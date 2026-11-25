@@ -710,10 +710,11 @@ tokens before it reaches a log line or `history.error_message`, at the channel's
 provider boundary — so a custom provider (see [Custom Providers](#custom-providers))
 is covered without doing anything — and again in the service that writes the
 column. A provider that **throws** its failure instead of returning it is answered the same way at
-that boundary, for single and bulk sends alike: its message is scrubbed, the channel writes its
-masked `Email send failed` / `SMS send failed` line, the history row closes as `failed` with the
-scrubbed text, and the send resolves with `{ success: false, error }` — the thrown value itself
-(whose stack repeats the raw message) goes no further. Only address-shaped tokens are replaced: the error *name* (`MessageRejected`),
+that boundary, for single and bulk sends alike, in every channel: its message is scrubbed, the
+channel writes its masked `Email send failed` / `SMS send failed` line — Slack's `Slack send failed`
+line carries no recipient to mask — the history row closes as `failed` with the scrubbed text, and
+the send resolves with `{ success: false, error }` — the thrown value itself (whose stack repeats
+the raw message) goes no further. Only address-shaped tokens are replaced: the error *name* (`MessageRejected`),
 the region, the request id, timestamps and message ids are the diagnostic value
 and survive untouched, and the built-in AWS providers log that name and the HTTP
 status alongside the scrubbed message. An email send's own attachment filenames are
@@ -743,7 +744,7 @@ Channel tags:
 - `@spfn/notification:ses` — AWS SES client lifecycle, provider errors
 - `@spfn/notification:sns` — AWS SNS client lifecycle, provider errors
 
-`sendEmail`, `sendSMS`, `sendSlack` are designed to **not throw** — they return a `SendResult` object, also when an email or SMS provider throws. Always check the result:
+`sendEmail`, `sendSMS`, `sendSlack` are designed to **not throw** — they return a `SendResult` object, also when a provider throws. Always check the result:
 
 ```typescript
 const result = await sendEmail({

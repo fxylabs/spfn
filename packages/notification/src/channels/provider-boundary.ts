@@ -14,8 +14,9 @@ import { scrubSendResult } from '../privacy';
  * <user@example.com>: mailbox unavailable`). Both become a failed `SendResult`
  * with the scrubbed text, so the channel writes its masked "send failed" line
  * and closes the history row for either, and its caller gets a result, never
- * the raw error: `sendEmail` and `sendSMS` do not throw. The thrown value
- * itself goes no further — its stack repeats the message unscrubbed.
+ * the raw error: `sendEmail`, `sendSMS` and `sendSlack` do not throw. The
+ * thrown value itself goes no further — its stack repeats the message
+ * unscrubbed.
  * `attachments` are the send's own, whose filenames are removed as well.
  */
 export function sendThroughProvider(

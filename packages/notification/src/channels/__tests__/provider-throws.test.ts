@@ -22,12 +22,16 @@ vi.mock('../../services/notification.service', () => ({
 import { Logger } from '@spfn/core/logger';
 import { sendEmail, sendEmailBulk, registerEmailProvider } from '../email';
 import { sendSMS, sendSMSBulk, registerSMSProvider } from '../sms';
+import { sendSlack, sendSlackBulk, registerSlackProvider } from '../slack';
 import { markManyFailed, markNotificationFailed } from '../../services/notification.service';
 import { configureNotification, getNotificationConfig } from '../../config';
 
 const ADDRESS = 'taken@example.com';
 const NUMBER = '+15551234567';
 const PROVIDER = 'throws-489';
+const BLOCKED_HOOK = 'https://hooks.slack.test/services/BLOCKED';
+const OK_HOOK = 'https://hooks.slack.test/services/OK';
+const SLACK_SCRUBBED = 'Slack API error: channel blocked for ta***@example.com';
 
 registerEmailProvider({
     name: PROVIDER,
@@ -43,6 +47,20 @@ registerSMSProvider({
         throw new Error(`Invalid 'To' Phone Number: ${NUMBER}`);
     },
 });
+// Slack has no SPFN_NOTIFICATION_SLACK_PROVIDER switch — getProvider() always
+// resolves 'webhook', so a custom provider for this file replaces it by name.
+registerSlackProvider({
+    name: 'webhook',
+    send: async (params) =>
+    {
+        if (params.webhookUrl === BLOCKED_HOOK)
+        {
+            throw new Error(`Slack API error: channel blocked for ${ADDRESS}`);
+        }
+
+        return { success: true, messageId: 'sent' };
+    },
+});
 
 const LEVELS = ['debug', 'info', 'warn', 'error', 'fatal'] as const;
 const failedWrites = [markNotificationFailed, markManyFailed].map(fn => vi.mocked(fn));
@@ -54,6 +72,8 @@ const SENDS = {
         scrubbed: '550 5.1.1 <ta***@example.com>: mailbox unavailable',
         single: () => sendEmail({ to: ADDRESS, subject: 'Hi', text: 'Hello' }),
         bulk: () => sendEmailBulk([{ to: ADDRESS, subject: 'Hi', text: 'Hello' }]),
+        bulkResults: [{ success: false, error: '550 5.1.1 <ta***@example.com>: mailbox unavailable' }],
+        bulkFailureCount: 1,
     },
     sms: {
         recipient: NUMBER,
@@ -61,6 +81,23 @@ const SENDS = {
         scrubbed: 'Invalid \'To\' Phone Number: +1555*****67',
         single: () => sendSMS({ to: NUMBER, message: 'Hello' }),
         bulk: () => sendSMSBulk([{ to: NUMBER, message: 'Hello' }]),
+        bulkResults: [{ success: false, error: 'Invalid \'To\' Phone Number: +1555*****67' }],
+        bulkFailureCount: 1,
+    },
+    // The other call site: a 2-item bulk where only the first item's provider
+    // call throws, so a lost-rejection regression would lose the second item's
+    // result too, not just the thrower's.
+    slack: {
+        recipient: ADDRESS,
+        line: 'Slack send failed',
+        scrubbed: SLACK_SCRUBBED,
+        single: () => sendSlack({ webhookUrl: BLOCKED_HOOK, text: 'Hello' }),
+        bulk: () => sendSlackBulk([
+            { webhookUrl: BLOCKED_HOOK, text: 'Hello' },
+            { webhookUrl: OK_HOOK, text: 'Hello' },
+        ]),
+        bulkResults: [{ success: false, error: SLACK_SCRUBBED }, { success: true }],
+        bulkFailureCount: 1,
     },
 };
 
@@ -112,7 +149,7 @@ describe('a provider that throws is answered at the channel boundary (#489)', ()
         const send = SENDS[channel as keyof typeof SENDS];
         const { answer, lines, text } = await seen(send.bulk);
 
-        expect(answer).toMatchObject({ results: [{ success: false, error: send.scrubbed }], failureCount: 1 });
+        expect(answer).toMatchObject({ results: send.bulkResults, failureCount: send.bulkFailureCount });
         expect(lines.filter(([message]) => message === send.line)).toHaveLength(1);
         expect(vi.mocked(markManyFailed)).toHaveBeenCalledWith([{ id: 1, errorMessage: send.scrubbed }]);
         expect(text).not.toContain(send.recipient);
