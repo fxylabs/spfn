@@ -701,9 +701,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentence for it, and a page that renders `error` from its own URL shows whatever a forged link put
   there. Code that branched on a typed error's message on the redirect, or on `onError`'s message,
   branches on `reason` instead. `buildOAuthErrorUrl(error, reason?)` (from `@spfn/auth/server`) is
-  now `buildOAuthErrorUrl(reason, refusalCode?)`; `oauthFailureUrl(error, logMessage)` no longer
-  puts any message on the redirect. New exports: `OAUTH_ERROR_MESSAGES` from `@spfn/auth`,
-  `@spfn/auth/server` and `@spfn/auth/nextjs/client`. The mobile contract does not move.
+  now `buildOAuthErrorUrl(reason, refusalCode?)`; a call still in the old shape (an `any`-typed
+  argument compiles) throws a `TypeError` instead of putting its text on the redirect.
+  `oauthFailureUrl(error, logMessage)` no longer puts any message on the redirect. New exports:
+  `OAUTH_ERROR_MESSAGES` from `@spfn/auth`, `@spfn/auth/server` and `@spfn/auth/nextjs/client`. The
+  mobile contract does not move.
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored

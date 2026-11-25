@@ -32,6 +32,7 @@ import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
 import {
     OAUTH_ERROR_MESSAGES,
+    isOAuthErrorReason,
     oauthRefusalCode,
     providerErrorReason,
     withOAuthErrorReason,
@@ -1101,9 +1102,22 @@ function buildRedirectUrl(
  * `sign_in_refused` and in the shape `signIn.admit` must answer
  * (`oauthRefusalCode`). The redirect carries no text a provider, a request or
  * the application wrote.
+ *
+ * `reason` is checked against the closed set at run time: this signature
+ * replaces the old `buildOAuthErrorUrl(error, reason?)`, whose first argument
+ * was free text, and a caller still in that shape (an `any`-typed argument
+ * compiles) throws a `TypeError` instead of putting that text on the redirect.
  */
 export function buildOAuthErrorUrl(reason: OAuthErrorReason, refusalCode?: unknown): string
 {
+    if (!isOAuthErrorReason(reason))
+    {
+        throw new TypeError(
+            `buildOAuthErrorUrl(reason, refusalCode?) takes an OAuthErrorReason; its old free-text first ` +
+            `argument (buildOAuthErrorUrl(error, reason?)) is gone (#489). Got a ${typeof reason}.`,
+        );
+    }
+
     const errorUrl = env.SPFN_AUTH_OAUTH_ERROR_URL || '/auth/error?error={error}';
     const withError = errorUrl.replace('{error}', encodeURIComponent(OAUTH_ERROR_MESSAGES[reason]));
 

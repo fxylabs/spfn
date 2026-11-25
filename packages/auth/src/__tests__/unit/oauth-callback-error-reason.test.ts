@@ -716,6 +716,23 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
 
         expect(url).toBe('/auth/error?error=Sign-in%20refused&reason=sign_in_refused');
     });
+
+    it('O12: a pre-#489 call shape — an any-typed reason — throws a TypeError whose message does not contain that text', () =>
+    {
+        let caught: unknown;
+
+        try
+        {
+            buildOAuthErrorUrl('Google OAuth is not configured' as never);
+        }
+        catch (error)
+        {
+            caught = error;
+        }
+
+        expect(caught).toBeInstanceOf(TypeError);
+        expect(String((caught as Error).message)).not.toContain('Google OAuth is not configured');
+    });
 });
 
 /** The callback page's finalize, through every matching proxy rule, the real routes behind them. */
