@@ -350,6 +350,11 @@ only on accounts it creates; `passwordChangeRequired: false` seeds an account wi
 - **CSV:** `SPFN_AUTH_ADMIN_EMAILS` + `SPFN_AUTH_ADMIN_PASSWORDS` + `SPFN_AUTH_ADMIN_ROLES`.
 - **Single (legacy):** `SPFN_AUTH_ADMIN_EMAIL` + `SPFN_AUTH_ADMIN_PASSWORD` → always `superadmin`.
 
+Each boot writes one line per configured account on `@spfn/auth:setup` — `Admin account created`,
+`Admin account already exists` or `Admin account not created` — naming it by `position`, its
+1-based place in the list as you wrote it (`1` for the single form), and by `userId` once a row
+exists; the configured address is never logged.
+
 ## Routes
 
 All routes mount at `/_auth/*` and are reached through `authApi.<name>.call({ body })`. Public
@@ -8758,8 +8763,7 @@ Kakao and Naver warnings about an access token that belongs to another user name
 provider's `subject`. A send the provider refused — whether it returned the refusal or threw it —
 is also logged by `@spfn/notification`, with the recipient masked, and its error text reaches auth
 scrubbed of addresses and phone numbers; the auth line beside it names only what auth adds — which
-message, and which row. One set of lines predates the rule: admin seeding's boot lines on
-`@spfn/auth:setup` still name the address configured in `SPFN_AUTH_ADMIN_*`.
+message, and which row.
 
 ## FAQ
 

@@ -590,6 +590,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction opened directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
   `db.transaction`) is not one the repositories run on, so the call is refused as if none were
   open. No schema change, no migration; the mobile contract does not move.
+- **@spfn/auth: admin seeding's boot lines name an account by position and id, never by address
+  (#489).** `ensureAdminExists()` (run by `createAuthLifecycle()` on every boot) wrote the address
+  configured in `SPFN_AUTH_ADMIN_*` on `@spfn/auth:setup`, so every boot logged the addresses of the
+  most privileged accounts. Each account now gets one line, a fixed message with its data in the
+  context: `Admin account already exists { position, userId }` (was `⚠️  Account already exists:
+  <email> (skipped)`), `Admin account created { position, userId, role }` (was `✅ Admin account
+  created: <email> (<role>)`), `Admin account not created: role not found. Run initializeAuth()
+  first. { position, role }` (was `❌ Role '<role>' not found for <email>. …`) and `Admin account not
+  created { position, error }` (was `❌ Failed to create account <email> { error }`; `error` is now
+  described where it is caught, so the call carries no bound value). The per-account
+  `Creating <email> admin account(s)...` line is gone; `Creating <n> admin account(s)...`, the
+  summary and the password reminder are unchanged. `position` is the account's 1-based place in the
+  list as written — the index in `SPFN_AUTH_ADMIN_ACCOUNTS` or `SPFN_AUTH_ADMIN_EMAILS`, `1` for
+  `SPFN_AUTH_ADMIN_EMAIL` — and `userId` the row's id. A log query that matched the old text or the
+  address matches the new messages and `position` / `userId` instead. The same position now names an
+  account in the `SPFN_AUTH_ROLE_EMAIL_DOMAINS` refusal (`#<n>`), which counted only the entries
+  kept, so after an entry skipped for a missing email or password it pointed at the wrong account,
+  and in the JSON form's `Skipping account <n>: missing email or password` warning, which named
+  none. A malformed `SPFN_AUTH_ADMIN_ACCOUNTS` was logged as `❌ Failed to parse
+  SPFN_AUTH_ADMIN_ACCOUNTS:` with the parser's `SyntaxError`, whose message V8 builds from the value
+  (a short value quoted whole, a long one around the failing token — an address or a password); it
+  is now `❌ SPFN_AUTH_ADMIN_ACCOUNTS is not valid JSON`, with nothing of the error. A `null`
+  entry in that array is now skipped with the same warning instead of ending the parse. No setting,
+  no API change.
 - **@spfn/auth: a refused link mail is logged by its row, not by its recipient (#489).** The error
   lines `@spfn/auth:email` writes when the provider refuses a signup link or a password reset link
   (`Failed to send signup link email`, `Failed to send password reset email`) logged `email` beside
@@ -600,8 +624,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider threw it (below) — and notification logs the same refusal with the recipient masked.
   There is no setting. A log query that read `email` from the two link lines reads `rowId` instead;
   the notice line has no replacement. The rule — a line names a person by an id, never by address —
-  is in the auth README under Logging, with the one set of lines that predates it (admin seeding's
-  boot lines). Held by test rows that read every `authLogger` child with `util.inspect`, so an
+  is in the auth README under Logging. Held by test rows that read every `authLogger` child with `util.inspect`, so an
   address inside a logged `Error` is seen too.
 - **@spfn/notification: a provider that throws is answered at the channel's provider boundary like
   one that returns its refusal (#489).** `sendEmail`, `sendSMS`, `sendSlack`, `sendEmailBulk`,

@@ -2,17 +2,151 @@
  * @spfn/auth - Setup Integration Tests
  *
  * Tests for ensureAdminExists() function
+ *
+ * | #  | goes unnoticed without the row                                                                 |
+ * | -- | ---------------------------------------------------------------------------------------------- |
+ * | S1 | a boot line naming a seeded account by its configured address — or one whose logged error, or |
+ * |    | the parse error of a malformed `SPFN_AUTH_ADMIN_ACCOUNTS`, carries the address or password —   |
+ * |    | and an outcome line that stops saying which account (`position`) and which row (`userId`)       |
+ * | S2 | the position taken from the list left after a skipped entry: the outcome line and the domain   |
+ * |    | policy's refusal then point the operator at the wrong account                                  |
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { inspect } from 'node:util';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
+import { spyOnAuthLog, type AuthLog } from '../helpers/auth-log';
 import { ensureAdminExists } from '@/server/setup';
 import { initializeAuth } from '@/server/services/rbac.service';
 import { getRoleByName } from '@/server/services/role.service';
+import { configurePasswordRule, resetPasswordRuleForTests } from '@/server/lib/password-rule';
+import { ROLE_EMAIL_DOMAINS_VAR } from '@/server/lib/role-email-domains';
+import { usersRepository } from '@/server/repositories';
 import { users } from '@/server/entities';
 import { verifyPassword } from '@/server/helpers/password';
 import { authLogger } from '@/server/logger';
 import { eq } from 'drizzle-orm';
+
+const ADMIN_VARS = [
+    'SPFN_AUTH_ADMIN_ACCOUNTS',
+    'SPFN_AUTH_ADMIN_EMAILS',
+    'SPFN_AUTH_ADMIN_PASSWORDS',
+    'SPFN_AUTH_ADMIN_ROLES',
+    'SPFN_AUTH_ADMIN_EMAIL',
+    'SPFN_AUTH_ADMIN_PASSWORD',
+] as const;
+
+/** One seeding run: the environment, what happens first, and the lines its accounts must get. */
+interface SeedCase
+{
+    env: Partial<Record<typeof ADMIN_VARS[number], string>>;
+    prepare?: () => Promise<void>;
+    /** Every configured address, phone and password, or the parts of a malformed value */
+    secrets: string[];
+    lines: () => Promise<unknown[][]>;
+}
+
+const SEED_EMAIL = 'root@seed489.test';
+const SEED_PHONE = '+821055550489';
+const SEED_PASSWORD = 'Seed-pass-489';
+
+/** The id of the row stored for an address, in whatever case it was stored */
+async function idOf(email: string): Promise<number>
+{
+    const row = await usersRepository.findByEmailInAnyStoredForm(email);
+
+    return row!.id;
+}
+
+/** A row for `email` stored as given, before seeding runs */
+async function storedAccount(email: string): Promise<void>
+{
+    const role = await getRoleByName('user');
+    await getTestDb().insert(users).values({ email, roleId: role!.id });
+}
+
+const SEED_CASES: Record<string, SeedCase> = {
+    'created, JSON form': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, phone: SEED_PHONE, password: SEED_PASSWORD, role: 'superadmin' }]) },
+        secrets: [SEED_EMAIL, SEED_PHONE, SEED_PASSWORD],
+        lines: async () => [['Admin account created', { position: 1, userId: await idOf(SEED_EMAIL), role: 'superadmin' }]],
+    },
+    'created, comma-separated form': {
+        env: {
+            SPFN_AUTH_ADMIN_EMAILS: 'one@seed489.test,two@seed489.test',
+            SPFN_AUTH_ADMIN_PASSWORDS: 'Seed-pass-one,Seed-pass-two',
+            SPFN_AUTH_ADMIN_ROLES: 'admin,user',
+        },
+        secrets: ['one@seed489.test', 'two@seed489.test', 'Seed-pass-one', 'Seed-pass-two'],
+        lines: async () => [
+            ['Admin account created', { position: 1, userId: await idOf('one@seed489.test'), role: 'admin' }],
+            ['Admin account created', { position: 2, userId: await idOf('two@seed489.test'), role: 'user' }],
+        ],
+    },
+    'created, single form': {
+        env: { SPFN_AUTH_ADMIN_EMAIL: SEED_EMAIL, SPFN_AUTH_ADMIN_PASSWORD: SEED_PASSWORD },
+        secrets: [SEED_EMAIL, SEED_PASSWORD],
+        lines: async () => [['Admin account created', { position: 1, userId: await idOf(SEED_EMAIL), role: 'superadmin' }]],
+    },
+    'already exists': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, password: SEED_PASSWORD }]) },
+        prepare: () => storedAccount(SEED_EMAIL),
+        secrets: [SEED_EMAIL, SEED_PASSWORD],
+        lines: async () => [['Admin account already exists', { position: 1, userId: await idOf(SEED_EMAIL) }]],
+    },
+    'already exists, stored in another case': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, password: SEED_PASSWORD }]) },
+        prepare: () => storedAccount('Root@Seed489.test'),
+        secrets: [SEED_EMAIL, SEED_PASSWORD],
+        lines: async () => [['Admin account already exists', { position: 1, userId: await idOf(SEED_EMAIL) }]],
+    },
+    'role not found': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, password: SEED_PASSWORD, role: 'no-such-role' }]) },
+        secrets: [SEED_EMAIL, SEED_PASSWORD],
+        lines: async () => [['Admin account not created: role not found. Run initializeAuth() first.', { position: 1, role: 'no-such-role' }]],
+    },
+    'creation failed on a unique violation': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, phone: SEED_PHONE, password: SEED_PASSWORD }]) },
+        prepare: async () =>
+        {
+            // The row appears between the lookup and the insert, as when two instances boot at once
+            await storedAccount(SEED_EMAIL);
+            vi.spyOn(usersRepository, 'findByEmailInAnyStoredForm').mockResolvedValueOnce(null as never);
+            vi.spyOn(usersRepository, 'create');
+        },
+        secrets: [SEED_EMAIL, SEED_PHONE, SEED_PASSWORD],
+        lines: async () =>
+        {
+            // Not vacuous: the error the insert threw does carry the address
+            const [insert] = vi.mocked(usersRepository.create).mock.settledResults;
+            expect(inspect(insert!.value)).toContain(`Key (email)=(${SEED_EMAIL})`);
+
+            return [['Admin account not created', { position: 1, error: expect.objectContaining({ code: '23505' }) }]];
+        },
+    },
+    'creation failed on the app\'s password rule': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, phone: SEED_PHONE, password: SEED_PASSWORD }]) },
+        prepare: async () => configurePasswordRule({ validate: () => ['too easy to guess'] }),
+        secrets: [SEED_EMAIL, SEED_PHONE, SEED_PASSWORD],
+        lines: async () => [['Admin account not created', { position: 1, error: expect.objectContaining({ name: 'ValidationError', statusCode: 400 }) }]],
+    },
+    'malformed JSON, short enough for V8 to quote whole': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: 'a@b.c:pw12' },
+        secrets: ['a@b.c', 'pw12'],
+        lines: async () => [['❌ SPFN_AUTH_ADMIN_ACCOUNTS is not valid JSON']],
+    },
+    'malformed JSON, quoted by V8 around the failing token': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: `[{"email":"${SEED_EMAIL}","password":${SEED_PASSWORD}}]` },
+        secrets: ['root@seed', 'Seed-pass'],
+        lines: async () => [['❌ SPFN_AUTH_ADMIN_ACCOUNTS is not valid JSON']],
+    },
+};
+
+/** The calls that say what became of an account or of the list, without the run's count lines */
+function outcomeLines(log: AuthLog): unknown[][]
+{
+    return log.calls().filter(([message]) => /^(Admin account|❌)/.test(String(message)));
+}
 
 // Check if database is available before running tests
 const dbAvailable = await isDatabaseAvailable();
@@ -44,6 +178,72 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
         delete process.env.SPFN_AUTH_ADMIN_ROLES;
         delete process.env.SPFN_AUTH_ADMIN_EMAIL;
         delete process.env.SPFN_AUTH_ADMIN_PASSWORD;
+    });
+
+    describe('Boot lines name an account by position and id, never by address (#489)', () =>
+    {
+        let log: AuthLog;
+
+        beforeEach(() =>
+        {
+            log = spyOnAuthLog();
+        });
+
+        afterEach(() =>
+        {
+            log.restore();
+            vi.restoreAllMocks();
+            resetPasswordRuleForTests();
+            delete process.env[ROLE_EMAIL_DOMAINS_VAR];
+            ADMIN_VARS.forEach(name => delete process.env[name]);
+        });
+
+        it.each(Object.keys(SEED_CASES))('S1: %s', async (name) =>
+        {
+            const seedCase = SEED_CASES[name]!;
+            await seedCase.prepare?.();
+            Object.assign(process.env, seedCase.env);
+
+            await ensureAdminExists();
+
+            expect(outcomeLines(log)).toEqual(await seedCase.lines());
+            for (const secret of seedCase.secrets)
+            {
+                expect(log.text().toLowerCase()).not.toContain(secret.toLowerCase());
+            }
+        });
+
+        it.each([
+            ['JSON', {
+                SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([
+                    { email: 'first@seed489.test', password: SEED_PASSWORD },
+                    { email: 'second@seed489.test' },
+                    { email: 'third@seed489.test', password: SEED_PASSWORD, role: 'admin' },
+                ]),
+            }],
+            ['comma-separated', {
+                SPFN_AUTH_ADMIN_EMAILS: 'first@seed489.test,second@seed489.test,third@seed489.test',
+                SPFN_AUTH_ADMIN_PASSWORDS: `${SEED_PASSWORD},,${SEED_PASSWORD}`,
+                SPFN_AUTH_ADMIN_ROLES: 'user,user,admin',
+            }],
+        ])('S2: %s form, after a skipped entry, the third account is still position 3', async (_form, values) =>
+        {
+            Object.assign(process.env, values);
+            process.env[ROLE_EMAIL_DOMAINS_VAR] = 'admin=example.com';
+
+            await expect(ensureAdminExists()).rejects.toThrow("admin account(s) #3 (role 'admin') ");
+
+            delete process.env[ROLE_EMAIL_DOMAINS_VAR];
+            log.restore();
+            log = spyOnAuthLog();
+            await ensureAdminExists();
+
+            expect(outcomeLines(log)).toEqual([
+                ['Admin account created', { position: 1, userId: await idOf('first@seed489.test'), role: 'user' }],
+                ['Admin account created', { position: 3, userId: await idOf('third@seed489.test'), role: 'admin' }],
+            ]);
+            expect(log.calls()).toContainEqual(['⚠️  Skipping account 2: missing email or password']);
+        });
     });
 
     describe('JSON Format (ADMIN_ACCOUNTS)', () =>

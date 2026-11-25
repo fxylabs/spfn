@@ -5,6 +5,7 @@
  */
 
 import { env } from '@spfn/auth/config';
+import { describeError } from '@spfn/core/logger';
 import { getRoleByName } from '@spfn/auth/server';
 
 import { hashNewPassword } from './services/password-rule.service';
@@ -17,12 +18,21 @@ import { usersRepository } from './repositories';
  */
 interface AdminAccountConfig
 {
+    /**
+     * 1-based position in the list as the operator wrote it — the index in
+     * `SPFN_AUTH_ADMIN_ACCOUNTS` or `SPFN_AUTH_ADMIN_EMAILS`, `1` for the
+     * single form. Lines and errors name an account by it, never by address.
+     */
+    position: number;
     email: string;
     password: string;
     role?: string; // Role name (e.g., 'user', 'admin', 'superadmin')
     phone?: string;
     passwordChangeRequired?: boolean;
 }
+
+/** What became of one configured account */
+type SeedOutcome = 'created' | 'skipped' | 'failed';
 
 /**
  * Parse admin accounts from environment variables
@@ -47,94 +57,23 @@ interface AdminAccountConfig
  *    ADMIN_PASSWORD=admin-password
  *    ```
  *
+ * An entry with a missing email or password is skipped, and the warning
+ * names its position; the accounts kept carry theirs.
+ *
  * @returns Array of admin account configurations
  */
 function parseAdminAccounts(): AdminAccountConfig[]
 {
-    const accounts: AdminAccountConfig[] = [];
-
     // Method 1: JSON format (highest priority)
     if (env.SPFN_AUTH_ADMIN_ACCOUNTS)
     {
-        try
-        {
-            const accountsJson = env.SPFN_AUTH_ADMIN_ACCOUNTS;
-
-            const parsed = JSON.parse(accountsJson);
-
-            if (!Array.isArray(parsed))
-            {
-                authLogger.setup.error('❌ SPFN_AUTH_ADMIN_ACCOUNTS must be an array');
-
-                return accounts;
-            }
-
-            for (const item of parsed)
-            {
-                if (!item.email || !item.password)
-                {
-                    authLogger.setup.warn('⚠️  Skipping account: missing email or password');
-                    continue;
-                }
-
-                accounts.push({
-                    email: item.email,
-                    password: item.password,
-                    role: item.role || 'user',
-                    phone: item.phone,
-                    passwordChangeRequired: item.passwordChangeRequired !== false, // Default: true
-                });
-            }
-
-            return accounts;
-        }
-        catch (error)
-        {
-            const err = error as Error;
-            authLogger.setup.error('❌ Failed to parse SPFN_AUTH_ADMIN_ACCOUNTS:', err);
-
-            return accounts;
-        }
+        return parseJsonAccounts(env.SPFN_AUTH_ADMIN_ACCOUNTS);
     }
 
     // Method 2: Comma-separated format
-    const adminEmails = env.SPFN_AUTH_ADMIN_EMAILS;
-
-    if (adminEmails)
+    if (env.SPFN_AUTH_ADMIN_EMAILS)
     {
-        const emails = adminEmails.split(',').map(s => s.trim());
-        const passwords = (env.SPFN_AUTH_ADMIN_PASSWORDS || '').split(',').map(s => s.trim());
-        const roles = (env.SPFN_AUTH_ADMIN_ROLES || '').split(',').map(s => s.trim());
-
-        // Validate lengths match
-        if (passwords.length !== emails.length)
-        {
-            authLogger.setup.error('❌ SPFN_AUTH_ADMIN_EMAILS and SPFN_AUTH_ADMIN_PASSWORDS length mismatch');
-
-            return accounts;
-        }
-
-        for (let i = 0; i < emails.length; i++)
-        {
-            const email = emails[i];
-            const password = passwords[i];
-            const role = roles[i] || 'user';
-
-            if (!email || !password)
-            {
-                authLogger.setup.warn(`⚠️  Skipping account ${i + 1}: missing email or password`);
-                continue;
-            }
-
-            accounts.push({
-                email,
-                password,
-                role,
-                passwordChangeRequired: true,
-            });
-        }
-
-        return accounts;
+        return parseCommaSeparatedAccounts(env.SPFN_AUTH_ADMIN_EMAILS);
     }
 
     // Method 3: Single account (legacy format)
@@ -143,15 +82,104 @@ function parseAdminAccounts(): AdminAccountConfig[]
 
     if (adminEmail && adminPassword)
     {
-        accounts.push({
+        return [{
+            position: 1,
             email: adminEmail,
             password: adminPassword,
             role: 'superadmin',
             passwordChangeRequired: true,
-        });
+        }];
     }
 
-    return accounts;
+    return [];
+}
+
+/**
+ * The accounts of `SPFN_AUTH_ADMIN_ACCOUNTS`
+ *
+ * A value that is not JSON is reported without the parser's error: V8 quotes
+ * the value it failed on in that message — a short one whole, a long one
+ * around the failing token — so it would carry an address or a password.
+ */
+function parseJsonAccounts(value: string): AdminAccountConfig[]
+{
+    let parsed: unknown;
+
+    try
+    {
+        parsed = JSON.parse(value);
+    }
+    catch
+    {
+        authLogger.setup.error('❌ SPFN_AUTH_ADMIN_ACCOUNTS is not valid JSON');
+
+        return [];
+    }
+
+    if (!Array.isArray(parsed))
+    {
+        authLogger.setup.error('❌ SPFN_AUTH_ADMIN_ACCOUNTS must be an array');
+
+        return [];
+    }
+
+    return parsed.flatMap((item, index) =>
+    {
+        if (!item?.email || !item?.password)
+        {
+            authLogger.setup.warn(`⚠️  Skipping account ${index + 1}: missing email or password`);
+
+            return [];
+        }
+
+        return [{
+            position: index + 1,
+            email: item.email,
+            password: item.password,
+            role: item.role || 'user',
+            phone: item.phone,
+            passwordChangeRequired: item.passwordChangeRequired !== false, // Default: true
+        }];
+    });
+}
+
+/**
+ * The accounts of `SPFN_AUTH_ADMIN_EMAILS`, `SPFN_AUTH_ADMIN_PASSWORDS` and
+ * `SPFN_AUTH_ADMIN_ROLES`, matched by position
+ */
+function parseCommaSeparatedAccounts(adminEmails: string): AdminAccountConfig[]
+{
+    const emails = adminEmails.split(',').map(s => s.trim());
+    const passwords = (env.SPFN_AUTH_ADMIN_PASSWORDS || '').split(',').map(s => s.trim());
+    const roles = (env.SPFN_AUTH_ADMIN_ROLES || '').split(',').map(s => s.trim());
+
+    // Validate lengths match
+    if (passwords.length !== emails.length)
+    {
+        authLogger.setup.error('❌ SPFN_AUTH_ADMIN_EMAILS and SPFN_AUTH_ADMIN_PASSWORDS length mismatch');
+
+        return [];
+    }
+
+    return emails.flatMap((email, index) =>
+    {
+        const password = passwords[index];
+
+        if (!email || !password)
+        {
+            authLogger.setup.warn(`⚠️  Skipping account ${index + 1}: missing email or password`);
+
+            return [];
+        }
+
+        return [{
+            position: index + 1,
+            email,
+            password,
+            role: roles[index] || 'user',
+            passwordChangeRequired: true,
+        }];
+    });
 }
 
 /**
@@ -161,17 +189,18 @@ function parseAdminAccounts(): AdminAccountConfig[]
  * A throw rather than a `failed` count: the account would be created holding a
  * role every check then refuses, or — for a superadmin — not created while the
  * operator believes it was. Seeded accounts are auto-verified, so only the
- * domain can fail. The accounts are named by position, never by address.
+ * domain can fail. The accounts are named by their position in the list as
+ * the operator wrote it, never by address.
  */
 function assertSeedAccountsWithinPolicy(accounts: AdminAccountConfig[]): void
 {
-    const refused = accounts.flatMap((account, index) =>
+    const refused = accounts.flatMap((account) =>
     {
         const roleName = account.role || 'user';
 
         return isEmailAllowedForRole({ email: account.email, emailVerifiedAt: new Date() }, roleName)
             ? []
-            : [`#${index + 1} (role '${roleName}')`];
+            : [`#${account.position} (role '${roleName}')`];
     });
 
     if (refused.length > 0)
@@ -201,6 +230,12 @@ function assertSeedAccountsWithinPolicy(accounts: AdminAccountConfig[]): void
  * `channel: 'seed'`) before it is hashed; an account whose password it refuses
  * is not created and counts as failed.
  *
+ * Each account writes one line on `@spfn/auth:setup` saying what became of it
+ * — `Admin account created`, `Admin account already exists` or
+ * `Admin account not created` — naming it by `position`, its 1-based place in
+ * the list as written, and by `userId` once a row exists. The configured
+ * address is never logged.
+ *
  * @throws Error when `SPFN_AUTH_ROLE_EMAIL_DOMAINS` does not allow an account's
  *         email for its role — checked for every account before any is created
  *
@@ -226,71 +261,95 @@ export async function ensureAdminExists(): Promise<void>
 
     authLogger.setup.info(`Creating ${accounts.length} admin account(s)...`);
 
-    let created = 0;
-    let skipped = 0;
-    let failed = 0;
+    const outcomes: SeedOutcome[] = [];
 
     for (const account of accounts)
     {
-        authLogger.setup.info(`Creating ${account.email} admin account(s)...`);
-
-        try
-        {
-            // Whatever form the address was stored in, not only the canonical
-            // one. This branch answers "no" by creating a privileged account, so
-            // a lookup that misses an admin stored as `Admin@Example.com` would
-            // make a second one holding the configured password.
-            const existing = await usersRepository.findByEmailInAnyStoredForm(account.email);
-
-            if (existing)
-            {
-                authLogger.setup.info(`⚠️  Account already exists: ${account.email} (skipped)`);
-                skipped++;
-                continue;
-            }
-
-            // Get role ID from role name
-            const roleName = account.role || 'user';
-            const role = await getRoleByName(roleName);
-
-            if (!role)
-            {
-                authLogger.setup.error(`❌ Role '${roleName}' not found for ${account.email}. Run initializeAuth() first.`);
-                failed++;
-                continue;
-            }
-
-            // Create admin account. The app's password rule is asked of the
-            // seeded password too: until it is changed it signs in, and whoever
-            // guesses it chooses the next one. It is asked about the phone the
-            // row stores — an empty one stored as null is null to it too.
-            const phone = account.phone || null;
-
-            await usersRepository.create({
-                email: account.email,
-                phone,
-                passwordHash: await hashNewPassword(account.password, { channel: 'seed', email: account.email, phone }),
-                roleId: role.id,
-                emailVerifiedAt: new Date(), // Auto-verify admin
-                passwordChangeRequired: account.passwordChangeRequired !== false,
-                status: 'active',
-            });
-
-            authLogger.setup.info(`✅ Admin account created: ${account.email} (${roleName})`);
-            created++;
-        }
-        catch (error)
-        {
-            authLogger.setup.error(`❌ Failed to create account ${account.email}`, { error });
-            failed++;
-        }
+        outcomes.push(await seedAccount(account));
     }
 
+    const count = (outcome: SeedOutcome) => outcomes.filter(each => each === outcome).length;
+    const created = count('created');
+
     // Summary
-    authLogger.setup.info(`📊 Summary: ${created} created, ${skipped} skipped, ${failed} failed`);
+    authLogger.setup.info(`📊 Summary: ${created} created, ${count('skipped')} skipped, ${count('failed')} failed`);
 
     if (created > 0)
     {
         authLogger.setup.info('⚠️  Please change passwords on first login!');
     }
+}
+
+/**
+ * Create one configured account unless a row for its address exists
+ *
+ * Writes the account's one outcome line, naming it by `position` and, once a
+ * row exists, by `userId` — never by the configured address.
+ */
+async function seedAccount(account: AdminAccountConfig): Promise<SeedOutcome>
+{
+    const { position } = account;
+
+    try
+    {
+        // Whatever form the address was stored in, not only the canonical
+        // one. This branch answers "no" by creating a privileged account, so
+        // a lookup that misses an admin stored as `Admin@Example.com` would
+        // make a second one holding the configured password.
+        const existing = await usersRepository.findByEmailInAnyStoredForm(account.email);
+
+        if (existing)
+        {
+            authLogger.setup.info('Admin account already exists', { position, userId: existing.id });
+
+            return 'skipped';
+        }
+
+        const roleName = account.role || 'user';
+        const role = await getRoleByName(roleName);
+
+        if (!role)
+        {
+            authLogger.setup.error('Admin account not created: role not found. Run initializeAuth() first.', { position, role: roleName });
+
+            return 'failed';
+        }
+
+        const user = await createSeededAccount(account, role.id);
+
+        authLogger.setup.info('Admin account created', { position, userId: user.id, role: roleName });
+
+        return 'created';
+    }
+    catch (error)
+    {
+        // Described here, not by the logger: a failed insert's error carries
+        // the address it was given, and every sink of the call would see it
+        authLogger.setup.error('Admin account not created', { position, error: describeError(error) });
+
+        return 'failed';
+    }
+}
+
+/**
+ * Insert the row of a seeded account
+ *
+ * The app's password rule is asked of the seeded password too: until it is
+ * changed it signs in, and whoever guesses it chooses the next one. It is
+ * asked about the phone the row stores — an empty one stored as null is null
+ * to it too.
+ */
+async function createSeededAccount(account: AdminAccountConfig, roleId: number)
+{
+    const phone = account.phone || null;
+
+    return await usersRepository.create({
+        email: account.email,
+        phone,
+        passwordHash: await hashNewPassword(account.password, { channel: 'seed', email: account.email, phone }),
+        roleId,
+        emailVerifiedAt: new Date(), // Auto-verify admin
+        passwordChangeRequired: account.passwordChangeRequired !== false,
+        status: 'active',
+    });
 }
