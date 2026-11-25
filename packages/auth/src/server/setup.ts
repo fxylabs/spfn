@@ -57,8 +57,10 @@ type SeedOutcome = 'created' | 'skipped' | 'failed';
  *    ADMIN_PASSWORD=admin-password
  *    ```
  *
- * An entry with a missing email or password is skipped, and the warning
- * names its position; the accounts kept carry theirs.
+ * An entry with a missing email or password is skipped, as is a JSON entry
+ * whose email, password, phone or role is not the string type each needs;
+ * the warning names the position and the field, never the value. The
+ * accounts kept carry their own position.
  *
  * @returns Array of admin account configurations
  */
@@ -95,6 +97,44 @@ function parseAdminAccounts(): AdminAccountConfig[]
 }
 
 /**
+ * The field of a `SPFN_AUTH_ADMIN_ACCOUNTS` entry that is not the type
+ * `createSeededAccount` and the password rule need, or `null` when the entry
+ * is usable. `email` and `password` must be non-empty strings; `phone` and
+ * `role`, when present, must be strings — a number, object or array in any
+ * of those would otherwise reach code written for a string (`.trim()`,
+ * `createHash().update()`, string interpolation).
+ */
+function invalidAccountField(item: unknown): string | null
+{
+    if (typeof item !== 'object' || item === null || Array.isArray(item))
+    {
+        return 'entry';
+    }
+
+    const entry = item as Record<string, unknown>;
+
+    if (typeof entry.email !== 'string' || entry.email.trim() === '')
+    {
+        return 'email';
+    }
+
+    if (typeof entry.password !== 'string' || entry.password === '')
+    {
+        return 'password';
+    }
+
+    for (const field of ['phone', 'role'] as const)
+    {
+        if (entry[field] !== undefined && entry[field] !== null && typeof entry[field] !== 'string')
+        {
+            return field;
+        }
+    }
+
+    return null;
+}
+
+/**
  * The accounts of `SPFN_AUTH_ADMIN_ACCOUNTS`
  *
  * A value that is not JSON is reported without the parser's error: V8 quotes
@@ -125,20 +165,24 @@ function parseJsonAccounts(value: string): AdminAccountConfig[]
 
     return parsed.flatMap((item, index) =>
     {
-        if (!item?.email || !item?.password)
+        const invalidField = invalidAccountField(item);
+
+        if (invalidField)
         {
-            authLogger.setup.warn(`⚠️  Skipping account ${index + 1}: missing email or password`);
+            authLogger.setup.warn(`⚠️  Skipping account ${index + 1}: invalid ${invalidField}`);
 
             return [];
         }
 
+        const entry = item as { email: string; password: string; role?: string; phone?: string; passwordChangeRequired?: boolean };
+
         return [{
             position: index + 1,
-            email: item.email,
-            password: item.password,
-            role: item.role || 'user',
-            phone: item.phone,
-            passwordChangeRequired: item.passwordChangeRequired !== false, // Default: true
+            email: entry.email,
+            password: entry.password,
+            role: entry.role || 'user',
+            phone: entry.phone,
+            passwordChangeRequired: entry.passwordChangeRequired !== false, // Default: true
         }];
     });
 }
@@ -310,7 +354,7 @@ async function seedAccount(account: AdminAccountConfig): Promise<SeedOutcome>
 
         if (!role)
         {
-            authLogger.setup.error('Admin account not created: role not found. Run initializeAuth() first.', { position, role: roleName });
+            authLogger.setup.error('Admin account not created: role not found. Run initializeAuth() first.', { position });
 
             return 'failed';
         }

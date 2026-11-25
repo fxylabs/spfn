@@ -346,14 +346,25 @@ enforced: the account's session can do nothing but change its password until it 
 [A required password change](#a-required-password-change-passwordchangerequired). Seeding sets it
 only on accounts it creates; `passwordChangeRequired: false` seeds an account without it.
 
-- **JSON (recommended):** `SPFN_AUTH_ADMIN_ACCOUNTS` — array of `{email, password, role?, phone?, passwordChangeRequired?}`. `role` defaults to `user` (`user` | `admin` | `superadmin`).
+- **JSON (recommended):** `SPFN_AUTH_ADMIN_ACCOUNTS` — array of `{email, password, role?, phone?, passwordChangeRequired?}`. `role` defaults to `user` (`user` | `admin` | `superadmin`). `email` and
+  `password` must be non-empty strings, and `phone` and `role`, when present, strings; an entry
+  that is not a plain object, or fails that, is skipped — see below.
 - **CSV:** `SPFN_AUTH_ADMIN_EMAILS` + `SPFN_AUTH_ADMIN_PASSWORDS` + `SPFN_AUTH_ADMIN_ROLES`.
 - **Single (legacy):** `SPFN_AUTH_ADMIN_EMAIL` + `SPFN_AUTH_ADMIN_PASSWORD` → always `superadmin`.
 
-Each boot writes one line per configured account on `@spfn/auth:setup` — `Admin account created`,
-`Admin account already exists` or `Admin account not created` — naming it by `position`, its
-1-based place in the list as you wrote it (`1` for the single form), and by `userId` once a row
-exists; the configured address is never logged.
+Each boot writes one line per configured account on `@spfn/auth:setup`, naming it by `position`,
+its 1-based place in the list as you wrote it (`1` for the single form), and by `userId` once a
+row exists; the configured address is never logged:
+
+- `Admin account created { position, userId, role }`
+- `Admin account already exists { position, userId }`
+- `Admin account not created: role not found. Run initializeAuth() first. { position }`
+- `Admin account not created { position, error }`
+
+A skipped entry — missing or wrong-typed `email`/`password`, a wrong-typed `phone`/`role`, or a
+JSON array entry that is not a plain object — writes `⚠️  Skipping account <position>: invalid
+<field>` (`missing email or password` for the CSV form; `entry` when the item itself is not a
+plain object) and is not counted. It does not stop the entries after it from being read.
 
 ## Routes
 

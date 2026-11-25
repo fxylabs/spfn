@@ -103,7 +103,62 @@ const SEED_CASES: Record<string, SeedCase> = {
     'role not found': {
         env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, password: SEED_PASSWORD, role: 'no-such-role' }]) },
         secrets: [SEED_EMAIL, SEED_PASSWORD],
-        lines: async () => [['Admin account not created: role not found. Run initializeAuth() first.', { position: 1, role: 'no-such-role' }]],
+        lines: async () => [['Admin account not created: role not found. Run initializeAuth() first.', { position: 1 }]],
+    },
+    'role not found, text that is actually a password or address (shifted columns, #2)': {
+        env: {
+            SPFN_AUTH_ADMIN_EMAILS: 'c1@rv517.test,c2@rv517.test,c3@rv517.test',
+            SPFN_AUTH_ADMIN_PASSWORDS: `${SEED_PASSWORD}-1,${SEED_PASSWORD}-2,${SEED_PASSWORD}-3`,
+            SPFN_AUTH_ADMIN_ROLES: 'Secret-c1,user,c3@rv517.test',
+        },
+        secrets: ['c1@rv517.test', 'c3@rv517.test', `${SEED_PASSWORD}-1`, `${SEED_PASSWORD}-2`, `${SEED_PASSWORD}-3`, 'Secret-c1'],
+        // spyOnAuthLog groups calls by level (info, then warn, then error), not
+        // by call time, so the created (info) line precedes the two error lines.
+        lines: async () => [
+            ['Admin account created', { position: 2, userId: await idOf('c2@rv517.test'), role: 'user' }],
+            ['Admin account not created: role not found. Run initializeAuth() first.', { position: 1 }],
+            ['Admin account not created: role not found. Run initializeAuth() first.', { position: 3 }],
+        ],
+    },
+    'number password, JSON form': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: 'np@rv517.test', password: 48151623421 }]) },
+        secrets: ['np@rv517.test', '48151623421'],
+        lines: async () => [['⚠️  Skipping account 1: invalid password']],
+    },
+    'number email, JSON form': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: 918273645, password: 'Seed-pass-ne489' }]) },
+        secrets: ['918273645', 'Seed-pass-ne489'],
+        lines: async () => [['⚠️  Skipping account 1: invalid email']],
+    },
+    'object phone, JSON form (no account is created)': {
+        env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: 'op@rv517.test', password: 'Seed-pass-op489', phone: { note: 'phone-object-marker-489' } }]) },
+        secrets: ['op@rv517.test', 'Seed-pass-op489', 'phone-object-marker-489'],
+        lines: async () => [['⚠️  Skipping account 1: invalid phone']],
+    },
+    'mixed list: valid, null, string, number, array, no-password, valid': {
+        env: {
+            SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([
+                { email: 'mix1@rv517.test', password: 'Seed-pass-mix1' },
+                null,
+                'a-plain-string-489',
+                918273645,
+                [1, 2, 3],
+                { email: 'mix-nopass@rv517.test' },
+                { email: 'mix7@rv517.test', password: 'Seed-pass-mix7' },
+            ]),
+        },
+        secrets: ['mix1@rv517.test', 'Seed-pass-mix1', 'a-plain-string-489', '918273645', 'mix-nopass@rv517.test', 'mix7@rv517.test', 'Seed-pass-mix7'],
+        // spyOnAuthLog groups calls by level (info, then warn), not by call
+        // time, so the two created (info) lines precede the warn lines.
+        lines: async () => [
+            ['Admin account created', { position: 1, userId: await idOf('mix1@rv517.test'), role: 'user' }],
+            ['Admin account created', { position: 7, userId: await idOf('mix7@rv517.test'), role: 'user' }],
+            ['⚠️  Skipping account 2: invalid entry'],
+            ['⚠️  Skipping account 3: invalid entry'],
+            ['⚠️  Skipping account 4: invalid entry'],
+            ['⚠️  Skipping account 5: invalid entry'],
+            ['⚠️  Skipping account 6: invalid password'],
+        ],
     },
     'creation failed on a unique violation': {
         env: { SPFN_AUTH_ADMIN_ACCOUNTS: JSON.stringify([{ email: SEED_EMAIL, phone: SEED_PHONE, password: SEED_PASSWORD }]) },
@@ -145,7 +200,29 @@ const SEED_CASES: Record<string, SeedCase> = {
 /** The calls that say what became of an account or of the list, without the run's count lines */
 function outcomeLines(log: AuthLog): unknown[][]
 {
-    return log.calls().filter(([message]) => /^(Admin account|❌)/.test(String(message)));
+    return log.calls().filter(([message]) => /^(Admin account|❌|⚠️ {2}Skipping)/.test(String(message)));
+}
+
+const CONSOLE_METHODS = ['log', 'error', 'warn', 'debug', 'info'] as const;
+
+/**
+ * Every line written to the console during `work`, on any method — so a line
+ * a mutant adds through core's root logger (which `spyOnAuthLog` cannot see,
+ * since it only walks `authLogger`'s children), or straight to `console`,
+ * bypassing every logger, is caught too.
+ */
+async function loggedDuring(work: () => Promise<unknown>): Promise<string>
+{
+    const lines: string[] = [];
+    const keep = (...args: unknown[]) =>
+    {
+        lines.push(args.map(String).join(' '));
+    };
+    const spies = CONSOLE_METHODS.map(method => vi.spyOn(console, method).mockImplementation(keep));
+
+    await work().finally(() => spies.forEach(spy => spy.mockRestore()));
+
+    return lines.join('\n');
 }
 
 // Check if database is available before running tests
@@ -204,12 +281,13 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
             await seedCase.prepare?.();
             Object.assign(process.env, seedCase.env);
 
-            await ensureAdminExists();
+            const consoleOutput = await loggedDuring(() => ensureAdminExists());
 
             expect(outcomeLines(log)).toEqual(await seedCase.lines());
             for (const secret of seedCase.secrets)
             {
                 expect(log.text().toLowerCase()).not.toContain(secret.toLowerCase());
+                expect(consoleOutput.toLowerCase()).not.toContain(secret.toLowerCase());
             }
         });
 
@@ -220,13 +298,13 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
                     { email: 'second@seed489.test' },
                     { email: 'third@seed489.test', password: SEED_PASSWORD, role: 'admin' },
                 ]),
-            }],
+            }, '⚠️  Skipping account 2: invalid password'],
             ['comma-separated', {
                 SPFN_AUTH_ADMIN_EMAILS: 'first@seed489.test,second@seed489.test,third@seed489.test',
                 SPFN_AUTH_ADMIN_PASSWORDS: `${SEED_PASSWORD},,${SEED_PASSWORD}`,
                 SPFN_AUTH_ADMIN_ROLES: 'user,user,admin',
-            }],
-        ])('S2: %s form, after a skipped entry, the third account is still position 3', async (_form, values) =>
+            }, '⚠️  Skipping account 2: missing email or password'],
+        ])('S2: %s form, after a skipped entry, the third account is still position 3', async (_form, values, skipLine) =>
         {
             Object.assign(process.env, values);
             process.env[ROLE_EMAIL_DOMAINS_VAR] = 'admin=example.com';
@@ -241,8 +319,8 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
             expect(outcomeLines(log)).toEqual([
                 ['Admin account created', { position: 1, userId: await idOf('first@seed489.test'), role: 'user' }],
                 ['Admin account created', { position: 3, userId: await idOf('third@seed489.test'), role: 'admin' }],
+                [skipLine],
             ]);
-            expect(log.calls()).toContainEqual(['⚠️  Skipping account 2: missing email or password']);
         });
     });
 
