@@ -40,7 +40,6 @@ export const cmsEnvSchema = defineEnvSchema({
             description: '[DEPRECATED] Use labelConfig.defaultLocale instead. Default language for CMS content (ISO 639-1 language code)',
             default: 'en',
             required: false,
-            category: 'cms',
             examples: ['en', 'ko', 'ja', 'zh', 'es', 'fr', 'de'],
         }),
     },
@@ -50,7 +49,6 @@ export const cmsEnvSchema = defineEnvSchema({
             description: 'Automatically detect and use browser language for content localization',
             default: true,
             required: false,
-            category: 'cms',
         }),
     },
 });

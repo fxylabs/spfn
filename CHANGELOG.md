@@ -569,6 +569,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (at compile time): @spfn/core: an env schema entry may only state what the schema
+  declares (#492).** The seven helpers (`envString`, `envSecret`, `envNumber`, `envBoolean`,
+  `envUrl`, `envEnum`, `envJson`), `defineEnvSchema`, `createEnvRegistry` and `new EnvRegistry`
+  took an entry through a type parameter, which turns the compiler's excess-property check off, and
+  nothing at run time reads a key it does not know: `requried: true` booted without the variable,
+  `defualt` gave no default, `envSecret`'s `sensitive: false` was overwritten with `true` and
+  `envEnum`'s `validator` with the enum's own — all without a word. Each entry point now bounds the
+  entry to the keys its schema type declares, so a key it does not declare is a compile error at
+  that key — written inline, in a variable handed to a helper, or beside a spread helper. Types
+  only: nothing changes at run time and `InferEnvType` infers what it did. Migrations: delete an
+  undeclared key such as `category` — it never did anything; drop `validator` from `envEnum` — an
+  enum's validator is its own; a value that is not a secret is `envString`, not
+  `envSecret({ sensitive: false })`. `@spfn/cms`'s schema loses its two `category` lines.
+
 - **BREAKING: @spfn/auth: the account lock refuses to be taken outside a transaction (#494).**
   `usersRepository.lockAccount` and `lockAccountByEmailOrPhone` ran with no transaction open and
   did nothing useful: the row lock ended with its own statement, the transaction-local

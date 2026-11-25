@@ -120,6 +120,18 @@ export type EnvLayer = 'environment' | 'instance';
 export type EnvSchemaCollection = Record<string, EnvVarSchema<any>>;
 
 /**
+ * `T` with every key `Declared` does not declare typed `never` — the bound an
+ * entry taken through a type parameter needs, since a type parameter turns the
+ * compiler's excess-property check off. The error lands on the undeclared key.
+ */
+export type OnlyDeclared<T, Declared> = T & { [K in Exclude<keyof T, keyof Declared>]: never };
+
+/**
+ * A collection whose every entry carries only keys {@link EnvVarSchema} declares.
+ */
+export type OnlyDeclaredEntries<T> = T & { [K in keyof T]: OnlyDeclared<T[K], EnvVarSchema<any>> };
+
+/**
  * Helper type: Check if field has default value
  */
 type HasDefault<T> = T extends { default: any } ? true : false;
@@ -166,7 +178,7 @@ export type InferEnvType<T extends EnvSchemaCollection> = {
  * ```
  */
 export function defineEnvSchema<T extends Record<string, any>>(
-    schema: T,
+    schema: OnlyDeclaredEntries<T>,
 ): { [K in keyof T]: T[K] & { key: K } }
 {
     const result: any = {};
@@ -200,7 +212,7 @@ export function defineEnvSchema<T extends Record<string, any>>(
  * ```
  */
 export function envString<T extends Omit<EnvVarSchema, 'key' | 'type'>>(
-    options: T,
+    options: OnlyDeclared<T, Omit<EnvVarSchema, 'key' | 'type'>>,
 ): T & { type: 'string'; validator: (value: string) => string }
 {
     return {
@@ -224,7 +236,7 @@ export function envString<T extends Omit<EnvVarSchema, 'key' | 'type'>>(
  * ```
  */
 export function envSecret<T extends Omit<EnvVarSchema, 'key' | 'type' | 'sensitive'>>(
-    options: T,
+    options: OnlyDeclared<T, Omit<EnvVarSchema, 'key' | 'type' | 'sensitive'>>,
 ): T & { type: 'string'; sensitive: true; validator: (value: string) => string }
 {
     return {
@@ -253,7 +265,7 @@ export function envSecret<T extends Omit<EnvVarSchema, 'key' | 'type' | 'sensiti
  * ```
  */
 export function envNumber<T extends Omit<EnvVarSchema<number>, 'key' | 'type'>>(
-    options: T,
+    options: OnlyDeclared<T, Omit<EnvVarSchema<number>, 'key' | 'type'>>,
 ): T & { type: 'number'; validator: (value: string) => number }
 {
     return {
@@ -280,7 +292,7 @@ export function envNumber<T extends Omit<EnvVarSchema<number>, 'key' | 'type'>>(
  * ```
  */
 export function envBoolean<T extends Omit<EnvVarSchema<boolean>, 'key' | 'type'>>(
-    options: T,
+    options: OnlyDeclared<T, Omit<EnvVarSchema<boolean>, 'key' | 'type'>>,
 ): T & { type: 'boolean'; validator: (value: string) => boolean }
 {
     return {
@@ -308,7 +320,7 @@ export function envBoolean<T extends Omit<EnvVarSchema<boolean>, 'key' | 'type'>
  * ```
  */
 export function envUrl<T extends Omit<EnvVarSchema, 'key' | 'type'>>(
-    options: T,
+    options: OnlyDeclared<T, Omit<EnvVarSchema, 'key' | 'type'>>,
 ): T & { type: 'url' }
 {
     return {
@@ -338,7 +350,7 @@ export function envEnum<
     O extends Omit<EnvVarSchema<T>, 'key' | 'type' | 'validator'>,
 >(
     allowed: readonly T[],
-    options: O,
+    options: OnlyDeclared<O, Omit<EnvVarSchema<T>, 'key' | 'type' | 'validator'>>,
 ): O & { type: 'enum'; validator: (val: string) => T }
 {
     return {
@@ -376,7 +388,7 @@ export function envJson<
     T = any,
     O extends Omit<EnvVarSchema<T>, 'key' | 'type' | 'validator'> = Omit<EnvVarSchema<T>, 'key' | 'type' | 'validator'>,
 >(
-    options: O,
+    options: OnlyDeclared<O, Omit<EnvVarSchema<T>, 'key' | 'type' | 'validator'>>,
 ): O & { type: 'json'; validator: (val: string) => T }
 {
     return {

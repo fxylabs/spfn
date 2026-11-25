@@ -148,6 +148,11 @@ CONFIG: envJson<{ host: string; port: number }>({
 
 ### `EnvVarSchema` options
 
+An entry takes only the options listed here — a helper or `defineEnvSchema` refuses any other
+key at compile time, on the key itself. A helper also refuses an option it sets itself:
+`envSecret` takes no `sensitive` (a non-secret is `envString`) and `envEnum` / `envJson` take no
+`validator` (theirs is built in).
+
 | Option | Type | Description |
 |--------|------|-------------|
 | `description` | `string` | Purpose / usage (used in CLI validate output) |
@@ -164,7 +169,7 @@ CONFIG: envJson<{ host: string; port: number }>({
 | `readBy` | `string[]` | Files that read the name under a computed key, relative to the project root — for `spfn env audit` (see below) |
 
 > There is **no** `category` option. Docs that show `category: '...'` are stale — passing
-> it is harmless (excess property) but it does nothing.
+> it does not compile: delete it, it never did anything.
 
 ### Type inference (`InferEnvType`)
 
