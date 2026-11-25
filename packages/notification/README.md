@@ -710,7 +710,7 @@ tokens before it reaches a log line or `history.error_message`, at the channel's
 provider boundary — so a custom provider (see [Custom Providers](#custom-providers))
 is covered without doing anything — and again in the service that writes the
 column. A provider that **throws** its failure instead of returning it is answered the same way at
-that boundary, for single and bulk sends alike, in every channel: its message is scrubbed, the
+that boundary by the email, SMS and Slack channels, for single and bulk sends alike: its message is scrubbed, the
 channel writes its masked `Email send failed` / `SMS send failed` line — Slack's `Slack send failed`
 line carries no recipient to mask — the history row closes as `failed` with the scrubbed text, and
 the send resolves with `{ success: false, error }` — the thrown value itself (whose stack repeats
