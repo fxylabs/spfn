@@ -241,7 +241,7 @@ describe.skipIf(!dbAvailable)('a caught error\'s text outside core (#382)', () =
 
         const output = await loggedDuring(() => ensureAdminExists());
 
-        expect(output).toContain('Failed to create account admin-probe@example.test');
+        expect(output).toContain('Admin account not created');
         expect(output).toContain('23505');
         expectNoLeak(output);
     });
