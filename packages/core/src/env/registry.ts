@@ -16,7 +16,7 @@
  *
  * @module env/registry
  */
-import type { EnvVarSchema, EnvSchemaCollection, InferEnvType } from './schema';
+import type { EnvVarSchema, EnvSchemaCollection, InferEnvType, OnlyDeclaredEntries } from './schema';
 import { isClientAccessible } from './schema';
 import { logger } from '@spfn/core/logger';
 
@@ -32,7 +32,7 @@ export class EnvRegistry<T extends EnvSchemaCollection = EnvSchemaCollection>
     private schemas = new Map<string, EnvVarSchema>();
     private hasValidated = false;
 
-    constructor(schemas?: T)
+    constructor(schemas?: OnlyDeclaredEntries<T>)
     {
         if (schemas)
         {
@@ -369,7 +369,7 @@ export interface EnvValidationResult
  * ```
  */
 export function createEnvRegistry<T extends EnvSchemaCollection>(
-    schemas: T,
+    schemas: OnlyDeclaredEntries<T>,
 ): EnvRegistry<T>
 {
     return new EnvRegistry(schemas);
