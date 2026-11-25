@@ -98,12 +98,15 @@ import { createOAuthLinkState, createOAuthState } from '../../server/lib/oauth/s
 import { buildStartCookieName } from '../../server/lib/oauth/start-cookies';
 import { generateKeyPair } from '../../server/lib/crypto';
 import { COOKIE_NAMES } from '../../server/lib/config';
-import { buildOAuthErrorUrl, matchOAuthCallbackCsrf, oauthErrorReason } from '../../server/services/oauth.service';
+import { buildOAuthErrorUrl, matchOAuthCallbackCsrf, oauthErrorReason, oauthFailureUrl } from '../../server/services/oauth.service';
 import { mainAuthRouter } from '../../server/routes';
+import { authLogger } from '../../server/logger';
 import { authInterceptors } from '../../nextjs/interceptors';
 import { createOAuthCallbackHandler } from '../../nextjs/oauth-handlers';
 import { sealPendingSession } from '../../nextjs/session-helpers';
 import {
+    oauthCallbackErrorArguments,
+    readCallbackInput,
     runOAuthCallback,
     type CallbackOptions,
     type CallbackOutcome,
@@ -125,6 +128,7 @@ import {
     OAuthSignInContendedError,
     OAuthStateExpiredError,
     OAuthStateInvalidError,
+    SignInRefusedError,
     SignupDisabledError,
     UnverifiedEmailLinkError,
 } from '@spfn/auth/errors';
@@ -135,6 +139,10 @@ const SECRET = 'test-secret-with-at-least-32-characters-for-security-testing';
 const NONCE = 'nonce-of-this-browser';
 const KEY_ID = 'key-1';
 const LIBRARY_LEAK = /claim|JWE|JWT|timestamp/;
+/** The fixed sentences the error page is given for `cancelled`, `provider_error` and `failed` (#489). */
+const CANCELLED = 'The sign-in was cancelled at the provider.';
+const PROVIDER_ERROR = 'The sign-in provider could not complete the sign-in. Try again.';
+const FAILED = 'OAuth sign-in could not be completed.';
 
 /** A fresh client address per request, so the routes' per-IP limits never trip across the fork. */
 let requests = 0;
@@ -223,8 +231,8 @@ async function pastTheGate(app: Hono): Promise<URLSearchParams>
     );
 }
 
-/** The link callback's redirect for a link state whose CSRF gate passes */
-async function linkPastTheGate(app: Hono): Promise<URLSearchParams>
+/** The link callback's redirect for a link state whose CSRF gate passes, `query` beside the state */
+async function linkPastTheGate(app: Hono, query = 'code=c'): Promise<URLSearchParams>
 {
     const state = await createOAuthLinkState({
         provider: 'superself',
@@ -237,7 +245,7 @@ async function linkPastTheGate(app: Hono): Promise<URLSearchParams>
         keyEpoch: null,
     });
 
-    return await errorRedirect(app, `code=c&state=${state}`, `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`);
+    return await errorRedirect(app, `${query}&state=${state}`, `${buildStartCookieName('csrf', KEY_ID)}=${NONCE}`);
 }
 
 /** The core console transport's lines at each level while `work` runs, colours stripped */
@@ -349,13 +357,13 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         seams.linkFailure = null;
     });
 
-    it('R1: the provider returned error=access_denied — cancelled, the text unchanged', async () =>
+    it('R1 (O1, #489): the provider returned error=access_denied — cancelled, its fixed sentence and never the query\'s text', async () =>
     {
         const bare = await errorRedirect(app, 'error=access_denied');
-        const described = await errorRedirect(app, 'error=access_denied&error_description=The%20user%20said%20no');
+        const described = await errorRedirect(app, 'error=access_denied&error_description=Call+us');
 
-        expect([bare.get('reason'), bare.get('error')]).toEqual(['cancelled', 'access_denied']);
-        expect([described.get('reason'), described.get('error')]).toEqual(['cancelled', 'The user said no']);
+        expect([bare.get('reason'), bare.get('error')]).toEqual(['cancelled', CANCELLED]);
+        expect([described.get('reason'), described.get('error')]).toEqual(['cancelled', CANCELLED]);
     });
 
     it('R2: the state expired — expired, a fixed sentence and never jose\'s message', async () =>
@@ -389,18 +397,18 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         }
     });
 
-    it('R4: any other provider error=, or a failed token exchange — provider_error; provider text unchanged, library text replaced', async () =>
+    it('R4 (O1, #489): any other provider error=, or a failed token exchange — provider_error, its fixed sentence; neither provider nor library text', async () =>
     {
-        const providerSaid = await errorRedirect(app, 'error=server_error&error_description=IdP%20is%20down');
+        const providerSaid = await errorRedirect(app, 'error=server_error&error_description=Call+us+at+555');
         exchange.failure = new Error('ECONNRESET at undici fetch "exp" claim');
         const libraryThrew = await pastTheGate(app);
 
-        expect([providerSaid.get('reason'), providerSaid.get('error')]).toEqual(['provider_error', 'IdP is down']);
+        expect([providerSaid.get('reason'), providerSaid.get('error')]).toEqual(['provider_error', PROVIDER_ERROR]);
         expect(libraryThrew.get('reason')).toBe('provider_error');
-        expect(libraryThrew.get('error')).toBe('The sign-in provider could not complete the sign-in. Try again.');
+        expect(libraryThrew.get('error')).toBe(PROVIDER_ERROR);
     });
 
-    it('R5: account disabled, pending deletion, or gone — account_unavailable, the text unchanged', async () =>
+    it('R5: account disabled, pending deletion, or gone — account_unavailable, its fixed sentence (#489)', async () =>
     {
         for (const failure of [
             () => new AccountDisabledError({ status: 'suspended' }),
@@ -413,20 +421,20 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             const params = await pastTheGate(app);
 
             expect(params.get('reason')).toBe('account_unavailable');
-            expect(params.get('error')).toBe(failure().message);
+            expect(params.get('error')).toBe('This account cannot sign in.');
         }
     });
 
-    it('R6: missing code or state, an unverified-email link refusal — failed, the text unchanged; a missing role, anything else — failed, a fixed text (#382)', async () =>
+    it('R6: missing code or state, an unverified-email link refusal, a missing role, anything else — failed, its fixed sentence (#382, #489)', async () =>
     {
         const missing = await errorRedirect(app, `state=${await stateIssued()}`);
 
-        expect([missing.get('reason'), missing.get('error')]).toEqual(['failed', 'Missing authorization code or state']);
+        expect([missing.get('reason'), missing.get('error')]).toEqual(['failed', FAILED]);
 
         seams.callbackFailure = () => new UnverifiedEmailLinkError();
         const typed = await pastTheGate(app);
 
-        expect([typed.get('reason'), typed.get('error')]).toEqual(['failed', new UnverifiedEmailLinkError().message]);
+        expect([typed.get('reason'), typed.get('error')]).toEqual(['failed', FAILED]);
 
         for (const failure of [
             () => new Error('Default user role not found. Run initializeAuth() first.'),
@@ -437,7 +445,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
 
             const params = await pastTheGate(app);
 
-            expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
+            expect([params.get('reason'), params.get('error')]).toEqual(['failed', FAILED]);
         }
     });
 
@@ -459,7 +467,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             await vi.waitFor(() => expect(lines.join('\n')).toContain('Default user role not found'));
             const errorLines = lines.filter(line => line.includes('(ERROR)'));
 
-            expect(params.get('error')).toBe('OAuth callback failed');
+            expect(params.get('error')).toBe(FAILED);
             expect(errorLines.filter(line => line.includes('Default user role not found'))).toHaveLength(1);
             expect(errorLines.join('\n')).not.toContain(new UnverifiedEmailLinkError().message);
         }
@@ -469,7 +477,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         }
     });
 
-    it('R6d: a typed 5xx is a fault — logged at error level as core\'s error handler logs it, its text kept in the redirect (#382)', async () =>
+    it('R6d: a typed 5xx is a fault — logged at error level as core\'s error handler logs it; the redirect carries the failed sentence (#382, #489)', async () =>
     {
         seams.callbackFailure = () => new ServiceUnavailableError({ message: 'Sign-in is down for maintenance' });
         let params = new URLSearchParams();
@@ -479,7 +487,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             params = await pastTheGate(app);
         });
 
-        expect(params.get('error')).toBe('Sign-in is down for maintenance');
+        expect(params.get('error')).toBe(FAILED);
         expect(lines.error.filter(line => line.includes('OAuth callback failed'))).toHaveLength(1);
         expect(lines.error.join('\n')).toContain('ServiceUnavailableError');
     });
@@ -500,6 +508,79 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect(lines.error.join('\n')).toContain('Default user role not found');
     });
 
+    it('O5 (#489): a provider error leaves one warn line naming a registered code, unrecognised otherwise, and nothing else of the query', async () =>
+    {
+        // Every logger shares core's Logger class, so this sees every logger argument, at every level
+        const spies = (['debug', 'info', 'warn', 'error', 'fatal'] as const)
+            .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
+        let calls: unknown[][][] = [];
+
+        const lines = await levelLinesDuring(async () =>
+        {
+            await errorRedirect(app, 'error=invalid_scope&error_description=Call+us');
+            await errorRedirect(app, 'error=Call+us');
+            await errorRedirect(app, 'error=access_denied&error_description=Call+us');
+            calls = spies.map(spy => [...spy.mock.calls]);
+        }).finally(() => spies.forEach(spy => spy.mockRestore()));
+
+        expect(calls[2]!.filter(([message]) => message === 'OAuth provider returned an error')).toEqual([
+            ['OAuth provider returned an error', { provider: 'superself', reason: 'provider_error', providerError: 'invalid_scope' }],
+            ['OAuth provider returned an error', { provider: 'superself', reason: 'provider_error', providerError: 'unrecognised' }],
+        ]);
+        expect(JSON.stringify(calls)).not.toContain('Call us');
+        expect([...lines.error, ...lines.warn].join('\n')).not.toContain('Call us');
+    });
+
+    it('O9 (#489): a provider error on a link callback leaves the warn line the sign-in path leaves, and nothing else of the query', async () =>
+    {
+        vi.stubEnv('SPFN_APP_URL', 'https://app.example');
+        const spies = (['debug', 'info', 'warn', 'error', 'fatal'] as const)
+            .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
+        let params = new URLSearchParams();
+        let calls: unknown[][][] = [];
+
+        await levelLinesDuring(async () =>
+        {
+            params = await linkPastTheGate(app, 'error=invalid_scope&error_description=Call+us');
+            calls = spies.map(spy => [...spy.mock.calls]);
+        }).finally(() => spies.forEach(spy => spy.mockRestore()));
+
+        expect([params.get('oauthLink'), params.get('provider')]).toEqual(['provider_error', 'superself']);
+        expect(calls[2]!.filter(([message]) => message === 'OAuth provider returned an error')).toEqual([
+            ['OAuth provider returned an error', { provider: 'superself', reason: 'provider_error', providerError: 'invalid_scope' }],
+        ]);
+        expect(JSON.stringify(calls)).not.toContain('Call us');
+    });
+
+    it('O10 (#489): a sign-in start for a registered provider that is not configured leaves a warn line naming it', async () =>
+    {
+        vi.stubEnv('SPFN_AUTH_GOOGLE_CLIENT_ID', '');
+        registerOAuthProvider({ ...provider(), isEnabled: () => false });
+        const spies = (['debug', 'info', 'warn', 'error', 'fatal'] as const)
+            .map(level => vi.spyOn(Object.getPrototypeOf(authLogger.service), level));
+        const start = (path: string) => app.request(path, { headers: { 'x-forwarded-for': clientIp() } });
+        let redirects: (string | null)[] = [];
+        let calls: unknown[][][] = [];
+
+        await levelLinesDuring(async () =>
+        {
+            const answers = [await start('/_auth/oauth/superself?state=s'), await start('/_auth/oauth/google?state=s')];
+
+            redirects = answers.map(answer => new URL(answer.headers.get('location')!, 'https://app.example').searchParams.get('reason'));
+            calls = spies.map(spy => [...spy.mock.calls]);
+        }).finally(() =>
+        {
+            spies.forEach(spy => spy.mockRestore());
+            registerOAuthProvider(provider());
+        });
+
+        expect(redirects).toEqual(['failed', 'failed']);
+        expect(calls[2]!.filter(([message]) => message === 'OAuth provider is not configured')).toEqual([
+            ['OAuth provider is not configured', { provider: 'superself' }],
+            ['OAuth provider is not configured', { provider: 'google' }],
+        ]);
+    });
+
     it('R6c: a provider error shaped like a typed one (numeric statusCode, toJSON) redirects with the fixed text, not its own (#382)', async () =>
     {
         seams.callbackFailure = () => Object.assign(new Error('invalid_grant: refresh token of tenant internal-42 revoked'), {
@@ -509,7 +590,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
 
         const params = await pastTheGate(app);
 
-        expect([params.get('reason'), params.get('error')]).toEqual(['failed', 'OAuth callback failed']);
+        expect([params.get('reason'), params.get('error')]).toEqual(['failed', FAILED]);
     });
 });
 
@@ -556,6 +637,9 @@ describe('OAuth callback reason codes — createOAuthCallbackHandler (#126)', ()
 
 describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
 {
+    /** The expired sentence as `{error}` takes it. */
+    const EXPIRED = encodeURIComponent('This sign-in took longer than ten minutes. Start it again.');
+
     afterEach(() =>
     {
         vi.unstubAllEnvs();
@@ -563,19 +647,19 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
 
     it('R8: {reason} in the template is substituted; without it reason is appended as a query parameter, before any fragment', () =>
     {
-        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}&code={reason}');
-        const substituted = buildOAuthErrorUrl('Too slow', 'expired');
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}&why={reason}');
+        const substituted = buildOAuthErrorUrl('expired');
 
         vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}');
-        const appended = buildOAuthErrorUrl('Too slow', 'expired');
+        const appended = buildOAuthErrorUrl('expired');
 
         vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', 'https://app.example/oops?src=oauth&error={error}#top');
-        const withFragment = buildOAuthErrorUrl('Too slow', 'cancelled');
+        const withFragment = buildOAuthErrorUrl('cancelled');
         const parsed = new URL(withFragment);
 
-        expect(substituted).toBe('/auth/error?error=Too%20slow&code=expired');
+        expect(substituted).toBe(`/auth/error?error=${EXPIRED}&why=expired`);
         expect(new URL(appended, 'https://app.example').searchParams.get('reason')).toBe('expired');
-        expect(new URL(appended, 'https://app.example').searchParams.get('error')).toBe('Too slow');
+        expect(new URL(appended, 'https://app.example').searchParams.get('error')).toBe('This sign-in took longer than ten minutes. Start it again.');
         expect(appended.startsWith('/auth/error?')).toBe(true);
         expect(parsed.searchParams.get('src')).toBe('oauth');
         expect(parsed.searchParams.get('reason')).toBe('cancelled');
@@ -584,26 +668,70 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
     });
 
     it.each([
-        ['absolute', 'https://app.example/e?error={error}', 'https://app.example/e?error=Too%20slow&reason=expired'],
-        ['protocol-relative', '//other.example/e?error={error}', '//other.example/e?error=Too%20slow&reason=expired'],
+        ['absolute', 'https://app.example/e?error={error}', `https://app.example/e?error=${EXPIRED}&reason=expired`],
+        ['protocol-relative', '//other.example/e?error={error}', `//other.example/e?error=${EXPIRED}&reason=expired`],
         ['path-only', '/auth/oops', '/auth/oops?reason=expired'],
-        ['existing query', '/auth/oops?src=oauth&error={error}', '/auth/oops?src=oauth&error=Too%20slow&reason=expired'],
-        ['fragment', '/auth/oops?error={error}#top', '/auth/oops?error=Too%20slow&reason=expired#top'],
+        ['existing query', '/auth/oops?src=oauth&error={error}', `/auth/oops?src=oauth&error=${EXPIRED}&reason=expired`],
+        ['fragment', '/auth/oops?error={error}#top', `/auth/oops?error=${EXPIRED}&reason=expired#top`],
         ['fragment holding a ?', '/auth/oops#top?x', '/auth/oops?reason=expired#top?x'],
-        ['%20 in the template', '/auth/sign%20in?note=a%20b&error={error}', '/auth/sign%20in?note=a%20b&error=Too%20slow&reason=expired'],
+        ['%20 in the template', '/auth/sign%20in?note=a%20b&error={error}', `/auth/sign%20in?note=a%20b&error=${EXPIRED}&reason=expired`],
     ])('R8 (exact form, %s): the template with {error} substituted plus exactly the appended parameter, byte for byte', (_form, template, expected) =>
     {
         vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', template);
 
-        expect(buildOAuthErrorUrl('Too slow', 'expired')).toBe(expected);
+        expect(buildOAuthErrorUrl('expired')).toBe(expected);
     });
 
-    it('R8 (no injection): a literal {reason} inside the error text is encoded with it and never substituted', () =>
+    it('O6 (#489): the app\'s refusal code takes {refusalCode}, else is appended after reason as refusalCode; without one {refusalCode} is emptied and nothing appended', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?r={reason}&c={refusalCode}#top');
+        const placed = buildOAuthErrorUrl('sign_in_refused', 'LOCKED');
+        const emptied = buildOAuthErrorUrl('failed');
+
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error#top');
+        const appended = buildOAuthErrorUrl('sign_in_refused', 'LOCKED');
+        const none = buildOAuthErrorUrl('failed');
+
+        expect([placed, emptied]).toEqual(['/auth/error?r=sign_in_refused&c=LOCKED#top', '/auth/error?r=failed&c=#top']);
+        expect([appended, none]).toEqual(['/auth/error?reason=sign_in_refused&refusalCode=LOCKED#top', '/auth/error?reason=failed#top']);
+    });
+
+    it('O7 (#489): the template main documented, /auth/error?error={error}&code={reason}, on sign_in_refused — one code, the reason, and one refusalCode', () =>
+    {
+        vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}&code={reason}');
+        const params = new URL(buildOAuthErrorUrl('sign_in_refused', 'LOCKED'), 'https://app.example').searchParams;
+
+        expect([params.getAll('code'), params.getAll('refusalCode')]).toEqual([['sign_in_refused'], ['LOCKED']]);
+    });
+
+    it('O8 (#489): a refusal whose code is outside the shape — the reason and its sentence, no refusal code, nothing of the code or the message', async () =>
     {
         vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', '/auth/error?error={error}');
+        let url = '';
 
-        expect(buildOAuthErrorUrl('bad {reason} &x=//evil', 'failed'))
-            .toBe('/auth/error?error=bad%20%7Breason%7D%20%26x%3D%2F%2Fevil&reason=failed');
+        await levelLinesDuring(async () =>
+        {
+            url = oauthFailureUrl(new SignInRefusedError({ message: 'Call us at 555', details: { code: 'x&reason=cancelled' } }), 'OAuth callback failed');
+        });
+
+        expect(url).toBe('/auth/error?error=Sign-in%20refused.&reason=sign_in_refused');
+    });
+
+    it('O12: a pre-#489 call shape — an any-typed reason — throws a TypeError whose message does not contain that text', () =>
+    {
+        let caught: unknown;
+
+        try
+        {
+            buildOAuthErrorUrl('Google OAuth is not configured' as never);
+        }
+        catch (error)
+        {
+            caught = error;
+        }
+
+        expect(caught).toBeInstanceOf(TypeError);
+        expect(String((caught as Error).message)).not.toContain('Google OAuth is not configured');
     });
 });
 
@@ -714,8 +842,31 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         {
             const outcome = await runOAuthCallback(search, { apiBasePath: '/api/rpc', fetch: throwingFetch });
 
-            expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+            expect(outcome).toEqual({ kind: 'error', message: FAILED, reason: 'failed' });
         }
+    });
+
+    it('O3 (#489): ?error=Call+us on the callback page — the message is the provider_error sentence, never the URL\'s text', () =>
+    {
+        expect(readCallbackInput('?error=Call+us')).toEqual({ kind: 'error', message: PROVIDER_ERROR, reason: 'provider_error' });
+    });
+
+    it('O4 (page): the app\'s refusal code beside sign_in_refused reaches onError; a forged one, or one beside another reason, does not', () =>
+    {
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=LOCKED'))
+            .toEqual({ kind: 'error', message: 'Sign-in refused.', reason: 'sign_in_refused', refusalCode: 'LOCKED' });
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=%3Cb%3ECall+us%3C%2Fb%3E')).not.toHaveProperty('refusalCode');
+        expect(readCallbackInput('?error=x&reason=cancelled&refusalCode=LOCKED')).not.toHaveProperty('refusalCode');
+        expect(readCallbackInput('?error=x&reason=sign_in_refused&code=LOCKED')).not.toHaveProperty('refusalCode');
+    });
+
+    it('O11 (#489): onError and errorComponent are handed the reason\'s sentence, the reason and the refusal code', async () =>
+    {
+        const refused = await outcomeFor('?error=x&reason=sign_in_refused&refusalCode=LOCKED');
+        const cancelled = await outcomeFor('?error=Call+us&reason=cancelled');
+
+        expect(refused.kind === 'error' && oauthCallbackErrorArguments(refused)).toEqual(['Sign-in refused.', 'sign_in_refused', 'LOCKED']);
+        expect(cancelled.kind === 'error' && oauthCallbackErrorArguments(cancelled)).toEqual([CANCELLED, 'cancelled', undefined]);
     });
 
     /** The finalize a callback page posts, through the proxy rules, answered by the real route. */
@@ -746,7 +897,7 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         expect(answer.status).toBe(401);
         expect(answer.body).toEqual({ success: false, message: 'OAuth session could not be verified. Please try again.', reason: 'invalid_state' });
         expect(JSON.stringify(answer.body)).not.toMatch(/Vector|JWE|JWT|claim/);
-        expect(outcome).toEqual({ kind: 'error', message: 'OAuth session could not be verified. Please try again.', reason: 'invalid_state' });
+        expect(outcome).toEqual({ kind: 'error', message: 'This sign-in could not be confirmed as started in this browser. Start it again.', reason: 'invalid_state' });
     });
 
     it('R9c: a per-start pending cookie past its ten minutes — 401 expired', async () =>

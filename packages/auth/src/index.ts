@@ -88,7 +88,7 @@ export { UUID_PATTERN, EMAIL_PATTERN, BASE64_PATTERN, FINGERPRINT_PATTERN, PHONE
 export * from './server/rbac';
 
 // OAuth error redirect reason codes (#126) — `reason=` on the error URL
-export { OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
+export { OAUTH_ERROR_MESSAGES, OAUTH_ERROR_REASONS, isOAuthErrorReason, type OAuthErrorReason } from './lib/oauth-error-reason';
 export { OAUTH_LINK_OUTCOMES, isOAuthLinkOutcome, type OAuthLinkOutcome } from './lib/oauth-link-outcome';
 
 // ============================================================================

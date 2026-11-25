@@ -10,6 +10,8 @@
  *     the account keeps one link; after the unlink that provider does not sign
  *     in to the account; the migration keeps the most recently used duplicate.
  * T6: a link whose stored token cannot be decrypted still signs in and unlinks.
+ * O4: the code of the app's `signIn.admit` refusal reaches the error page as
+ *     `refusalCode`, through the callback route and on through the Next.js handler (#489).
  *
  * Real requests against the mounted auth router; Kakao is a stand-in whose
  * authorization codes name the identity their token response establishes.
@@ -41,6 +43,8 @@ import {
     authRegisterEvent,
     oauthLinkedEvent,
 } from '@/server/events';
+import { NextRequest } from 'next/server';
+import { createOAuthCallbackHandler } from '@/nextjs/oauth-handlers';
 
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
@@ -503,6 +507,24 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
 
             expect((await unlinkKakao(await ownerSession())).status).toBe(200);
             expect(await ownerKakaoRows()).toEqual([]);
+        });
+    });
+
+    describe('O4: the app\'s refusal code reaches the error page (#489)', () =>
+    {
+        it('admit refuses with details.code — the route\'s redirect carries it as refusalCode, and the Next.js handler passes it on', async () =>
+        {
+            vi.stubEnv('SPFN_AUTH_OAUTH_ERROR_URL', `${APP_URL}/api/auth/callback?error={error}`);
+            configureSignIn({ admit: () => ({ refuse: { code: 'policy.LOCKED-2' } }) });
+
+            const backend = await kakaoCallback({ code: 'code-linked' });
+            const page = new URL((await createOAuthCallbackHandler()(new NextRequest(backend))).headers.get('location')!);
+
+            expect([backend.searchParams.get('reason'), backend.searchParams.get('refusalCode')]).toEqual(['sign_in_refused', 'policy.LOCKED-2']);
+            expect(page.pathname).toBe('/auth/error');
+            expect([page.searchParams.get('reason'), page.searchParams.get('refusalCode')]).toEqual(['sign_in_refused', 'policy.LOCKED-2']);
+            expect([backend.searchParams.has('code'), page.searchParams.has('code')]).toEqual([false, false]);
+            expect(page.searchParams.get('error')).toBe('Sign-in refused.');
         });
     });
 });

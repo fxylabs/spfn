@@ -22,7 +22,12 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { runOAuthCallback, type OAuthErrorReason } from '#nextjs/client-shared';
+import {
+    oauthCallbackErrorArguments,
+    runOAuthCallback,
+    type OAuthCallbackErrorArguments,
+    type OAuthErrorReason,
+} from '#nextjs/client-shared';
 
 export interface OAuthCallbackProps
 {
@@ -50,9 +55,9 @@ export interface OAuthCallbackProps
     loadingComponent?: React.ReactNode;
 
     /**
-     * Custom error component
+     * Custom error component, given what `onError` is given.
      */
-    errorComponent?: (error: string, reason: OAuthErrorReason) => React.ReactNode;
+    errorComponent?: (error: string, reason: OAuthErrorReason, refusalCode?: string) => React.ReactNode;
 
     /**
      * Callback after successful OAuth. Not called on the way to the confirm page:
@@ -64,8 +69,13 @@ export interface OAuthCallbackProps
      * Callback on error. `reason` is a closed code (#126) a page can branch on:
      * the backend's when the callback query carried one, `expired`,
      * `invalid_state` or `no_cookie` for a refused finalize, `failed` otherwise.
+     * `error` is the fixed sentence for that reason (`OAUTH_ERROR_MESSAGES`),
+     * never the callback URL's text, which anyone can write (#489).
+     * `refusalCode` is the app's `signIn.admit` refusal code on
+     * `sign_in_refused`, when the query carried one in its shape: a key to look
+     * your own copy up by, not text to show.
      */
-    onError?: (error: string, reason: OAuthErrorReason) => void;
+    onError?: (error: string, reason: OAuthErrorReason, refusalCode?: string) => void;
 }
 
 export function OAuthCallback({
@@ -77,7 +87,7 @@ export function OAuthCallback({
     onError,
 }: OAuthCallbackProps)
 {
-    const [error, setError] = useState<{ message: string; reason: OAuthErrorReason } | null>(null);
+    const [error, setError] = useState<OAuthCallbackErrorArguments | null>(null);
 
     // One finalize per page load. React strict mode runs this effect twice in
     // development, and a parent passing inline callbacks re-runs it on every
@@ -98,8 +108,10 @@ export function OAuthCallback({
             {
                 if (outcome.kind === 'error')
                 {
-                    setError({ message: outcome.message, reason: outcome.reason });
-                    onError?.(outcome.message, outcome.reason);
+                    const errorArguments = oauthCallbackErrorArguments(outcome);
+
+                    setError(errorArguments);
+                    onError?.(...errorArguments);
 
                     return;
                 }
@@ -119,13 +131,13 @@ export function OAuthCallback({
     {
         if (errorComponent)
         {
-            return <>{errorComponent(error.message, error.reason)}</>;
+            return <>{errorComponent(...error)}</>;
         }
 
         return (
             <div style={{ padding: '20px', textAlign: 'center' }}>
                 <h2>Authentication Error</h2>
-                <p style={{ color: 'red' }}>{error.message}</p>
+                <p style={{ color: 'red' }}>{error[0]}</p>
                 <button onClick={() => window.location.href = '/'}>
                     Go Home
                 </button>

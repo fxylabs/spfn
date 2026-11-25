@@ -85,7 +85,7 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
 
         const outcome = await runOAuthCallback(`?error=access_denied&mfaChallenge=${CHALLENGE}`, options);
 
-        expect(outcome).toEqual({ kind: 'error', message: 'access_denied', reason: 'cancelled' });
+        expect(outcome).toEqual({ kind: 'error', message: 'The sign-in was cancelled at the provider.', reason: 'cancelled' });
         expect(options.fetch).not.toHaveBeenCalled();
     });
 
@@ -226,14 +226,14 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
     {
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, optionsWith(jsonResponse(200, { success: true })));
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+        expect(outcome).toEqual({ kind: 'error', message: 'OAuth sign-in could not be completed.', reason: 'failed' });
     });
 
     it('row 6: a network failure is an error outcome with a fixed sentence, not a throw (#382)', async () =>
     {
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, optionsWith(new TypeError('Failed to fetch')));
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+        expect(outcome).toEqual({ kind: 'error', message: 'OAuth sign-in could not be completed.', reason: 'failed' });
     });
 
     it('row 6: a failure message that echoes the challenge never reaches onError', async () =>
@@ -242,15 +242,15 @@ describe('OAuthCallback — mfaChallenge (#107)', () =>
 
         const outcome = await runOAuthCallback(`?mfaChallenge=${CHALLENGE}`, options);
 
-        expect(outcome).toEqual({ kind: 'error', message: 'Failed to finalize OAuth', reason: 'failed' });
+        expect(outcome).toEqual({ kind: 'error', message: 'OAuth sign-in could not be completed.', reason: 'failed' });
     });
 
-    it('row 7: neither userId/keyId nor mfaChallenge is "Missing required parameters" as today', async () =>
+    it('row 7: neither userId/keyId nor mfaChallenge is failed, its fixed sentence (#489)', async () =>
     {
         const options = optionsWith(jsonResponse(200, {}));
 
-        expect(await runOAuthCallback('?userId=7', options)).toEqual({ kind: 'error', message: 'Missing required parameters', reason: 'failed' });
-        expect(await runOAuthCallback('', options)).toEqual({ kind: 'error', message: 'Missing required parameters', reason: 'failed' });
+        expect(await runOAuthCallback('?userId=7', options)).toEqual({ kind: 'error', message: 'OAuth sign-in could not be completed.', reason: 'failed' });
+        expect(await runOAuthCallback('', options)).toEqual({ kind: 'error', message: 'OAuth sign-in could not be completed.', reason: 'failed' });
         expect(options.fetch).not.toHaveBeenCalled();
     });
 });

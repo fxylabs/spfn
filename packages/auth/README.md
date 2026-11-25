@@ -309,7 +309,7 @@ real secret values out of band, never commit them.
 | `SPFN_AUTH_KAKAO_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Kakao app keys accepted as native id_token audience (native app key); `SPFN_AUTH_KAKAO_CLIENT_ID` is also accepted, so either one enables Kakao native sign-in |
 | `SPFN_AUTH_NAVER_NATIVE_CLIENT_IDS` | `.env.server` | — | comma-separated Naver client IDs accepted as native id_token audience. `SPFN_AUTH_NAVER_CLIENT_ID` is also accepted, so this is only needed for a separate app application |
 | `SPFN_AUTH_OAUTH_SUCCESS_URL` | `.env.server` | — | default `/auth/callback` |
-| `SPFN_AUTH_OAUTH_ERROR_URL` | `.env.server` | — | default `/auth/error?error={error}`; `{reason}` takes the [reason code](#the-error-page-reason-codes), appended as `reason=` when absent |
+| `SPFN_AUTH_OAUTH_ERROR_URL` | `.env.server` | — | default `/auth/error?error={error}`; `{reason}` takes the [reason code](#the-error-page-reason-codes), appended as `reason=` when absent; `{error}` its fixed sentence; `{refusalCode}` the `admit` refusal code on `sign_in_refused`, appended as `refusalCode=` when absent |
 | `SPFN_AUTH_RESERVED_USERNAMES` / `_USERNAME_MIN_LENGTH` / `_USERNAME_MAX_LENGTH` | `.env.server` | — | username rules |
 | `SPFN_AUTH_SIGNUP_LINK_TTL_MINUTES` / `_SETUP_TTL_MINUTES` | `.env.server` | — | defaults `30` / `15` — see [Verified-email signup](#verified-email-signup) |
 | `SPFN_AUTH_SIGNUP_CONFIRM_PATH` | `.env.server` | — | default `/signup/confirm`; the page in your app the emailed link opens |
@@ -1040,7 +1040,8 @@ The code is a constant for the client to branch on — 1 to 64 characters, each 
 `_`, `-` or `.` (`ACCOUNT_LOCKED`, `temporary-password-expired`) — never a message or data
 interpolated into one. Any other answer, a code outside that shape included, is refused as `admit`
 throwing is: 500, no session.
-On the web OAuth flow the refusal is the error redirect with `reason=sign_in_refused`. A refused
+On the web OAuth flow the refusal is the error redirect with `reason=sign_in_refused` and your
+code as `refusalCode` ([the error page](#the-error-page-reason-codes)). A refused
 registration (`register`, `signup-link`, `invitation`) rolls the new account back.
 
 `call` says which of an attempt's calls this is: `before-proof`, the first call on `password`,
@@ -5710,44 +5711,85 @@ a sign-in that was in flight across it shows a state validation error; trying ag
 ### The error page: `reason` codes
 
 Every redirect to `SPFN_AUTH_OAUTH_ERROR_URL` (and to `createOAuthCallbackHandler`'s
-`errorRedirectUrl`) carries `reason=<code>` beside the `error` text, classified by the error's
-type. Branch on `reason`; show `error` if you like. The codes are the closed union
-`OAuthErrorReason` (with `OAUTH_ERROR_REASONS` and `isOAuthErrorReason`) from `@spfn/auth`,
-`@spfn/auth/server` and `@spfn/auth/nextjs/client`.
+`errorRedirectUrl`) carries `reason=<code>`, classified by the error's type, and `error`, the fixed
+English sentence for that code. The codes are the closed union `OAuthErrorReason` (with
+`OAUTH_ERROR_REASONS` and `isOAuthErrorReason`), and the sentences are `OAUTH_ERROR_MESSAGES`
+(`Record<OAuthErrorReason, string>`), all from `@spfn/auth`, `@spfn/auth/server` and
+`@spfn/auth/nextjs/client`.
 
-| `reason` | cause | `error` text |
-|---|---|---|
-| `cancelled` | the person declined at the provider (`error=access_denied`, or Apple's `error=user_cancelled_authorize`) | the provider's `error_description` or `error` |
-| `expired` | the sign-in took longer than ten minutes | a fixed sentence |
-| `invalid_state` | the state does not decrypt, it names another provider, the CSRF cookie holds a different nonce, or the pending cookie does not unseal or holds another key | a fixed sentence |
-| `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) | a fixed sentence |
-| `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed | the provider's text; a fixed sentence for a library failure |
-| `account_unavailable` | the account is disabled, pending deletion, or gone | unchanged |
-| `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) | a fixed sentence |
-| `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) | a fixed sentence |
-| `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels.signup: false`](#which-sign-in-channels-exist-channels) (#308) | a fixed sentence |
-| `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) | a fixed sentence |
-| `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written | a fixed sentence |
-| `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written | unchanged |
-| `failed` | anything else — missing `code`/`state`, an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement | a typed error's text unchanged; for any other error the fixed `OAuth callback failed` (`OAuth link failed` when the link state could not be read). The error is logged as core's error handler logs it: error level for an untyped error or a typed 5xx, warn for a refusal (#382) |
+**Render the page by `reason` (and `refusalCode`), never by the `error` text on its own URL.** A URL
+parameter is writable by anyone: a forged link to your error page can put any `error=` on it, and a
+page that renders `error` shows whatever that link put there — the package cannot prevent it. Show
+your own copy for each `reason`, or `OAUTH_ERROR_MESSAGES[reason]` for the default sentence. The
+package's own readers do this: `createOAuthCallbackHandler` and `OAuthCallback` ignore the `error`
+text on their URL and give the sentence for the reason they read. Nothing the provider, the request
+or the application wrote reaches the redirect: not the provider's `error_description`, not a typed
+error's message, not your `admit`'s message.
 
-The `error` text is a typed error's own message — a `SerializableError` meant for the client, not
-one marked `internal` — or a fixed sentence. Any other error's message (a failed statement's carries
-its SQL and every bound value) never reaches the redirect; `@spfn/auth:service` logs it at error
-level, the redirect's fixed sentence as the line's message and the error's description beside it.
-A typed error meant for the client is the user's answer, not a fault, and is not logged there.
+| `reason` | cause |
+|---|---|
+| `cancelled` | the person declined at the provider (`error=access_denied`, or Apple's `error=user_cancelled_authorize`) |
+| `expired` | the sign-in took longer than ten minutes |
+| `invalid_state` | the state does not decrypt, it names another provider, the CSRF cookie holds a different nonce, or the pending cookie does not unseal or holds another key |
+| `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) |
+| `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed |
+| `account_unavailable` | the account is disabled, pending deletion, or gone |
+| `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) |
+| `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) |
+| `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels.signup: false`](#which-sign-in-channels-exist-channels) (#308) |
+| `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) |
+| `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written |
+| `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written. The redirect also carries `refusalCode`, below |
+| `failed` | anything else — missing `code`/`state`, a provider not configured (named in a warn line, below), an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement |
+
+**`refusalCode` on `sign_in_refused`.** The `code` your `admit` refused with (`{ refuse: { code } }`,
+the `details.code` of `SignInRefusedError`) travels as `refusalCode`, so the page can tell your
+refusals apart and look up its own copy for each. It is a key, not text: nothing in the package
+displays it. A reader passes it on only beside `reason=sign_in_refused` and only in the shape
+`admit` must answer (1 to 64 letters, digits, `_`, `-` or `.`); any other value is dropped. A forged
+link can still put a code of that shape on your page, so treat an unknown one as you would no code
+at all. The parameter is not called `code`: this README once recommended the template
+`/auth/error?error={error}&code={reason}`, where `code` is the reason, and a page built on it keeps
+reading the reason from `code` — on `sign_in_refused` it now sees
+`code=sign_in_refused&refusalCode=<your code>`, one value under each name. That template has no
+`reason` of its own, though: its `{reason}` sits inside `code=`, so it is filled there and nothing
+is appended. A page built on the package's own readers (`createOAuthCallbackHandler`,
+`OAuthCallback`) needs `reason` as its own parameter — with this template they find none, fall back
+to `provider_error`, and drop the refusal code. Add `reason={reason}` to the template, or drop
+`code={reason}` so `reason` is appended.
+
+The error behind a redirect is logged as core's error handler logs it: `@spfn/auth:service` at
+error level for an untyped error or a typed 5xx — `OAuth callback failed` (`OAuth link failed` when
+the link state could not be read) as the line's message and the error's description beside it — and
+at warn for a refusal (#382). A provider's
+`error=` that reads as `provider_error` leaves one warn line, `OAuth provider returned an error`
+with `{ provider, reason, providerError }`: `providerError` is the provider's `error` value when it
+is a registered code (RFC 6749 §4.1.2.1's `invalid_request`, `unauthorized_client`,
+`access_denied`, `unsupported_response_type`, `invalid_scope`, `server_error`,
+`temporarily_unavailable`, or Apple's `user_cancelled_authorize`) and `unrecognised` otherwise —
+on a sign-in's callback and on a [link's](#linking-a-provider-to-a-signed-in-account) alike, whose
+redirect carries `oauthLink=provider_error` only. Nothing else of that query is logged:
+`error_description` is text anyone can write on the callback. A sign-in start for a provider that is
+not configured redirects with `failed` and leaves the warn line `OAuth provider is not configured`
+with `{ provider }`: `google` on Google's route, and on `/_auth/oauth/:provider` the provider the
+segment names when one is registered under it — a segment that names none is the caller's text and
+is not logged.
 
 A refused sign-in writes nothing: no account, no social row, no key, no stored token, no event.
 The callback asks the provider first, then does every write in one transaction, and builds the
 error page only after that transaction rolled back.
 
-`SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}` beside `{error}`
-(`/auth/error?error={error}&code={reason}`); a template without `{reason}` gets `reason` as a query
-parameter, placed before any `#fragment`. `OAuthCallback` passes the code too —
-`onError(message, reason)` and `errorComponent(message, reason)`: the backend's code when the
-callback query carried one, `expired`, `invalid_state` or `no_cookie` for a finalize the proxy
-refused, and
-`failed` otherwise.
+`SPFN_AUTH_OAUTH_ERROR_URL` takes `{reason}`, `{error}` and `{refusalCode}`
+(`/auth/error?why={reason}&msg={error}&key={refusalCode}`); a template without `{reason}` gets
+`reason` as a query parameter, placed before any `#fragment`, and one without `{refusalCode}` gets
+`refusalCode` the same way when there is one. Without a refusal code, `{refusalCode}` is replaced by
+nothing. A template with its own `refusalCode=` and no `{refusalCode}` placeholder gets it twice, as
+`reason` always has — use the placeholder. `createOAuthCallbackHandler` forwards `refusalCode`
+under the same name, and `OAuthCallback` passes the same three — `onError(message, reason,
+refusalCode?)` and
+`errorComponent(message, reason, refusalCode?)`: `message` is `OAUTH_ERROR_MESSAGES[reason]`;
+`reason` is the backend's code when the callback query carried one, `expired`, `invalid_state` or
+`no_cookie` for a finalize the proxy refused, and `failed` otherwise; `refusalCode` as above.
 
 ### Provider-initiated unlink notifications (`unlink-notify`)
 
@@ -6936,7 +6978,8 @@ Notes:
   hook included. A rejection is not retried. Put side effects in `authRegisterEvent`, which fires
   once, for the attempt that committed.
 - On the **web** OAuth flow a rejection surfaces as the standard OAuth error redirect
-  (302 to the app's OAuth error URL, message only) — not a 403 JSON response. The native
+  (302 to the app's OAuth error URL with `reason=failed` and its fixed sentence; the rejection's
+  message does not travel, #489) — not a 403 JSON response. The native
   OAuth flow, credentials, and invitation channels return the error status (403) directly.
 
 ## Admission: one answer to "may this person be let in"

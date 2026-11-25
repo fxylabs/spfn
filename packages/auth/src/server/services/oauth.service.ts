@@ -8,7 +8,7 @@
  */
 
 import { env } from '@spfn/auth/config';
-import { errorLogLevel, isSerializableError, ValidationError } from '@spfn/core/errors';
+import { errorLogLevel, ValidationError } from '@spfn/core/errors';
 import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import {
     AccountDisabledError,
@@ -30,7 +30,15 @@ import {
 import { usersRepository, socialAccountsRepository, userProfilesRepository, type FoldedEmailMatch } from '../repositories';
 import { authLogger } from '../logger';
 import { isSafeReturnPath } from '../../lib/return-path';
-import { withOAuthErrorReason, type OAuthErrorReason } from '../../lib/oauth-error-reason';
+import {
+    OAUTH_ERROR_MESSAGES,
+    isOAuthErrorReason,
+    oauthRefusalCode,
+    providerErrorReason,
+    withOAuthErrorReason,
+    withOAuthRefusalCode,
+    type OAuthErrorReason,
+} from '../../lib/oauth-error-reason';
 import { timingSafeEqualString } from '../lib/csrf';
 import { findStartCookies, legacyStartCookies } from '../lib/oauth/start-cookies';
 import { assertSignInProvider, getOAuthEmailMatch, runBeforeRegister } from '../lib/config';
@@ -1086,14 +1094,91 @@ function buildRedirectUrl(
 /**
  * OAuth 에러 리다이렉트 URL 생성
  *
- * `SPFN_AUTH_OAUTH_ERROR_URL` is a template: `{error}` takes the text, `{reason}`
- * the code (#126). A template without `{reason}` gets it as a query parameter.
+ * `SPFN_AUTH_OAUTH_ERROR_URL` is a template: `{reason}` takes the code (#126),
+ * `{error}` the fixed sentence for it (`OAUTH_ERROR_MESSAGES`), and
+ * `{refusalCode}` the application's refusal code on `sign_in_refused` (#489). A
+ * template without `{reason}` gets it as a query parameter, and `refusalCode`
+ * the same way when there is one. The refusal code is kept only beside
+ * `sign_in_refused` and in the shape `signIn.admit` must answer
+ * (`oauthRefusalCode`). The redirect carries no text a provider, a request or
+ * the application wrote.
+ *
+ * `reason` is checked against the closed set at run time: this signature
+ * replaces the old `buildOAuthErrorUrl(error, reason?)`, whose first argument
+ * was free text, and a caller still in that shape (an `any`-typed argument
+ * compiles) throws a `TypeError` instead of putting that text on the redirect.
  */
-export function buildOAuthErrorUrl(error: string, reason: OAuthErrorReason = 'failed'): string
+export function buildOAuthErrorUrl(reason: OAuthErrorReason, refusalCode?: unknown): string
 {
-    const errorUrl = env.SPFN_AUTH_OAUTH_ERROR_URL || '/auth/error?error={error}';
+    if (!isOAuthErrorReason(reason))
+    {
+        throw new TypeError(
+            `buildOAuthErrorUrl(reason, refusalCode?) takes an OAuthErrorReason; its old free-text first ` +
+            `argument (buildOAuthErrorUrl(error, reason?)) is gone (#489). Got a ${typeof reason}.`,
+        );
+    }
 
-    return withOAuthErrorReason(errorUrl.replace('{error}', encodeURIComponent(error)), reason);
+    const errorUrl = env.SPFN_AUTH_OAUTH_ERROR_URL || '/auth/error?error={error}';
+    const withError = errorUrl.replace('{error}', encodeURIComponent(OAUTH_ERROR_MESSAGES[reason]));
+
+    return withOAuthRefusalCode(withOAuthErrorReason(withError, reason), oauthRefusalCode(reason, refusalCode));
+}
+
+/**
+ * The codes a provider's `error=` is logged by: RFC 6749 §4.1.2.1's, and Apple's
+ * `user_cancelled_authorize`, which `providerErrorReason` already reads.
+ */
+const REGISTERED_PROVIDER_ERRORS = new Set([
+    'invalid_request',
+    'unauthorized_client',
+    'access_denied',
+    'unsupported_response_type',
+    'invalid_scope',
+    'server_error',
+    'temporarily_unavailable',
+    'user_cancelled_authorize',
+]);
+
+/**
+ * The reason for a provider's own `error=` on a callback, a sign-in's or a
+ * link's (#489): `cancelled` or `provider_error`.
+ *
+ * A `provider_error` leaves the operator one warn line naming the provider's
+ * code when it is a registered one and `unrecognised` otherwise: the redirect,
+ * a sign-in's error page or a link's outcome, carries only the reason. The
+ * callback is unauthenticated and reached before any state check, so nothing
+ * else of the query is read: `error_description` is text for the client's
+ * developer that anyone can write, and reaches neither the log nor the page.
+ */
+export function providerCallbackErrorReason(provider: SocialProvider, error: string): 'cancelled' | 'provider_error'
+{
+    const reason = providerErrorReason(error);
+
+    if (reason === 'provider_error')
+    {
+        authLogger.service.warn('OAuth provider returned an error', {
+            provider,
+            reason,
+            providerError: REGISTERED_PROVIDER_ERRORS.has(error) ? error : 'unrecognised',
+        });
+    }
+
+    return reason;
+}
+
+/**
+ * The error page for a sign-in start whose provider is not configured (#489).
+ *
+ * The redirect carries `failed` only, so the operator's warn line is where the
+ * provider is named. The caller passes a name the route fixes or the registry
+ * holds, never a path segment: one no provider is registered under is the
+ * caller's text, and is not logged.
+ */
+export function providerNotConfiguredUrl(provider: SocialProvider): string
+{
+    authLogger.service.warn('OAuth provider is not configured', { provider });
+
+    return buildOAuthErrorUrl('failed');
 }
 
 /** Error classes the callback names a reason for; anything else is `failed`. */
@@ -1120,27 +1205,21 @@ export function oauthErrorReason(error: unknown): OAuthErrorReason
 }
 
 /**
- * The error redirect for a caught error: its text and its reason code (#382).
- *
- * A typed error meant for the client — a `SerializableError` not marked
- * `internal`, by core's own `isSerializableError`, the check its error handler
- * makes — keeps its message, as that handler answers it. Any
- * other error's message may carry a failed statement's SQL and bound values,
- * so the redirect carries `fallback` instead. The reason is the error's type
- * either way.
+ * The error redirect for a caught error: its reason code, by the error's type
+ * (#382), and for the application's `SignInRefusedError` its `details.code`
+ * (#489). The error's message never reaches the redirect, a typed one's
+ * included: the page shows the reason's sentence or its own copy.
  *
  * The redirect is the answer core's error handler would otherwise have given,
- * so the error is logged as that handler logs it (`logOAuthFailure`): a sign-in
- * that fails on a fault — a missing default role, a database error, a typed
- * 5xx — must still leave the operator a line.
+ * so the error is logged as that handler logs it (`logOAuthFailure`), under
+ * `logMessage`: a sign-in that fails on a fault — a missing default role, a
+ * database error, a typed 5xx — must still leave the operator a line.
  */
-export function oauthFailureUrl(error: unknown, fallback: string): string
+export function oauthFailureUrl(error: unknown, logMessage: string): string
 {
-    const forClient = isSerializableError(error) && (error as { internal?: boolean }).internal !== true;
+    logOAuthFailure(error, logMessage);
 
-    logOAuthFailure(error, fallback);
-
-    return buildOAuthErrorUrl(forClient ? error.message : fallback, oauthErrorReason(error));
+    return buildOAuthErrorUrl(oauthErrorReason(error), error instanceof SignInRefusedError ? error.details?.code : undefined);
 }
 
 /**
