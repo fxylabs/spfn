@@ -743,6 +743,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oauthFailureUrl(error, logMessage)` no longer puts any message on the redirect. New exports:
   `OAUTH_ERROR_MESSAGES` from `@spfn/auth`, `@spfn/auth/server` and `@spfn/auth/nextjs/client`. The
   mobile contract does not move.
+- **BREAKING: @spfn/auth: the OAuth error page tells a pending deletion and an unverified email
+  apart (#489).** With the redirect's `error` fixed to the sentence for `reason` (above), two
+  refusals a person can resolve themselves read like ones they cannot: a sign-in to an account
+  within its deletion grace period (`AccountPendingDeletionError`) redirected with
+  `reason=account_unavailable` and `This account cannot sign in.`, shared with a disabled account and
+  one that is gone; a first sign-in whose provider did not verify an email that belongs to an
+  account (`UnverifiedEmailLinkError`, `oauthEmailMatch` unset or `'attach'`) redirected with
+  `reason=failed` and `OAuth sign-in could not be completed.` Each now has its own code in
+  `OAUTH_ERROR_REASONS` and its own sentence in `OAUTH_ERROR_MESSAGES`: `pending_deletion` —
+  `This account is scheduled for deletion. Cancel the deletion to sign in.` — and
+  `email_unverified` — `An account with this email already exists, and the provider has not
+  verified the email. Verify it with the provider, or sign in to the account and link this provider
+  from settings.` `account_unavailable` keeps the disabled account and the one that is gone, and
+  `failed` everything else. Nothing more goes on the redirect — no purge date. The link flow's
+  `oauthLink` outcomes do not change: a link refused for a pending deletion still ends
+  `account_unavailable`. The error classes, their bodies and the mobile contract do not move. This
+  lands with the change above, before any release carried it. **Migration:** a page that branched on
+  `account_unavailable` or `failed` for these two cases, or keeps an exhaustive table over
+  `OAuthErrorReason` (a `Record<OAuthErrorReason, …>` no longer compiles without them), adds
+  `pending_deletion` and `email_unverified`; a `pending_deletion` page offers
+  `POST /_auth/deletion/cancel`, which needs the account's email or phone plus
+  its password or a verification token sent there — an account with neither an
+  email nor a phone (a provider sign-in that stored no email) has no cancel path yet
+  (gitea#519).
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored

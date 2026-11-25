@@ -12,6 +12,8 @@
  * T6: a link whose stored token cannot be decrypted still signs in and unlinks.
  * O4: the code of the app's `signIn.admit` refusal reaches the error page as
  *     `refusalCode`, through the callback route and on through the Next.js handler (#489).
+ * O5: an account pending deletion and an unverified email matching an account
+ *     each reach the error page as their own reason, with its sentence (#489).
  *
  * Real requests against the mounted auth router; Kakao is a stand-in whose
  * authorization codes name the identity their token response establishes.
@@ -24,7 +26,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { authMigrations } from '../helpers/migrations';
 import { mountAuthApp, resetMemoryRateLimitStore } from '../helpers/oauth2';
-import { userPublicKeys, userSocialAccounts, users } from '@/server/entities';
+import { accountDeletionRequests, userPublicKeys, userSocialAccounts, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateClientToken, generateKeyPair } from '@/server/lib/crypto';
 import { registerOAuthProvider, type NormalizedIdentity, type OAuthProvider } from '@/server/lib/oauth';
@@ -231,6 +233,18 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
         return getTestDb().update(users).set({ status }).where(eq(users.id, ownerId));
     }
 
+    /** A pending deletion, as a request leaves it. */
+    async function scheduleOwnerDeletion(): Promise<void>
+    {
+        await getTestDb().insert(accountDeletionRequests).values({
+            userId: ownerId,
+            userPublicId: String(ownerId),
+            purgeScheduledAt: new Date(Date.now() + 30 * 86_400_000),
+            requestedBy: 'self',
+        });
+        await getTestDb().update(users).set({ deletion: 'pending' }).where(eq(users.id, ownerId));
+    }
+
     /** Every row a sign-in can write, tokens included. */
     async function snapshot(): Promise<string>
     {
@@ -341,6 +355,19 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
                 callback: () => kakaoCallback({ code: 'code-linked' }),
             },
         ],
+        pending_deletion: [{
+            name: 'the linked identity of an account pending deletion (fresh tokens written first)',
+            arrange: scheduleOwnerDeletion,
+            callback: () => kakaoCallback({ code: 'code-linked' }),
+        }],
+        email_unverified: [{
+            name: 'an unverified email matching an account',
+            arrange: async () =>
+            {
+                await getTestDb().delete(userSocialAccounts);
+            },
+            callback: () => kakaoCallback({ code: 'code-unverified' }),
+        }],
         link_only: [{
             name: 'the provider is link-only',
             arrange: async () => configureAuth({ oauthProviders: { kakao: { signIn: false } } }),
@@ -389,14 +416,6 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
             {
                 name: 'a first sign-in whose key registration fails (the account was created first)',
                 callback: () => kakaoCallback({ code: 'code-newcomer' }, { fingerprint: generateKeyPair('ES256').fingerprint }),
-            },
-            {
-                name: 'an unverified email matching an account',
-                arrange: async () =>
-                {
-                    await getTestDb().delete(userSocialAccounts);
-                },
-                callback: () => kakaoCallback({ code: 'code-unverified' }),
             },
         ],
     };
@@ -525,6 +544,34 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
             expect([page.searchParams.get('reason'), page.searchParams.get('refusalCode')]).toEqual(['sign_in_refused', 'policy.LOCKED-2']);
             expect([backend.searchParams.has('code'), page.searchParams.has('code')]).toEqual([false, false]);
             expect(page.searchParams.get('error')).toBe('Sign-in refused.');
+        });
+    });
+
+    describe('O5: a refusal the person can resolve has its own reason and sentence (#489)', () =>
+    {
+        it('the linked identity of an account pending deletion — pending_deletion', async () =>
+        {
+            await scheduleOwnerDeletion();
+
+            const location = await kakaoCallback({ code: 'code-linked' });
+
+            expect([location.searchParams.get('reason'), location.searchParams.get('error')]).toEqual([
+                'pending_deletion',
+                'This account is scheduled for deletion. Cancel the deletion to sign in.',
+            ]);
+        });
+
+        it('a first sign-in whose unverified email belongs to an account — email_unverified', async () =>
+        {
+            await getTestDb().delete(userSocialAccounts);
+
+            const location = await kakaoCallback({ code: 'code-unverified' });
+
+            expect([location.searchParams.get('reason'), location.searchParams.get('error')]).toEqual([
+                'email_unverified',
+                'An account with this email already exists, and the provider has not verified the email. '
+                    + 'Verify it with the provider, or sign in to the account and link this provider from settings.',
+            ]);
         });
     });
 });

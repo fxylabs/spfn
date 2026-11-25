@@ -29,6 +29,7 @@ import { byIpAndCaller, byIpAndIdToken } from '../../lib/rate-limit-keys';
 import { getAuth } from '../../helpers';
 import { oauthFinalizeAuth } from '../../middleware/oauth-finalize-auth';
 import { type OAuthLinkOutcome } from '../../../lib/oauth-link-outcome';
+import { type OAuthErrorReason } from '../../../lib/oauth-error-reason';
 import { deviceProvenance } from '../../lib/device-provenance';
 import {
     oauthStartService,
@@ -208,6 +209,9 @@ async function oauthLinkCallbackRedirect(
     return oauthLinkResultUrl(link, outcome);
 }
 
+/** The sign-in reasons a link reports as `account_unavailable`: its outcomes do not split a pending deletion off (#489). */
+const ACCOUNT_UNAVAILABLE_REASONS: ReadonlySet<OAuthErrorReason> = new Set(['account_unavailable', 'pending_deletion']);
+
 /**
  * A failed link's outcome, by the error's type — the same classes a sign-in's
  * reason reads. The outcome is all the redirect carries, so the error is
@@ -222,7 +226,7 @@ function linkOutcomeOf(err: unknown): OAuthLinkOutcome
         return 'provider_error';
     }
 
-    return oauthErrorReason(err) === 'account_unavailable' ? 'account_unavailable' : 'failed';
+    return ACCOUNT_UNAVAILABLE_REASONS.has(oauthErrorReason(err)) ? 'account_unavailable' : 'failed';
 }
 
 /**

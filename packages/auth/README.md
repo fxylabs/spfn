@@ -5355,7 +5355,7 @@ provider and on both the web callback and `POST /_auth/oauth/:provider/native` (
 
 | `oauthEmailMatch` | Result |
 | --- | --- |
-| unset or `'attach'` | a verified email links the identity to the existing account and signs in to it; an unverified one is refused with `UnverifiedEmailLinkError` (`reason=failed`) |
+| unset or `'attach'` | a verified email links the identity to the existing account and signs in to it; an unverified one is refused with `UnverifiedEmailLinkError` (`reason=email_unverified`) |
 | `'reject'` | refused whether verified or not: the web error page with `reason=email_in_use`, native `409 OAUTH_EMAIL_IN_USE`. Neither account changes — no account, no social row, no key |
 | `'separate'` | a new account, with no email because the other account holds it. `beforeRegister` runs with the provider's email and `emailVerified` as for any sign-up, `auth.register` fires, and the social row keeps the provider's email as `providerEmail` |
 
@@ -5383,7 +5383,7 @@ account stays without an email: the re-login backfill skips an email another acc
 
 The refusal says nothing about the existing account: its details name the provider only, and it
 comes before the account-status check, so a suspended or deleting account is answered
-`email_in_use` too, never `account_unavailable`.
+`email_in_use` too, never `account_unavailable` or `pending_deletion`.
 
 The match finds the address whatever case it is stored in. The startup backfill folds stored emails
 to lower case, but leaves alone rows that differ only by case and logs their user ids as
@@ -5749,14 +5749,16 @@ error's message, not your `admit`'s message.
 | `invalid_state` | the state does not decrypt, it names another provider, the CSRF cookie holds a different nonce, or the pending cookie does not unseal or holds another key |
 | `no_cookie` | the callback or the finalize found none of the cookies the start set: the browser keeps no cookies for the site, or the sign-in began in another browser (added in 0.3.0-beta.38, #129) |
 | `provider_error` | any other provider `error=…`, or the token exchange / user-info call failed |
-| `account_unavailable` | the account is disabled, pending deletion, or gone |
+| `account_unavailable` | the account is disabled or gone |
+| `pending_deletion` | the account is within its deletion grace period; the page offers to cancel the deletion ([`POST /_auth/deletion/cancel`](#account-deletion--recovery)) with the account's email or phone plus its password or a verification token sent there, after which the person signs in again — an account with neither an email nor a phone (a provider sign-in that stored no email) has no cancel path yet (#489, gitea#519) |
+| `email_unverified` | a first sign-in with this provider reported the email of an existing account, the provider did not verify it, and the app left [`oauthEmailMatch`](#when-a-first-sign-ins-email-matches-an-existing-account) unset or `'attach'`; the person verifies the email with the provider, or signs in to that account and links the provider from settings (#489) |
 | `link_only` | the app made this provider [link-only](#link-only-providers-and-recent-authentication): it can be connected from a signed-in account, never used to sign in (added in 0.3.0-beta.50, #157) |
 | `email_in_use` | a first sign-in with this provider reported the email of an existing account and the app set [`oauthEmailMatch: 'reject'`](#when-a-first-sign-ins-email-matches-an-existing-account), or `'attach'` found that email on several accounts stored in different cases (added in 0.3.0-beta.51, #156) |
 | `signup_disabled` | a first sign-in with this provider would have created an account, and the app turned sign-up off with [`channels.signup: false`](#which-sign-in-channels-exist-channels) (#308) |
 | `provider_already_linked` | a first sign-in with this provider matched an account by email, and that account already holds another identity of the same provider — one per provider per account (au5) |
 | `sign_in_contended` | a concurrent sign-in or sign-up committed the same identity or address first, and running this one again did not settle it — signing in again does; nothing was written |
 | `sign_in_refused` | the app refused the sign-in in its [`signIn.admit`](#the-sign-in-guard-signin) (#361); nothing was written. The redirect also carries `refusalCode`, below |
-| `failed` | anything else — missing `code`/`state`, a provider not configured (named in a warn line, below), an unverified email that would link an account (`oauthEmailMatch` unset or `'attach'`), a missing role, a failed statement |
+| `failed` | anything else — missing `code`/`state`, a provider not configured (named in a warn line, below), a missing role, a failed statement |
 
 **`refusalCode` on `sign_in_refused`.** The `code` your `admit` refused with (`{ refuse: { code } }`,
 the `details.code` of `SignInRefusedError`) travels as `refusalCode`, so the page can tell your

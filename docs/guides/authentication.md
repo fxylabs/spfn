@@ -925,7 +925,9 @@ shows whatever that link said. The codes are the closed union `OAuthErrorReason`
 | `invalid_state` | the sign-in cannot be confirmed as started in this browser (state tampered, nonce cookie different, provider mismatch, pending cookie unreadable or for another key) |
 | `no_cookie` | the browser kept none of the cookies the start set — it keeps no cookies for the site, or the sign-in began in another browser |
 | `provider_error` | any other provider error, or the token exchange / user-info call failed |
-| `account_unavailable` | the account is disabled, pending deletion, or gone |
+| `account_unavailable` | the account is disabled or gone |
+| `pending_deletion` | the account is within its deletion grace period; cancelling the deletion (`POST /_auth/deletion/cancel`) with the account's email or phone plus its password or a verification token sent there lets it sign in — an account with neither an email nor a phone (a provider sign-in that stored no email) has no cancel path yet (#489, gitea#519) |
+| `email_unverified` | a first sign-in reported an existing account's email that the provider did not verify (`oauthEmailMatch` unset or `'attach'`); verify it with the provider, or sign in and link the provider from settings (#489) |
 | `link_only` | the app made this provider link-only (#157) |
 | `email_in_use` | a first sign-in reported an existing account's email and the app set `oauthEmailMatch: 'reject'`, or `'attach'` found that email on several accounts stored in different cases (#156) |
 | `signup_disabled` | a first sign-in would have created an account and the app set `channels.signup: false` (#308) |
