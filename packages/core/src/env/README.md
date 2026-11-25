@@ -112,7 +112,7 @@ prefer `defineEnvSchema`.
 | `envBoolean(options)` | `boolean` | `parseBoolean` |
 | `envUrl(options)` | `string` | none (set `validator` yourself, e.g. `parsePostgresUrl`) |
 | `envEnum(allowed, options)` | union of `allowed` | built-in membership check |
-| `envJson<T>(options)` | `T` | `parseJson` |
+| `envJson<T>(options)` | `T` — but giving `T` explicitly stops `required`/`default` reaching the inferred type, so the field becomes `T \| undefined` even with `required: true` | `parseJson` |
 
 ```typescript
 API_KEY: envString({
@@ -140,6 +140,9 @@ APP_LOG_LEVEL: envEnum(['debug', 'info', 'warn', 'error'] as const, {
     default: 'info',
 }),
 
+// `required: true` is written for documentation; giving the type argument stops it (and
+// `default`) from reaching the inferred type, so `env.CONFIG` is still
+// `{ host: string; port: number } | undefined`, not the type itself.
 CONFIG: envJson<{ host: string; port: number }>({
     description: 'JSON configuration',
     required: true,
@@ -155,13 +158,17 @@ in the message (`Types of property 'defualt' are incompatible`). A helper call w
 `defineEnvSchema` is reported on the key and again on the entry, and once more wherever a registry
 is built from that schema, in whichever file. A helper also refuses an option it sets itself:
 `envSecret` takes no `sensitive` (a non-secret is `envString`) and `envEnum` / `envJson` take no
-`validator` (theirs is built in). A wrapper of your own around a helper restates the bound — see
+`validator` (theirs is built in). Every helper also refuses `key` and `type`, even though
+`EnvVarSchema` declares both — write `key` beside a spread call (`{ ...envString({ … }), key:
+'API_KEY' }`) or let `defineEnvSchema` fill it from the object key; `type` is the helper's, never
+yours. A wrapper of your own around a helper restates the bound — see
 [Wrapping a helper](#wrapping-a-helper-onlydeclared-onlydeclaredentries).
 
 | Option | Type | Description |
 |--------|------|-------------|
+| `key` | `string` | Filled by `defineEnvSchema` from the object key, or by you beside a spread call. A helper refuses it inside its own call |
 | `description` | `string` | Purpose / usage (used in CLI validate output) |
-| `type` | `'string' \| 'number' \| 'boolean' \| 'url' \| 'enum' \| 'json'` | Set by the helper; don't pass manually |
+| `type` | `'string' \| 'number' \| 'boolean' \| 'url' \| 'enum' \| 'json'` | Set by the helper. A helper refuses it inside its own call — don't pass it at all |
 | `required` | `boolean` | Throw at access time if unset and no default |
 | `default` | `T` | Value returned when the variable is unset |
 | `validator` | `(value: string) => T` | Parse/validate. Throwing fails validation |

@@ -583,8 +583,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema. Types only: nothing changes at run time and `InferEnvType` infers what it did.
   Migrations: delete an undeclared key such as `category` — it never did anything; drop
   `validator` from `envEnum` and from an inferred `envJson({ description, validator })` — their
-  validator is their own (`envJson<T>({ … })` states the type); a value that is not a secret is
-  `envString`, not `envSecret({ sensitive: false })`. An application's own generic wrapper whose
+  validator is their own (`envJson<T>({ … })` states the type, but that is all it states: with
+  the type argument given, `required` and `default` are not read into the inferred type, so the
+  value is `T | undefined` even with `required: true` — the same as `main`'s explicit form); a
+  value that is not a secret is `envString`, not `envSecret({ sensitive: false })`; `key` and
+  `type` written inside a helper call are refused too — write `key` beside a spread call
+  (`{ ...envString({ … }), key: 'API_KEY' }`) or let `defineEnvSchema` fill it, and leave `type`
+  to the helper. An application's own generic wrapper whose
   type parameter is bounded only by the option type (`<T extends Omit<EnvVarSchema, 'key' |
   'type'>>(o: T) => envString(o)`, `<T extends EnvSchemaCollection>(s: T) =>
   createEnvRegistry(s)`) no longer compiles: restate the bound with the types `@spfn/core/env` now

@@ -10,7 +10,11 @@
  * point compiles everywhere, and a misspelt `required` boots without the
  * variable, a misspelt `default` has none, an `envSecret` `sensitive: false`
  * is overwritten with `true`, and an `envEnum` `validator` is replaced by the
- * enum's own — all silently.
+ * enum's own — all silently. Without the K rows below, widening a helper's own
+ * declared list to admit `key` and `type` compiles everywhere too: `key`
+ * reaches the entry (`defineEnvSchema` then overwrites it with the object's
+ * key, so it looked harmless on `main`), and `type` is silently replaced by
+ * the helper's own.
  *
  * Each directive sits on the line of the undeclared key: the error must land
  * there, not on the whole entry.
@@ -31,6 +35,21 @@
  * | D12 | `defineEnvSchema`                             | key beside a spread helper           |
  * | D13 | `createEnvRegistry`                           | entry handed straight in             |
  * | D14 | `new EnvRegistry`                             | entry handed straight in             |
+ *
+ * `key` and `type` are declared by `EnvVarSchema` itself, so a helper must
+ * exclude both from its own option type — the type parameter it bounds its
+ * call with admits every key `EnvVarSchema` declares unless the helper says
+ * otherwise. The K rows pin that each helper's own `Omit<…, 'key' | 'type'>`
+ * (or the wider exclusion `envSecret` / `envEnum` / `envJson` state) still
+ * excludes both.
+ *
+ * | #   | entry point                                   | form                                 |
+ * |-----|-----------------------------------------------|--------------------------------------|
+ * | K1  | `envString`                                   | `key` inside the call                |
+ * | K2  | `envString`                                   | `type` inside the call               |
+ * | K3  | `envJson`, inferred                           | `key` inside the call                |
+ * | K4  | `envJson`, inferred                           | `type` inside the call               |
+ * | K5  | —                                             | documented spread form compiles      |
  *
  * An application's own generic wrapper around an entry point restates the
  * bound with the two exported types, `OnlyDeclared` and `OnlyDeclaredEntries`.
@@ -148,6 +167,26 @@ describe('an env schema entry states only what its schema declares (#492)', () =
             // @ts-expect-error -- D14
             X: { key: 'X', type: 'string', description: 'x', requried: true },
         });
+    });
+
+    it('K1-K4 `key` and `type` inside a helper call are refused', () =>
+    {
+        // `key` reaches the entry only through `defineEnvSchema`, or a spread beside the call
+        // @ts-expect-error -- K1
+        envString({ description: 'x', key: 'API_KEY' });
+        // @ts-expect-error -- K2 `type` is the helper's own
+        envString({ description: 'x', type: 'number' });
+        // @ts-expect-error -- K3
+        envJson({ description: 'x', key: 'API_KEY' });
+        // @ts-expect-error -- K4
+        envJson({ description: 'x', type: 'number' });
+    });
+
+    it('K5 the documented spread form compiles where an EnvVarSchema is expected', () =>
+    {
+        const entry: EnvVarSchema = { ...envString({ description: 'x' }), key: 'API_KEY' };
+
+        void entry;
     });
 
     it('W1-W5 an application wrapper that restates the bound compiles', () =>
