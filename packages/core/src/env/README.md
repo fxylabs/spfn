@@ -34,7 +34,7 @@ From `@spfn/core/env`:
   `createPasswordParser`
 - Parser composition: `chain`, `withFallback`, `optional`
 - Types: `Parser<T>`, `EnvVarSchema`, `EnvSchemaCollection`, `InferEnvType`,
-  `EnvValidationResult`, `NodeEnv`, `LogLevel`
+  `OnlyDeclared`, `OnlyDeclaredEntries`, `EnvValidationResult`, `NodeEnv`, `LogLevel`
 
 From `@spfn/core/env/loader`:
 
@@ -148,10 +148,15 @@ CONFIG: envJson<{ host: string; port: number }>({
 
 ### `EnvVarSchema` options
 
-An entry takes only the options listed here — a helper or `defineEnvSchema` refuses any other
-key at compile time, on the key itself. A helper also refuses an option it sets itself:
+An entry takes only the options listed here — a helper, `defineEnvSchema` and the registry
+refuse any other key at compile time. A key in an object literal handed to a helper is reported
+on that key; a variable handed to a helper is reported on the call's argument, with the key named
+in the message (`Types of property 'defualt' are incompatible`). A helper call written inside
+`defineEnvSchema` is reported on the key and again on the entry, and once more wherever a registry
+is built from that schema, in whichever file. A helper also refuses an option it sets itself:
 `envSecret` takes no `sensitive` (a non-secret is `envString`) and `envEnum` / `envJson` take no
-`validator` (theirs is built in).
+`validator` (theirs is built in). A wrapper of your own around a helper restates the bound — see
+[Wrapping a helper](#wrapping-a-helper-onlydeclared-onlydeclaredentries).
 
 | Option | Type | Description |
 |--------|------|-------------|
@@ -192,6 +197,69 @@ type Env = InferEnvType<typeof schema>;
 
 Rule: `required: true` **or** a `default` present ⇒ required field. Otherwise optional
 (`| undefined`). `registry.validate()` returns `InferEnvType<typeof schema>`.
+
+### Wrapping a helper (`OnlyDeclared`, `OnlyDeclaredEntries`)
+
+A wrapper of your own whose type parameter is bounded only by the option type does not compile —
+its `T` may carry any key, and the helper refuses that:
+
+```typescript
+function appEnv<T extends Omit<EnvVarSchema, 'key' | 'type'>>(options: T)
+{
+    return envString(options); // error TS2345: 'T' is not assignable to 'OnlyDeclared<T, …>'
+}
+```
+
+Restate the bound with the two exported types. The wrapper's callers then get the same check, and
+its result keeps its inference:
+
+```typescript
+import { createEnvRegistry, defineEnvSchema, envString } from '@spfn/core/env';
+import type { EnvSchemaCollection, EnvVarSchema, OnlyDeclared, OnlyDeclaredEntries } from '@spfn/core/env';
+
+// the option type envString checks against — copy it from the helper's signature
+type StringOptions = Omit<EnvVarSchema, 'key' | 'type'>;
+
+function appEnv<T extends StringOptions>(options: OnlyDeclared<T, StringOptions>)
+{
+    return envString(options); // or envString<T>(options)
+}
+
+function appSchema<T extends Record<string, Omit<EnvVarSchema<any>, 'key'>>>(schema: OnlyDeclaredEntries<T>)
+{
+    return defineEnvSchema(schema);
+}
+
+function appRegistry<T extends EnvSchemaCollection>(schemas: OnlyDeclaredEntries<T>)
+{
+    return createEnvRegistry(schemas);
+}
+
+appEnv({ description: 'x', requried: true }); // error: `requried` is not declared
+appEnv({ description: 'x', default: 'a' }).default; // string, not string | undefined
+```
+
+Each helper checks its own option type: `Omit<EnvVarSchema, 'key' | 'type'>` for `envString` and
+`envUrl`, `Omit<EnvVarSchema<number>, …>` / `Omit<EnvVarSchema<boolean>, …>` for `envNumber` /
+`envBoolean`, `… | 'sensitive'>` for `envSecret`, and `Omit<EnvVarSchema<T>, 'key' | 'type' |
+'validator'>` for `envEnum` / `envJson`. A wrapper around `defineEnvSchema` bounded by
+`Record<string, any>` still compiles, but checks nothing — restate the bound there too.
+
+A wrapper that adds options of its own leaves them out of its bound and writes them before the
+spread; no cast is needed:
+
+```typescript
+type KeyOptions = Omit<StringOptions, 'description'>;
+
+function paymentKey<T extends KeyOptions>(options: OnlyDeclared<T, KeyOptions>)
+{
+    return envString({ description: 'Payment provider key', ...options });
+}
+```
+
+One exception: a `true` or `false` written in that literal does not compile — the literal widens it
+to `boolean` where the helper infers `true`. Write it from a constant of the literal type
+(`const required: true = true;` … `envString({ required, ...options })`).
 
 ---
 

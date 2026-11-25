@@ -83,6 +83,8 @@ export type {
     EnvSchemaCollection,
     EnvLayer,
     InferEnvType,
+    OnlyDeclared,
+    OnlyDeclaredEntries,
 } from './schema';
 
 // Registry

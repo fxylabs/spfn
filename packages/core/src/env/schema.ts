@@ -122,12 +122,43 @@ export type EnvSchemaCollection = Record<string, EnvVarSchema<any>>;
 /**
  * `T` with every key `Declared` does not declare typed `never` — the bound an
  * entry taken through a type parameter needs, since a type parameter turns the
- * compiler's excess-property check off. The error lands on the undeclared key.
+ * compiler's excess-property check off. Each helper checks its options with it.
+ *
+ * Exported so an application's own generic wrapper around a helper can restate
+ * the bound: a wrapper bounded only by `T extends Options` does not compile,
+ * because its `T` may carry any key. `Declared` is the option type in the
+ * helper's signature.
+ *
+ * @example
+ * ```typescript
+ * type StringOptions = Omit<EnvVarSchema, 'key' | 'type'>;
+ *
+ * function appEnv<T extends StringOptions>(options: OnlyDeclared<T, StringOptions>)
+ * {
+ *     return envString(options);
+ * }
+ *
+ * appEnv({ description: 'x', requried: true }); // error: `requried` is not declared
+ * ```
  */
 export type OnlyDeclared<T, Declared> = T & { [K in Exclude<keyof T, keyof Declared>]: never };
 
 /**
- * A collection whose every entry carries only keys {@link EnvVarSchema} declares.
+ * A collection whose every entry carries only keys {@link EnvVarSchema} declares
+ * — the bound `defineEnvSchema`, `createEnvRegistry` and `new EnvRegistry` check
+ * a schema with.
+ *
+ * Exported so an application's own generic wrapper around one of them can
+ * restate the bound; a wrapper bounded only by `T extends EnvSchemaCollection`
+ * does not compile.
+ *
+ * @example
+ * ```typescript
+ * function appRegistry<T extends EnvSchemaCollection>(schemas: OnlyDeclaredEntries<T>)
+ * {
+ *     return createEnvRegistry(schemas);
+ * }
+ * ```
  */
 export type OnlyDeclaredEntries<T> = T & { [K in keyof T]: OnlyDeclared<T[K], EnvVarSchema<any>> };
 

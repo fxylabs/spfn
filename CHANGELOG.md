@@ -576,12 +576,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing at run time reads a key it does not know: `requried: true` booted without the variable,
   `defualt` gave no default, `envSecret`'s `sensitive: false` was overwritten with `true` and
   `envEnum`'s `validator` with the enum's own — all without a word. Each entry point now bounds the
-  entry to the keys its schema type declares, so a key it does not declare is a compile error at
-  that key — written inline, in a variable handed to a helper, or beside a spread helper. Types
-  only: nothing changes at run time and `InferEnvType` infers what it did. Migrations: delete an
-  undeclared key such as `category` — it never did anything; drop `validator` from `envEnum` — an
-  enum's validator is its own; a value that is not a secret is `envString`, not
-  `envSecret({ sensitive: false })`. `@spfn/cms`'s schema loses its two `category` lines.
+  entry to the keys its schema type declares, so a key it does not declare is a compile error. A
+  key in an object literal is reported on that key; a variable handed to a helper is reported on
+  the call's argument, with the key named in the message; a helper call inside `defineEnvSchema`
+  is reported on the key, again on the entry, and once more wherever a registry is built from that
+  schema. Types only: nothing changes at run time and `InferEnvType` infers what it did.
+  Migrations: delete an undeclared key such as `category` — it never did anything; drop
+  `validator` from `envEnum` and from an inferred `envJson({ description, validator })` — their
+  validator is their own (`envJson<T>({ … })` states the type); a value that is not a secret is
+  `envString`, not `envSecret({ sensitive: false })`. An application's own generic wrapper whose
+  type parameter is bounded only by the option type (`<T extends Omit<EnvVarSchema, 'key' |
+  'type'>>(o: T) => envString(o)`, `<T extends EnvSchemaCollection>(s: T) =>
+  createEnvRegistry(s)`) no longer compiles: restate the bound with the types `@spfn/core/env` now
+  exports — `o: OnlyDeclared<T, Omit<EnvVarSchema, 'key' | 'type'>>`, `s: OnlyDeclaredEntries<T>`
+  — and the wrapper's callers get the same check. A wrapper that adds options of its own leaves
+  them out of its bound and writes them before the spread (`envString({ description: '…',
+  ...o })`); a `true`/`false` added that way comes from a constant typed `true`/`false`. See
+  "Wrapping a helper" in the env README. `@spfn/cms`'s schema loses its two `category` lines.
 
 - **BREAKING: @spfn/auth: the account lock refuses to be taken outside a transaction (#494).**
   `usersRepository.lockAccount` and `lockAccountByEmailOrPhone` ran with no transaction open and
