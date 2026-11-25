@@ -513,6 +513,25 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect(lines.error.join('\n')).toContain('Default user role not found');
     });
 
+    it('R6f (#489): a link that ends on AccountPendingDeletionError or UnverifiedEmailLinkError keeps its outcome', async () =>
+    {
+        vi.stubEnv('SPFN_APP_URL', 'https://app.example');
+        const outcomes: (string | null)[] = [];
+
+        for (const failure of [
+            () => new AccountPendingDeletionError({}),
+            () => new AccountDisabledError({ status: 'suspended' }),
+            () => new OAuthAccountNotFoundError(),
+            () => new UnverifiedEmailLinkError(),
+        ])
+        {
+            seams.linkFailure = failure;
+            outcomes.push((await linkPastTheGate(app)).get('oauthLink'));
+        }
+
+        expect(outcomes).toEqual(['account_unavailable', 'account_unavailable', 'account_unavailable', 'failed']);
+    });
+
     it('O5 (#489): a provider error leaves one warn line naming a registered code, unrecognised otherwise, and nothing else of the query', async () =>
     {
         // Every logger shares core's Logger class, so this sees every logger argument, at every level

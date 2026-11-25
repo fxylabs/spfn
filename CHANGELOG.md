@@ -763,7 +763,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `account_unavailable` or `failed` for these two cases, or keeps an exhaustive table over
   `OAuthErrorReason` (a `Record<OAuthErrorReason, …>` no longer compiles without them), adds
   `pending_deletion` and `email_unverified`; a `pending_deletion` page offers
-  `POST /_auth/deletion/cancel`.
+  `POST /_auth/deletion/cancel`, which needs the account's email or phone plus
+  its password or a verification token sent there — an account with neither an
+  email nor a phone (`oauthEmailMatch: 'separate'`) has no cancel path yet
+  (gitea#519).
 - **BREAKING: @spfn/auth: every option the application states is read once, through one rule
   (#477).** Each reader of an options object reached it its own way: `configureDeletion` checked
   `purgeStrategy` and `allowSelfImmediate` with `options.x` (own or inherited, getters run) and stored
