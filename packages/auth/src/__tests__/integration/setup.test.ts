@@ -14,6 +14,7 @@
 
 import { inspect } from 'node:util';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { logger as coreLogger } from '@spfn/core/logger';
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
 import { spyOnAuthLog, type AuthLog } from '../helpers/auth-log';
 import { ensureAdminExists } from '@/server/setup';
@@ -207,9 +208,10 @@ const CONSOLE_METHODS = ['log', 'error', 'warn', 'debug', 'info'] as const;
 
 /**
  * Every line written to the console during `work`, on any method — so a line
- * a mutant adds through core's root logger (which `spyOnAuthLog` cannot see,
- * since it only walks `authLogger`'s children), or straight to `console`,
- * bypassing every logger, is caught too.
+ * straight to `console`, bypassing every logger, is caught too. A line a
+ * mutant adds through core's root logger below its configured level (`info`
+ * by default) never reaches `console` at all — `Logger` drops it before any
+ * transport runs — so that case needs `spyOnCoreLog` instead, not this.
  */
 async function loggedDuring(work: () => Promise<unknown>): Promise<string>
 {
@@ -223,6 +225,28 @@ async function loggedDuring(work: () => Promise<unknown>): Promise<string>
     await work().finally(() => spies.forEach(spy => spy.mockRestore()));
 
     return lines.join('\n');
+}
+
+const CORE_LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'fatal'] as const;
+
+/**
+ * Every call on core's root logger, at any level, in no particular order.
+ * `spyOnAuthLog` only walks `authLogger`'s children, not the root logger
+ * itself, so a line through `coreLogger` (e.g. `coreLogger.debug(...)`)
+ * needs its own spy to be seen — a call-site spy records the arguments
+ * before `Logger`'s internal level check can drop them, so it sees a line
+ * regardless of the root logger's configured level.
+ */
+function spyOnCoreLog(): AuthLog
+{
+    const spies = CORE_LOG_LEVELS.map(level => vi.spyOn(coreLogger, level));
+    const calls = () => spies.flatMap(spy => spy.mock.calls);
+
+    return {
+        calls,
+        text: () => inspect(calls(), { depth: 10 }),
+        restore: () => spies.forEach(spy => spy.mockRestore()),
+    };
 }
 
 // Check if database is available before running tests
@@ -260,15 +284,18 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
     describe('Boot lines name an account by position and id, never by address (#489)', () =>
     {
         let log: AuthLog;
+        let coreLog: AuthLog;
 
         beforeEach(() =>
         {
             log = spyOnAuthLog();
+            coreLog = spyOnCoreLog();
         });
 
         afterEach(() =>
         {
             log.restore();
+            coreLog.restore();
             vi.restoreAllMocks();
             resetPasswordRuleForTests();
             delete process.env[ROLE_EMAIL_DOMAINS_VAR];
@@ -286,6 +313,7 @@ describe.skipIf(!dbAvailable)('Setup - ensureAdminExists()', () =>
             expect(outcomeLines(log)).toEqual(await seedCase.lines());
             for (const secret of seedCase.secrets)
             {
+                expect(coreLog.text().toLowerCase()).not.toContain(secret.toLowerCase());
                 expect(log.text().toLowerCase()).not.toContain(secret.toLowerCase());
                 expect(consoleOutput.toLowerCase()).not.toContain(secret.toLowerCase());
             }

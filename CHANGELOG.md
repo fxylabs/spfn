@@ -612,13 +612,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SPFN_AUTH_ADMIN_ACCOUNTS:` with the parser's `SyntaxError`, whose message V8 builds from the value
   (a short value quoted whole, a long one around the failing token — an address or a password); it
   is now `❌ SPFN_AUTH_ADMIN_ACCOUNTS is not valid JSON`, with nothing of the error. A `null` entry
-  in a `SPFN_AUTH_ADMIN_ACCOUNTS` array, or any other entry the checks below skip, no longer ends
-  the parse: every entry after it is still read, and — unchanged from before this fix — seeded if
-  it is itself valid. **Upgrade note:** on `main`, one bad entry anywhere in the list stopped the
-  whole array being read, so no account after it was ever created; after upgrading, those accounts
-  are created, which can seed a privileged (`admin`/`superadmin`) account the deployment never had
-  before, and an entry the bad one used to shield from `SPFN_AUTH_ROLE_EMAIL_DOMAINS` can now trip
-  that policy's boot refusal. Review the list for entries after one that used to be malformed. Each
+  in a `SPFN_AUTH_ADMIN_ACCOUNTS` array no longer ends the parse: every entry after it is still
+  read, and — unchanged from before this fix — seeded if it is itself valid. **Upgrade note:** on
+  `main`, a `null` entry anywhere in the list stopped the whole array being read there, so no
+  account after it was ever created; an entry that was merely missing a password, or that was a
+  number, a string or an array, was already skipped on its own, with the entries after it still
+  created there too. After upgrading, the accounts that used to sit after a `null` entry are
+  created, which can seed a privileged (`admin`/`superadmin`) account the deployment never had
+  before, and an entry a `null` used to shield from `SPFN_AUTH_ROLE_EMAIL_DOMAINS` can now trip
+  that policy's boot refusal. Review the list for entries after one that used to be `null`. Each
   JSON entry's `email` and `password` must now be non-empty strings, and its `phone` and `role`,
   when present, strings; a number, object or array in any of those used to reach code written for a
   string — a number `password` reached the hash function and its `TypeError` printed the number

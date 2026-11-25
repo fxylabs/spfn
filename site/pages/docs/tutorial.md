@@ -160,8 +160,9 @@ SPFN_AUTH_ADMIN_PASSWORD=SecureAdmin123!
 ```
 
 On boot, `createAuthLifecycle()` creates this account if it doesn't exist — you'll
-see `Admin account created { position: 1, userId: <id>, role: 'superadmin' }` in
-the server log. Rules worth knowing:
+see `[<timestamp>] [pid=<pid>] [module=@spfn/auth:setup] [position=1] [userId=1]
+[role=superadmin] (INFO): Admin account created` in the server log. Rules worth
+knowing:
 
 - The password must have 8+ chars with upper, lower, number, and special character.
 - This simple two-var format seeds the **`superadmin`** role and sets
