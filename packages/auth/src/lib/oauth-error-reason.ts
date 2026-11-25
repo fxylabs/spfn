@@ -48,8 +48,8 @@ export const OAUTH_ERROR_REASONS = [
  * - `pending_deletion` — the account is within its deletion grace period; the
  *   person cancels the deletion (`POST /_auth/deletion/cancel`, the account's
  *   email or phone plus its password or a verification token sent there) to
- *   sign in — an account with neither an email nor a phone
- *   (`oauthEmailMatch: 'separate'`) has no cancel path yet (gitea#519)
+ *   sign in — an account with neither an email nor a phone (a provider
+ *   sign-in that stored no email) has no cancel path yet (gitea#519)
  * - `email_unverified` — a first sign-in with this provider reported the email
  *   of an existing account, and the provider did not verify it; the person
  *   verifies it with the provider, or signs in to that account and links the
