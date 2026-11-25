@@ -112,6 +112,7 @@ import {
     type CallbackOutcome,
 } from '../../nextjs/components/oauth-callback-flow';
 import {
+    OAUTH_ERROR_MESSAGES,
     OAUTH_ERROR_REASONS,
     isOAuthErrorReason,
     withOAuthErrorReason,
@@ -408,11 +409,10 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         expect(libraryThrew.get('error')).toBe(PROVIDER_ERROR);
     });
 
-    it('R5: account disabled, pending deletion, or gone — account_unavailable, its fixed sentence (#489)', async () =>
+    it('R5: account disabled or gone — account_unavailable, its fixed sentence; pending deletion — pending_deletion, its own (#489)', async () =>
     {
         for (const failure of [
             () => new AccountDisabledError({ status: 'suspended' }),
-            () => new AccountPendingDeletionError({}),
             () => new OAuthAccountNotFoundError(),
         ])
         {
@@ -423,9 +423,14 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
             expect(params.get('reason')).toBe('account_unavailable');
             expect(params.get('error')).toBe('This account cannot sign in.');
         }
+
+        seams.callbackFailure = () => new AccountPendingDeletionError({});
+        const pending = await pastTheGate(app);
+
+        expect([pending.get('reason'), pending.get('error')]).toEqual(['pending_deletion', OAUTH_ERROR_MESSAGES.pending_deletion]);
     });
 
-    it('R6: missing code or state, an unverified-email link refusal, a missing role, anything else — failed, its fixed sentence (#382, #489)', async () =>
+    it('R6: missing code or state, a missing role, anything else — failed, its fixed sentence; an unverified-email link refusal — email_unverified (#382, #489)', async () =>
     {
         const missing = await errorRedirect(app, `state=${await stateIssued()}`);
 
@@ -434,7 +439,7 @@ describe('OAuth callback reason codes — backend redirect (#126)', () =>
         seams.callbackFailure = () => new UnverifiedEmailLinkError();
         const typed = await pastTheGate(app);
 
-        expect([typed.get('reason'), typed.get('error')]).toEqual(['failed', FAILED]);
+        expect([typed.get('reason'), typed.get('error')]).toEqual(['email_unverified', OAUTH_ERROR_MESSAGES.email_unverified]);
 
         for (const failure of [
             () => new Error('Default user role not found. Run initializeAuth() first.'),
@@ -932,15 +937,15 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
     it('R9 (types): the codes are a closed union, and the error outcome carries one', () =>
     {
         expectTypeOf<OAuthErrorReason>()
-            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'link_only' | 'email_in_use' | 'signup_disabled' | 'provider_already_linked' | 'sign_in_contended' | 'sign_in_refused' | 'failed'>();
+            .toEqualTypeOf<'cancelled' | 'expired' | 'invalid_state' | 'no_cookie' | 'provider_error' | 'account_unavailable' | 'pending_deletion' | 'email_unverified' | 'link_only' | 'email_in_use' | 'signup_disabled' | 'provider_already_linked' | 'sign_in_contended' | 'sign_in_refused' | 'failed'>();
         expectTypeOf<'unknown_reason'>().not.toMatchTypeOf<OAuthErrorReason>();
         expectTypeOf<Extract<CallbackOutcome, { kind: 'error' }>['reason']>().toEqualTypeOf<OAuthErrorReason>();
-        expect(OAUTH_ERROR_REASONS).toHaveLength(13);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(15);
     });
 
     it('C1 (#156): email_in_use is a reason code, and the email-match refusal maps to it', () =>
     {
-        expect(OAUTH_ERROR_REASONS).toHaveLength(13);
+        expect(OAUTH_ERROR_REASONS).toHaveLength(15);
         expect(OAUTH_ERROR_REASONS).toContain('email_in_use');
         expect(OAUTH_ERROR_REASONS.at(-1)).toBe('failed');
         expect(oauthErrorReason(new OAuthEmailInUseError())).toBe('email_in_use');

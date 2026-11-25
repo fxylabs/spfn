@@ -22,6 +22,8 @@ export const OAUTH_ERROR_REASONS = [
     'no_cookie',
     'provider_error',
     'account_unavailable',
+    'pending_deletion',
+    'email_unverified',
     'link_only',
     'email_in_use',
     'signup_disabled',
@@ -42,7 +44,13 @@ export const OAUTH_ERROR_REASONS = [
  *   browser keeps no cookies for the site, or the sign-in began in another
  *   browser (#129)
  * - `provider_error` — the provider reported an error or could not be reached
- * - `account_unavailable` — the account is disabled, pending deletion, or gone
+ * - `account_unavailable` — the account is disabled or gone
+ * - `pending_deletion` — the account is within its deletion grace period; the
+ *   person cancels the deletion (`POST /_auth/deletion/cancel`) to sign in
+ * - `email_unverified` — a first sign-in with this provider reported the email
+ *   of an existing account, and the provider did not verify it; the person
+ *   verifies it with the provider, or signs in to that account and links the
+ *   provider from settings
  * - `link_only` — the app made this provider link-only (#157): it can be linked
  *   to a signed-in account from settings, never used to sign in
  * - `email_in_use` — a first sign-in with this provider reported the email of
@@ -74,6 +82,8 @@ export const OAUTH_ERROR_MESSAGES: Readonly<Record<OAuthErrorReason, string>> = 
     no_cookie: 'This browser kept none of the cookies this sign-in set. Allow cookies for this site, or start the sign-in again in the browser where it began.',
     provider_error: 'The sign-in provider could not complete the sign-in. Try again.',
     account_unavailable: 'This account cannot sign in.',
+    pending_deletion: 'This account is scheduled for deletion. Cancel the deletion to sign in.',
+    email_unverified: 'An account with this email already exists, and the provider has not verified the email. Verify it with the provider, or sign in to the account and link this provider from settings.',
     link_only: 'This provider can only be linked to a signed-in account, not used to sign in.',
     email_in_use: 'An account with this email already exists. Sign in to it and link this provider from settings.',
     signup_disabled: 'This application does not create accounts by sign-up.',

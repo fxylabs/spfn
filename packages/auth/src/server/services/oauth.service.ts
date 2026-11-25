@@ -1194,7 +1194,8 @@ const REASON_BY_ERROR: [abstract new (...args: never[]) => Error, OAuthErrorReas
     [SignupDisabledError, 'signup_disabled'],
     [SignInRefusedError, 'sign_in_refused'],
     [AccountDisabledError, 'account_unavailable'],
-    [AccountPendingDeletionError, 'account_unavailable'],
+    [AccountPendingDeletionError, 'pending_deletion'],
+    [UnverifiedEmailLinkError, 'email_unverified'],
     [OAuthAccountNotFoundError, 'account_unavailable'],
 ];
 

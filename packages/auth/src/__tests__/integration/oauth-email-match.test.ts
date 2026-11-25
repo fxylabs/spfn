@@ -287,11 +287,11 @@ describe.skipIf(!dbAvailable)('First social sign-in on an email an existing acco
             expect(beforeRegister).not.toHaveBeenCalled();
         });
 
-        it('E2: with nothing set, an unverified matching email is refused with reason failed', async () =>
+        it('E2: with nothing set, an unverified matching email is refused with reason email_unverified (#489)', async () =>
         {
             const before = await snapshot();
 
-            expect(errorReasonOf(await signIn('code-unverified'))).toBe('failed');
+            expect(errorReasonOf(await signIn('code-unverified'))).toBe('email_unverified');
             expect(await snapshot()).toEqual(before);
             expect(logins).toEqual([]);
             expect(registers).toEqual([]);
