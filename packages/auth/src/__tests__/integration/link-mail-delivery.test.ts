@@ -65,7 +65,9 @@ const { getRoleByName } = await import('@/server/services/role.service');
 const { linkMailJob } = await import('@/server/jobs/link-mail');
 const { resetLinkMailFallbackWarning, settleLinkMail } = await import('@/server/lib/link-mail-delivery');
 const { authLogger } = await import('@/server/logger');
+const { spyOnAuthLog } = await import('../helpers/auth-log');
 const { requestPasswordResetService } = await import('@/server/services/password-reset.service');
+const { requestSignupLinkService } = await import('@/server/services/signup-link.service');
 const { createAuthLifecycle } = await import('@/server/lifecycle');
 const { endShutdownRun, getShutdownManager } = await import('@spfn/core/server');
 
@@ -619,6 +621,36 @@ describe.skipIf(!dbAvailable)('Link mail delivery', () =>
             expect(loggedText(logged[0])).not.toMatch(/d8@example\.com|https?:/i);
 
             error.mockRestore();
+        });
+
+        it('row L2: a refused link mail is logged by its row, never by the address (#489)', async () =>
+        {
+            process.env.SPFN_AUTH_LINK_MAIL_DELIVERY = 'inline';
+            const log = spyOnAuthLog();
+            sendEmail.mockResolvedValue({ success: false, error: 'provider refused' });
+            await seedResettable('l2-reset@example.com');
+
+            try
+            {
+                await requestSignupLinkService({ email: 'l2-signup@example.com' });
+                await requestPasswordResetService({ email: 'l2-reset@example.com' });
+                await settleLinkMail();
+
+                const [signupRow] = await signupRows('l2-signup@example.com');
+                const [resetRow] = await resetRows('l2-reset@example.com');
+                const refused = (message: string) => log.calls().filter(([logged]) => logged === message);
+                expect(refused('Failed to send signup link email')).toEqual([
+                    ['Failed to send signup link email', { rowId: signupRow.id, error: 'provider refused' }],
+                ]);
+                expect(refused('Failed to send password reset email')).toEqual([
+                    ['Failed to send password reset email', { rowId: resetRow.id, error: 'provider refused' }],
+                ]);
+                expect(log.text()).not.toMatch(/l2-(signup|reset)@example\.com/i);
+            }
+            finally
+            {
+                log.restore();
+            }
         });
 
         it('row D9: with no pg-boss, a send that throws is logged and the request still answers 200', async () =>

@@ -590,6 +590,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction opened directly on the driver (`getDatabase('write').transaction(…)`, drizzle's own
   `db.transaction`) is not one the repositories run on, so the call is refused as if none were
   open. No schema change, no migration; the mobile contract does not move.
+- **@spfn/auth: a refused link mail is logged by its row, not by its recipient (#489).** The error
+  lines `@spfn/auth:email` writes when the provider refuses a signup link or a password reset link
+  (`Failed to send signup link email`, `Failed to send password reset email`) logged `email` beside
+  `error`; they now log `rowId` — the `signup_link_tokens` or `password_reset_tokens` row — and
+  `error`. `Failed to send account-exists notice` (`@spfn/auth:email` or `:sms`) logged `target`, the
+  address or phone number; it now logs `error` alone. `error` is the provider's answer as
+  `@spfn/notification` returns it, already scrubbed of addresses and phone numbers — also when the
+  provider threw it (below) — and notification logs the same refusal with the recipient masked.
+  There is no setting. A log query that read `email` from the two link lines reads `rowId` instead;
+  the notice line has no replacement. The rule — a line names a person by an id, never by address —
+  is in the auth README under Logging, with the one set of lines that predates it (admin seeding's
+  boot lines). Held by test rows that read every `authLogger` child with `util.inspect`, so an
+  address inside a logged `Error` is seen too.
+- **@spfn/notification: a provider that throws is answered at the channel's provider boundary like
+  one that returns its refusal (#489).** `sendEmail`, `sendSMS`, `sendSlack`, `sendEmailBulk`,
+  `sendSMSBulk` and `sendSlackBulk` scrubbed the error a provider *returned* but let one it *threw*
+  pass untouched: the send rejected with the provider's raw `Error` — `550 5.1.1
+  <user@example.com>: mailbox unavailable`, `Invalid 'To' Phone Number: +15551234567` — so the
+  recipient reached the caller's log, the channel wrote no `send failed` line, the history row
+  stayed `pending`, and a bulk send rejected whole, losing every other item's result. A thrown
+  failure now gets what a returned one gets: its message is scrubbed, the masked `Email send
+  failed` / `SMS send failed` line is written (Slack's `Slack send failed` line carries no
+  recipient to mask), the history row closes as `failed`, and the send resolves with
+  `{ success: false, error }` (in bulk, that item's result) — as the README has promised
+  (`sendEmail`, `sendSMS`, `sendSlack` … do not throw). Not breaking for a caller that follows the
+  README; a caller that caught the rejection reads `result.success` instead.
 - **@spfn/auth: admin actions are logged through the package logger, after the commit (#489).** Five
   `console.log` lines are gone: `[Auth] ⚠️  Invitation cancelled: <email> (reason: <reason>)`,
   `[Auth] 🗑️  Invitation deleted: <id>`, `[Auth] ⏰ Expired <n> old invitations`,

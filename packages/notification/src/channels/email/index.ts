@@ -8,7 +8,8 @@ import { awsSesProvider } from './providers/aws-ses';
 import { getEmailFrom, getEmailReplyTo, env, isHistoryContentStored, isTrackingEnabled, getTrackingBaseUrl } from '../../config';
 import { processTrackingHtml } from '../../tracking/processor';
 import { renderTemplateChannel, getTemplate } from '../../templates';
-import { maskRecipients, historyRecipient, scrubSendResult } from '../../privacy';
+import { maskRecipients, historyRecipient } from '../../privacy';
+import { sendThroughProvider } from '../provider-boundary';
 import {
     markManySent,
     markManyFailed,
@@ -230,7 +231,7 @@ export async function deliverEmail(params: SendEmailParams, scheduledRowId?: num
     }
 
     // Send via provider
-    const result = scrubSendResult(await provider.send(internalParams), internalParams.attachments);
+    const result = await sendThroughProvider(() => provider.send(internalParams), internalParams.attachments);
 
     if (result.success)
     {
@@ -574,7 +575,7 @@ export async function sendEmailBulk(
 
     const sendResults = await runWithConcurrency(
         sendable,
-        (p) => provider.send(p.params).then(result => scrubSendResult(result, p.params.attachments)),
+        (p) => sendThroughProvider(() => provider.send(p.params), p.params.attachments),
         concurrency,
     );
 
