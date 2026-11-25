@@ -142,7 +142,7 @@ const LIBRARY_LEAK = /claim|JWE|JWT|timestamp/;
 /** The fixed sentences the error page is given for `cancelled`, `provider_error` and `failed` (#489). */
 const CANCELLED = 'The sign-in was cancelled at the provider.';
 const PROVIDER_ERROR = 'The sign-in provider could not complete the sign-in. Try again.';
-const FAILED = 'OAuth sign-in could not be completed';
+const FAILED = 'OAuth sign-in could not be completed.';
 
 /** A fresh client address per request, so the routes' per-IP limits never trip across the fork. */
 let requests = 0;
@@ -714,7 +714,7 @@ describe('SPFN_AUTH_OAUTH_ERROR_URL and {reason} (#126)', () =>
             url = oauthFailureUrl(new SignInRefusedError({ message: 'Call us at 555', details: { code: 'x&reason=cancelled' } }), 'OAuth callback failed');
         });
 
-        expect(url).toBe('/auth/error?error=Sign-in%20refused&reason=sign_in_refused');
+        expect(url).toBe('/auth/error?error=Sign-in%20refused.&reason=sign_in_refused');
     });
 
     it('O12: a pre-#489 call shape — an any-typed reason — throws a TypeError whose message does not contain that text', () =>
@@ -854,7 +854,7 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
     it('O4 (page): the app\'s refusal code beside sign_in_refused reaches onError; a forged one, or one beside another reason, does not', () =>
     {
         expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=LOCKED'))
-            .toEqual({ kind: 'error', message: 'Sign-in refused', reason: 'sign_in_refused', refusalCode: 'LOCKED' });
+            .toEqual({ kind: 'error', message: 'Sign-in refused.', reason: 'sign_in_refused', refusalCode: 'LOCKED' });
         expect(readCallbackInput('?error=x&reason=sign_in_refused&refusalCode=%3Cb%3ECall+us%3C%2Fb%3E')).not.toHaveProperty('refusalCode');
         expect(readCallbackInput('?error=x&reason=cancelled&refusalCode=LOCKED')).not.toHaveProperty('refusalCode');
         expect(readCallbackInput('?error=x&reason=sign_in_refused&code=LOCKED')).not.toHaveProperty('refusalCode');
@@ -865,7 +865,7 @@ describe('OAuthCallback page flow reason codes (#126)', () =>
         const refused = await outcomeFor('?error=x&reason=sign_in_refused&refusalCode=LOCKED');
         const cancelled = await outcomeFor('?error=Call+us&reason=cancelled');
 
-        expect(refused.kind === 'error' && oauthCallbackErrorArguments(refused)).toEqual(['Sign-in refused', 'sign_in_refused', 'LOCKED']);
+        expect(refused.kind === 'error' && oauthCallbackErrorArguments(refused)).toEqual(['Sign-in refused.', 'sign_in_refused', 'LOCKED']);
         expect(cancelled.kind === 'error' && oauthCallbackErrorArguments(cancelled)).toEqual([CANCELLED, 'cancelled', undefined]);
     });
 

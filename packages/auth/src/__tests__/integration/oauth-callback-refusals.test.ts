@@ -524,7 +524,7 @@ describe.skipIf(!dbAvailable)('OAuth web callback refusals and one identity per 
             expect(page.pathname).toBe('/auth/error');
             expect([page.searchParams.get('reason'), page.searchParams.get('refusalCode')]).toEqual(['sign_in_refused', 'policy.LOCKED-2']);
             expect([backend.searchParams.has('code'), page.searchParams.has('code')]).toEqual([false, false]);
-            expect(page.searchParams.get('error')).toBe('Sign-in refused');
+            expect(page.searchParams.get('error')).toBe('Sign-in refused.');
         });
     });
 });

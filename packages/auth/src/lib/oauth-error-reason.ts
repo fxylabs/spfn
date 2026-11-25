@@ -74,13 +74,13 @@ export const OAUTH_ERROR_MESSAGES: Readonly<Record<OAuthErrorReason, string>> = 
     no_cookie: 'This browser kept none of the cookies this sign-in set. Allow cookies for this site, or start the sign-in again in the browser where it began.',
     provider_error: 'The sign-in provider could not complete the sign-in. Try again.',
     account_unavailable: 'This account cannot sign in.',
-    link_only: 'This provider can only be linked to a signed-in account, not used to sign in',
-    email_in_use: 'An account with this email already exists. Sign in to it and link this provider from settings',
-    signup_disabled: 'This application does not create accounts by sign-up',
+    link_only: 'This provider can only be linked to a signed-in account, not used to sign in.',
+    email_in_use: 'An account with this email already exists. Sign in to it and link this provider from settings.',
+    signup_disabled: 'This application does not create accounts by sign-up.',
     provider_already_linked: 'This account already has an identity from this provider. Unlink it first.',
     sign_in_contended: 'Another sign-in with this identity was in progress. Sign in again.',
-    sign_in_refused: 'Sign-in refused',
-    failed: 'OAuth sign-in could not be completed',
+    sign_in_refused: 'Sign-in refused.',
+    failed: 'OAuth sign-in could not be completed.',
 };
 
 /** Whether a value read off a URL or a body is one of the codes. */
