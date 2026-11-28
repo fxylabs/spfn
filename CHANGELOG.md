@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a key's reach: no door could hand out less. A key may now be narrowed —
   `registerPublicKeyService({ …, narrowing: { reach, lifetimeMs } })` writes
   `user_public_keys.reach` (new nullable column, migration `20261128054245_free_jackal`; null is
-  the whole account) and `expires_at` at registration plus `lifetimeMs`. Admission asks one more
+  the whole account) and `expires_at` at registration plus `lifetimeMs` (above 0 and at most
+  `KEY_TTL_DAYS`, or a `ValidationError` before anything is written). Admission asks one more
   step after the requirements and as well as them: a narrowed key is let in only on a route its
   reach admits (`ROUTE_REACH`; `'opsTokens'`: `issueOpsToken`, `listOpsTokens`, `revokeOpsToken`,
   `logout`), recognised by the restricted-route marker, so every other route — every application
@@ -24,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — refuses it with **403 `KeyOutOfReachError`** (`KEY_OUT_OF_REACH`, `details: { reach }`), which
   does not end a browser session. A narrowed key is never bound (at registration, at use through
   the proxy, or when binding is turned on), never replaced (a rotation it signs is refused, a
-  `replacementProof` it signed proves nothing, so that sign-in is a new device) and never signed
+  `replacementProof` it signed proves nothing, so that sign-in is a new device), never replaces
+  (a narrowed registration's `replacementProof` makes a new device, a signed request's claim is
+  refused) and never signed
   in again (409 `KeyIdAlreadyRegisteredError`). `listKeys` answers `reach?`;
   `auth.device.registered` carries `reach?`. New exports from `@spfn/auth/server`: `KEY_REACH`,
   `KeyReach`, `KeyNarrowing`; from `@spfn/auth/errors`: `KeyOutOfReachError`. No route passes

@@ -19,6 +19,9 @@
  * | B-B1 | registration through the proxy on a bound account; a proxied request | unbound, stated expiry, both times | a bound key's 24 hours, which renewal extends, in place of the stated lifetime |
  * | B-B2 | the owner turns binding on | the narrowed web key stays unbound | the same, by the binding switch |
  * | B-RR | password login presenting the expired narrowed key again | 409, expiry unmoved | a sign-in moving a narrowed key's expiry to 90 days |
+ * | B-N1 | a narrowed registration carrying a full key's `replacementProof` | the full key live with its verification; the narrowed key announced, with none | a narrowed key replacing a full one: revoking it and taking its step-up record unannounced |
+ * | B-N2 | a narrowed registration claiming to replace the key that signed the request | the claim's refusal; the signing key live, no new key | the same, by a rotation |
+ * | B-L | a narrowed registration whose `lifetimeMs` is 0, negative, NaN, Infinity, 2e14 or 91 days | `ValidationError`; no key row, no notice | a key dead at birth announced, a `RangeError` inside the transaction, or a key outliving a full one |
  *
  * Every stub, spy, environment value and subscription set here is restored
  * after the row or the file.
@@ -40,6 +43,8 @@ import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { opsOrUser } from '@/server/middleware/ops-or-user';
 import { authDeviceRegisteredEvent } from '@/server/events';
 import { registerPublicKeyService } from '@/server/services/key.service';
+import { KEY_TTL_DAYS } from '@/server/lib/key-policy';
+import { ValidationError } from '@spfn/core/errors';
 
 const { mainAuthRouter } = await import('@/server/routes');
 const { registerRoutes, route, defineRouter } = await import('@spfn/core/route');
@@ -425,6 +430,102 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         const verifications = await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.userId, userId));
         expect(verifications.filter(row => row.keyId === session.keyId)).toHaveLength(1);
         expect(verifications.filter(row => row.keyId === next.keyId)).toHaveLength(0);
+    });
+
+    // ========================================================================
+    // Never replacing, never outliving a full key
+    // ========================================================================
+
+    /** A narrowed registration of `keyPair`, as `narrowedKey` makes one, with the rest of its params. */
+    function registerNarrowed(keyPair: ReturnType<typeof generateKeyPair>, params: Partial<Parameters<typeof registerPublicKeyService>[0]>)
+    {
+        return registerPublicKeyService({
+            userId,
+            keyId: keyPair.keyId,
+            publicKey: keyPair.publicKey,
+            fingerprint: keyPair.fingerprint,
+            algorithm: keyPair.algorithm,
+            deviceName: 'spfn CLI',
+            channel: 'device-link',
+            userAgent: CHROME,
+            narrowing: { reach: 'opsTokens', lifetimeMs: LIFETIME_MS },
+            ...params,
+        });
+    }
+
+    /** The keyIds `auth.device.registered` announces while `run` runs. */
+    async function noticesDuring(run: () => Promise<unknown>): Promise<string[]>
+    {
+        const notices: string[] = [];
+        const unsubscribe = authDeviceRegisteredEvent.subscribe(payload => void notices.push(payload.keyId));
+
+        try
+        {
+            await run();
+        }
+        finally
+        {
+            unsubscribe();
+        }
+
+        return notices;
+    }
+
+    // The account is not enrolled. On an enrolled one this registration is not
+    // challenged either: `device-link` is not a step-up channel (the issuing
+    // device's approval is the second proof), and the new device it arrives as
+    // is written live and announced, as every link's collection is.
+    it('B-N1: a narrowed registration with a full key\'s replacementProof is a new device — announced, the full key and its verification untouched', async () =>
+    {
+        const owner = await signIn();
+        await getTestDb().insert(mfaVerifications).values({ userId, keyId: owner.keyId, method: 'totp' });
+        const next = generateKeyPair('ES256');
+
+        const notices = await noticesDuring(() => registerNarrowed(next, {
+            replaces: { proof: signKeyReplacementProof({ oldKeyId: owner.keyId, newKeyId: next.keyId }, owner.privateKey, 'ES256') },
+        }));
+
+        expect(await keyRow(owner.keyId)).toMatchObject({ isActive: true, revokedAt: null, replacedByKeyId: null });
+        expect(notices).toContain(next.keyId);
+
+        const verifications = await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.userId, userId));
+        expect(verifications.filter(row => row.keyId === owner.keyId)).toHaveLength(1);
+        expect(verifications.filter(row => row.keyId === next.keyId)).toHaveLength(0);
+    });
+
+    it('B-N2: a narrowed registration claiming to replace the key that signed its request answers the claim\'s refusal and writes nothing', async () =>
+    {
+        const owner = await signIn();
+        const next = generateKeyPair('ES256');
+        const refusal = new Error('the signing key cannot be replaced');
+
+        await expect(registerNarrowed(next, {
+            channel: 'rotation',
+            replaces: { signedBy: owner.keyId, reason: 'Rotated', refusal },
+        })).rejects.toBe(refusal);
+
+        expect(await keyRow(owner.keyId)).toMatchObject({ isActive: true, replacedByKeyId: null });
+        expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, next.keyId))).toHaveLength(0);
+    });
+
+    it.each([
+        ['0', 0],
+        ['negative', -LIFETIME_MS],
+        ['NaN', Number.NaN],
+        ['Infinity', Number.POSITIVE_INFINITY],
+        ['2e14 (the year 8364)', 2e14],
+        ['91 days', (KEY_TTL_DAYS + 1) * 24 * 60 * 60 * 1000],
+    ])('B-L: a lifetimeMs of %s is a ValidationError, with no key row and no notice', async (_label, lifetimeMs) =>
+    {
+        const next = generateKeyPair('ES256');
+        let failure: unknown;
+
+        const notices = await noticesDuring(() => registerNarrowed(next, { narrowing: { reach: 'opsTokens', lifetimeMs } })
+            .catch(error => void (failure = error)));
+
+        expect(failure).toBeInstanceOf(ValidationError);
+        expect(notices).toEqual([]);
+        expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, next.keyId))).toHaveLength(0);
     });
 
     // ========================================================================

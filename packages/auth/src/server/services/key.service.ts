@@ -171,14 +171,44 @@ export interface RegisterPublicKeyParams
  * lives `BOUND_KEY_TTL_HOURS` and renewal extends it — and never replaced: a
  * rotation it signs, a renewal and a sign-in's `replacementProof` it signed
  * find nothing to replace (`revokeForReplacement`), and a sign-in presenting
- * it again is refused (`answerForExistingKey`). Nothing but its registration
- * writes its expiry.
+ * it again is refused (`answerForExistingKey`). Nor does it replace: a
+ * registration carrying both `narrowing` and `replaces` is a new device, or
+ * the signed request's `refusal` (`claimReplacement`). Nothing but its
+ * registration writes its expiry.
  */
 export interface KeyNarrowing
 {
     reach: KeyReach;
-    /** Milliseconds from registration to `expires_at`. */
+    /**
+     * Milliseconds from registration to `expires_at`: a finite number above 0
+     * and at most a full key's lifetime (`KEY_TTL_DAYS`), or the registration
+     * is a `ValidationError`.
+     */
     lifetimeMs: number;
+}
+
+/** The longest a narrowed key may live: as long as a full key. */
+const NARROWED_KEY_MAX_LIFETIME_MS = KEY_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Refuse a narrowing whose lifetime is no span a key can live: one that is not
+ * a finite number, is dead at birth, or outlives a full key.
+ *
+ * @throws ValidationError
+ */
+function assertNarrowingLifetime(narrowing: KeyNarrowing | undefined): void
+{
+    if (!narrowing)
+    {
+        return;
+    }
+
+    const { lifetimeMs } = narrowing;
+
+    if (!(Number.isFinite(lifetimeMs) && lifetimeMs > 0 && lifetimeMs <= NARROWED_KEY_MAX_LIFETIME_MS))
+    {
+        throw new ValidationError({ message: `narrowing.lifetimeMs must be a number of milliseconds above 0 and at most ${KEY_TTL_DAYS} days` });
+    }
 }
 
 /**
@@ -547,6 +577,7 @@ async function answerForExistingKey(
  * fire at `POST /_auth/mfa/verify` or not at all.
  *
  * @throws KeyIdAlreadyRegisteredError keyId가 이미 쓰인 값일 때 (다른 공개키 · 폐기된 키 · 남의 키)
+ * @throws ValidationError when `narrowing.lifetimeMs` is out of bounds (`KeyNarrowing`)
  * @throws InvalidKeyFingerprintError fingerprint가 publicKey와 맞지 않을 때
  * @throws KeyAlgorithmMismatchError 키의 SPKI 타입이 선언된 algorithm과 다를 때
  * @throws the claim's `refusal` when a signed-request replacement's old key is no longer live
@@ -555,6 +586,8 @@ export async function registerPublicKeyService(
     params: RegisterPublicKeyParams,
 ): Promise<RegisterPublicKeyResult>
 {
+    assertNarrowingLifetime(params.narrowing);
+
     // Before the existing-key answer too: a re-registration is compared against
     // the stored key by fingerprint, so the fingerprint has to be this key's.
     if (!verifyKeyFingerprint(params.publicKey, params.fingerprint))
@@ -771,9 +804,12 @@ async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPu
         return null;
     }
 
+    // A narrowed key replaces nothing, as nothing replaces it (`KeyNarrowing`):
+    // its claim is one not honoured, answered as each kind answers that — a
+    // signed request is refused, a proof is a new device.
     if ('signedBy' in claim)
     {
-        const replaced = claim.signedBy
+        const replaced = claim.signedBy && !params.narrowing
             && await keysRepository.revokeForReplacement(claim.signedBy, params.userId, claim.reason, params.keyId);
 
         if (!replaced)
@@ -784,7 +820,7 @@ async function claimReplacement(params: RegisterPublicKeyParams): Promise<UserPu
         return replaced;
     }
 
-    const oldKeyId = await keyIdProvenByProof(claim.proof, params);
+    const oldKeyId = !params.narrowing && await keyIdProvenByProof(claim.proof, params);
 
     return oldKeyId
         ? await keysRepository.revokeForReplacement(oldKeyId, params.userId, `Replaced by new key on ${params.channel} sign-in`, params.keyId)
