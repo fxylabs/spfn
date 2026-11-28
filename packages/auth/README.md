@@ -1325,8 +1325,11 @@ export const authLifecycle = createAuthLifecycle({
 ```
 
 A refused terminal's poll answers **403 `SignInRefusedError`** with `details.code:
-'TERMINAL_OUTSIDE_NETWORK'`, and no key is registered; the link stays `approved` until its TTL
-and registers nothing. `settled` is told `failed`, `reason: 'refused'`, with `reach` and `ip` —
+'TERMINAL_OUTSIDE_NETWORK'`, and that poll registers no key. The link is still `approved`, so a
+later poll with the same device code that `admit` accepts — the terminal back inside the network
+— registers it. Refuse and Cancel no longer reach an approved link (409
+`DeviceLinkAlreadyHandledError`); what closes it is its TTL, a new link issued from the same key,
+or the issuing key signing out. `settled` is told `failed`, `reason: 'refused'`, with `reach` and `ip` —
 the place to alert. An app on the "password plus passkey" recipe that turns `deviceLink` on only
 for its CLI can also refuse `attempt.channel === 'device-link' && attempt.reach === undefined`, so
 no phone comes in by link.
