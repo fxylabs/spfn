@@ -210,24 +210,16 @@ function assertSomeMethodListed(): void
 }
 
 /**
- * A device-code approval and a device-link confirmation sign a device in
- * without any listed method, so a required second factor cannot hold while
- * either exists.
+ * A device-code approval signs a device in without any listed method, so a
+ * required second factor cannot hold while that channel is on. A device link
+ * can: its issuer steps up at issue and at confirm (#528).
  */
 function assertNoUnprovenChannel(): void
 {
-    if (!policy.required)
+    if (policy.required && isChannelEnabled('deviceCode'))
     {
-        return;
-    }
-
-    for (const channel of ['deviceCode', 'deviceLink'] as const)
-    {
-        if (isChannelEnabled(channel))
-        {
-            throw new Error(`secondFactor.required is true, but the ${channel} channel is on, and it signs a device in `
-                + `with no listed second factor. Set channels.${channel} to false in createAuthLifecycle({ channels }).`);
-        }
+        throw new Error('secondFactor.required is true, but the deviceCode channel is on, and it signs a device in '
+            + 'with no listed second factor. Set channels.deviceCode to false in createAuthLifecycle({ channels }).');
     }
 }
 

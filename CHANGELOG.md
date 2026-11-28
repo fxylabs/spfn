@@ -606,6 +606,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: @spfn/auth: a device link asks its issuer's second factor, at issue and at confirm
+  (#528).** A link treated the issuer's session as the second factor: `device/link/issue` asked a
+  bound account's `linkIssue` passkey proof and nothing else, `device/link/confirm` judged the pick
+  and nothing else, so a copied unbound session of an enrolled account could let a 90-day key in
+  with no factor — and `secondFactor.required` had to refuse the channel at boot. Both routes now
+  ask the [step-up window](packages/auth/README.md#the-step-up-window) of the credential that signed
+  them (`assertStepUp`, a no-op for an account with no second factor). `issue` asks it under the
+  account lock, before the passkey proof is spent and before the insert, so a refusal writes
+  nothing and leaves the device's earlier live link alive; `confirm` asks it before the pick is
+  compared, so a refusal spends nothing and the link stays `redeemed` with its number.
+  `secondFactor.required` with `channels.deviceLink` on now boots; `channels.deviceCode` on is still
+  refused, with the same message. Device-code approval is unchanged and still asks no step-up. The
+  mobile contract does not change: it carries only the new device's half (`auth.deviceLink.redeem`,
+  `auth.deviceLink.poll`). Migration: on 403 `STEP_UP_REQUIRED` from `device/link/issue` or
+  `device/link/confirm`, run `stepUpWithPasskey(api)` or `mfa/step-up` with a code, then call
+  again; a refused confirm has not spent the pick. A direct caller of `confirmDeviceLinkService`
+  passes `credential: getAuth(c).credential` (`ConfirmDeviceLinkParams.credential`, required).
 - **BREAKING (at compile time): @spfn/core: an env schema entry may only state what the schema
   declares (#492).** The seven helpers (`envString`, `envSecret`, `envNumber`, `envBoolean`,
   `envUrl`, `envEnum`, `envJson`), `defineEnvSchema`, `createEnvRegistry` and `new EnvRegistry`

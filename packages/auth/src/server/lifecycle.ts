@@ -440,7 +440,8 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      *   `secondFactorEnrolmentRequired: true`. Removing the last listed factor
      *   through a route is 409 `SECOND_FACTOR_REQUIRED`; `disableMfaService`
      *   called by the application is the operator's re-issue path. Boot is
-     *   refused while `channels.deviceCode` or `channels.deviceLink` is on.
+     *   refused while `channels.deviceCode` is on; `channels.deviceLink` may
+     *   stay on, because a link's issuer steps up at issue and at confirm.
      * - `methods` (default `['totp', 'passkey']`) — only these count as
      *   enrolled and are accepted as a proof; the others' second-factor routes
      *   answer 404 `SECOND_FACTOR_METHOD_DISABLED`. `['passkey']` raises passkey
@@ -457,7 +458,6 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * createAuthLifecycle({
      *     channels: {
      *         deviceCode: false,   // refused at boot under required
-     *         deviceLink: false,
      *     },
      *     secondFactor: { required: true, methods: ['passkey'], recoveryCodes: false },
      * })
