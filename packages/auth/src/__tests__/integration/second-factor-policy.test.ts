@@ -8,8 +8,9 @@
  * user-verified registration is marked whenever the policy requires a factor),
  * RV412-P1 of its review (only a listed passkey is marked)
  * SU4–SU5 of #393 (one spend of a step-up assertion across its two
- * consumers) and W-M, W-R1, W-R3 of #539 (an enrolled account's window counts
- * only a listed factor), named for its row. The boot
+ * consumers) and W-M, W-R1, W-R3, W-RV1, W-RV2, W-P1, W-PU, W-RK, W-NV and W-RC of #539
+ * (an enrolled account's window counts only a listed factor; a passkey's,
+ * only while the passkey it names is), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -1755,11 +1756,22 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
     // | W-M  | no policy; an enrolled account's window opened by a recovery code, listed while `recoveryCodes` is on | ops-tokens 200 | a refusal |
     // | W-R1 | device D's window was opened by the unlisted TOTP in the enrolment-only state; the account then enrolled a passkey on device E | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
     // | W-R3 | W-R1, then D steps up with the listed passkey | ops-tokens 200 | a refusal |
+    // | W-RV1 | D's window was opened by the unmarked passkey P1 in the enrolment-only state; E then registered a marked P2 | ops-tokens and keys/revoke-all 403 STEP_UP_REQUIRED | an ops token row |
+    // | W-RV2 | `methods: ['totp', 'passkey']`; as W-RV1, but E enrols a TOTP and no passkey is ever marked | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
+    // | W-P1 | as W-RV1, but E marks P1 itself | ops-tokens 200 | a refusal |
+    // | W-PU | an enrolled account's passkey window from before the record named its passkey | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
+    // | W-RK | an enrolled account's window names a marked passkey since revoked; another stays marked | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
+    // | W-NV | a new device signs in at mfa/verify with the marked passkey | ops-tokens 200 | a refusal |
+    // | W-RC | a recovery-code window, then the policy narrowed to `recoveryCodes: false` | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
     //
     // W-M is the recovery code because `recovery` is the one recorded method
     // whose policy name differs; a TOTP or passkey window admitting is held by
     // the step-up rows of every other file and by W-R3. W-R2 (an enrolment-only
-    // account enrols with an unlisted proof) is P6.
+    // account enrols with an unlisted proof) is P6. A passkey record names the
+    // passkey that proved it, and counts while that passkey is one the proof
+    // judgement accepts now — live and marked: W-RV1 and W-RV2 are an unmarked
+    // one, W-P1 the same passkey marked since, W-PU a record naming none, W-RK
+    // one naming a passkey revoked since; W-NV is mfa/verify's record naming it.
     // ========================================================================
 
     /** The sensitive call these rows ask: issuing an ops token, which needs a step-up once the account is enrolled. */
@@ -1773,6 +1785,12 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
         return (await getTestDb().select().from(opsTokens)).length;
     }
 
+    /** Ops tokens are an administrator's: the account these rows ask for one is made one. */
+    async function becomeAdmin(): Promise<void>
+    {
+        await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id }).where(eq(users.id, userId));
+    }
+
     /**
      * An administrator holding only a TOTP the table's policy does not list.
      * Device D steps up with it while the account may only enrol (#309), then
@@ -1780,7 +1798,7 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
      */
     async function windowOpenedByUnlistedMethod()
     {
-        await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id }).where(eq(users.id, userId));
+        await becomeAdmin();
         const { session: deviceD, secret } = await accountWithUnlistedTotp();
         expect((await stepUpWithTotp(deviceD, secret)).status).toBe(204);
         await forgetUsedTotpStep();
@@ -1796,7 +1814,7 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
     it('W-M: no policy, a window opened by a recovery code on an enrolled account — ops-tokens issues', async () =>
     {
-        await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id }).where(eq(users.id, userId));
+        await becomeAdmin();
         const session = await signIn();
         const { recoveryCodes } = await enrolTotp(session);
         await getTestDb().delete(mfaVerifications);
@@ -1825,5 +1843,115 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
 
         expect((await issueOpsToken(deviceD)).status).toBe(200);
         expect(await opsTokenRows()).toBe(1);
+    });
+
+    /**
+     * An administrator holding only the unmarked passkey P1 under the table's
+     * policy. Device D steps up with it while the account may only enrol
+     * (#309); device E does too, and is left to enrol the account.
+     */
+    async function windowOpenedByUnmarkedPasskey()
+    {
+        await becomeAdmin();
+        const { session: deviceD, authenticator, passkeyId } = await accountWithUnmarkedPasskey();
+        await stepUpWithPasskey(deviceD, authenticator, 1);
+
+        const deviceE = await signIn();
+        await stepUpWithPasskey(deviceE, authenticator, 2);
+
+        return { deviceD, deviceE, passkeyId };
+    }
+
+    it('W-RV1: a window opened by an unmarked passkey in the enrolment-only state, the account since enrolled with another passkey — ops-tokens and keys/revoke-all are 403 STEP_UP_REQUIRED', async () =>
+    {
+        const { deviceD, deviceE } = await windowOpenedByUnmarkedPasskey();
+        await enrolPasskey(deviceE);
+        expect(await liveMarkedPasskeys()).toBe(1);
+
+        await expectRefused(await issueOpsToken(deviceD), 403, 'STEP_UP_REQUIRED', 'ops-tokens');
+        expect(await opsTokenRows()).toBe(0);
+        await expectRefused(await post('/_auth/keys/revoke-all', {}, deviceD.authorization), 403, 'STEP_UP_REQUIRED', 'revoke-all');
+    });
+
+    it('W-RV2: totp and passkey listed, a window opened by an unmarked passkey, the account since enrolled with a TOTP — ops-tokens is 403 STEP_UP_REQUIRED', async () =>
+    {
+        await becomeAdmin();
+        const { authenticator } = await registerPasskey(await signIn());
+        usePolicy({ required: true, methods: ['totp', 'passkey'], recoveryCodes: false });
+        const deviceD = await signIn();
+        await stepUpWithPasskey(deviceD, authenticator, 1);
+
+        const deviceE = await signIn();
+        await stepUpWithPasskey(deviceE, authenticator, 2);
+        await enrolTotp(deviceE);
+        expect(await liveMarkedPasskeys()).toBe(0);
+
+        await expectRefused(await issueOpsToken(deviceD), 403, 'STEP_UP_REQUIRED');
+        expect(await opsTokenRows()).toBe(0);
+    });
+
+    it('W-P1: W-RV1, but the account marks the passkey D stepped up with — ops-tokens issues', async () =>
+    {
+        const { deviceD, deviceE, passkeyId } = await windowOpenedByUnmarkedPasskey();
+        expect((await mark(deviceE, passkeyId, true)).status).toBe(200);
+        expect(await liveMarkedPasskeys()).toBe(1);
+
+        expect((await issueOpsToken(deviceD)).status).toBe(200);
+        expect(await opsTokenRows()).toBe(1);
+    });
+
+    it('W-PU: an enrolled account\'s passkey window recorded before the record named its passkey — ops-tokens is 403 STEP_UP_REQUIRED', async () =>
+    {
+        await becomeAdmin();
+        const { session } = await passkeyEnrolledAccount();
+        await getTestDb().update(mfaVerifications).set({ passkeyId: null });
+        expect(await verificationsFor(session.keyId)).toMatchObject([{ method: 'passkey', passkeyId: null }]);
+
+        await expectRefused(await issueOpsToken(session), 403, 'STEP_UP_REQUIRED');
+        expect(await opsTokenRows()).toBe(0);
+    });
+
+    it('W-RK: an enrolled account\'s window names a passkey since revoked, another one still marked — ops-tokens is 403 STEP_UP_REQUIRED', async () =>
+    {
+        await becomeAdmin();
+        const { session, passkeyId } = await passkeyEnrolledAccount();
+        await enrolPasskey(session);
+        expect(await verificationsFor(session.keyId)).toMatchObject([{ method: 'passkey', passkeyId: Number(passkeyId) }]);
+
+        expect((await post('/_auth/passkeys/revoke', { passkeyId }, session.authorization)).status).toBe(200);
+        expect(await liveMarkedPasskeys()).toBe(1);
+
+        await expectRefused(await issueOpsToken(session), 403, 'STEP_UP_REQUIRED');
+        expect(await opsTokenRows()).toBe(0);
+    });
+
+    it('W-NV: a new device completes its sign-in at mfa/verify with the marked passkey — its window counts, ops-tokens issues', async () =>
+    {
+        await becomeAdmin();
+        const { authenticator } = await passkeyEnrolledAccount();
+        const { body: pending, session: device } = await passwordLogin();
+        const options = await post('/_auth/mfa/verify/options', { challenge: pending.challenge.secret });
+        const verified = await post('/_auth/mfa/verify', {
+            challenge: pending.challenge.secret,
+            response: authenticator.assert({ challenge: (await options.json()).challenge, origin: ORIGIN, rpId: RP_ID, counter: 1 }),
+        });
+        expect(verified.status).toBe(200);
+
+        expect((await issueOpsToken(device)).status).toBe(200);
+        expect(await opsTokenRows()).toBe(1);
+    });
+
+    it('W-RC: a recovery-code window, then the policy narrowed to recoveryCodes: false — ops-tokens is 403 STEP_UP_REQUIRED', async () =>
+    {
+        await becomeAdmin();
+        const session = await signIn();
+        await enrolTotp(session);
+        await getTestDb().delete(mfaVerifications);
+        await getTestDb().insert(mfaVerifications).values({ userId, keyId: session.keyId, method: 'recovery' });
+
+        usePolicy({ required: true, methods: ['totp'], recoveryCodes: false });
+
+        await expectRefused(await issueOpsToken(session), 403, 'STEP_UP_REQUIRED');
+        expect(await opsTokenRows()).toBe(0);
     });
 });
