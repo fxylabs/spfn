@@ -458,6 +458,9 @@ export interface AuthLifecycleOptions extends AuthInitOptions
      * createAuthLifecycle({
      *     channels: {
      *         deviceCode: false,   // refused at boot under required
+     *         deviceLink: false,   // or keep it, and accept "a signed-in device that proved
+     *                              // a listed factor" as a way in: the device it lets in
+     *                              // shows neither the password nor a factor of its own
      *     },
      *     secondFactor: { required: true, methods: ['passkey'], recoveryCodes: false },
      * })

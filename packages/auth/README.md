@@ -833,13 +833,16 @@ some ways in ask for no password at all:
 | device-code login | — | refused at boot under `required` |
 
 So an app that wants **the password and the passkey whenever a person signs in on a device that is
-not already signed in** closes all four:
+not already signed in** closes all five:
 
 ```typescript
 createAuthLifecycle({
     channels: {
         passwordReset: false,  // or keep it, and accept "email + passkey" as a way in
         deviceCode: false,     // required by `required: true`
+        deviceLink: false,     // or keep it, and accept "a signed-in device that proved a listed factor"
+                               // as a way in: the device it lets in shows neither the password nor a
+                               // factor of its own
         // passkeyLogin left off, its default: a passkey is never the whole credential
     },
     secondFactor: {
@@ -857,10 +860,10 @@ Then, for an account that has enrolled its passkey, every sign-in route asks for
 sign-in on a device that is not already signed in — a signed-out browser included — answers 202
 until the passkey is proven at `mfa/verify`. The recipe does **not** cover:
 
-- **A device let in by a signed-in browser's link, after a fresh factor on that browser.** The
-  issuer steps up at `device/link/issue` and again at `device/link/confirm`
-  ([device link](#device-link)); the new device is asked neither the password nor a factor of its
-  own. `channels.deviceLink: false` closes it.
+- **A device let in by a signed-in device's link, in an app that turns `channels.deviceLink` on**
+  (for a terminal, for one). That is what turning it on accepts: the issuer proves a listed factor
+  at `device/link/issue` and again at `device/link/confirm` ([device link](#device-link)), and the
+  device it lets in shows neither the password nor a factor of its own.
 - **A browser that is still signed in, signing in again.** The proxy sends the live session's key as
   `replacementProof`; that sign-in is the same device, so the password alone answers 200.
 - **Session renewal with [binding](#session-binding) on.** An expired bound key inside its grace is
