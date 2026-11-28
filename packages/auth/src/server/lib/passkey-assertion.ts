@@ -44,5 +44,16 @@ export function exemptsNewDevice(assertion: PasskeyAssertionProof): boolean
  */
 export function provesSecondFactor(assertion: PasskeyAssertionProof, candidates: 'marked' | 'live'): boolean
 {
-    return assertion.userVerified && (candidates === 'live' || assertion.markedSecondFactor);
+    return assertion.userVerified && isCandidatePasskey(assertion.markedSecondFactor, candidates);
+}
+
+/**
+ * Whether a live passkey of the account is one a second-factor proof may come
+ * from: one the owner marked, or any live one when the caller accepts that.
+ * The proof judgement asks it of the asserting passkey, the step-up window of
+ * the passkey a verification names (#539).
+ */
+export function isCandidatePasskey(markedSecondFactor: boolean, candidates: 'marked' | 'live'): boolean
+{
+    return candidates === 'live' || markedSecondFactor;
 }

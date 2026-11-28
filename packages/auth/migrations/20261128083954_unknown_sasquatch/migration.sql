@@ -1,0 +1,2 @@
+ALTER TABLE "spfn_auth"."mfa_verifications" ADD COLUMN "passkey_id" bigint;--> statement-breakpoint
+ALTER TABLE "spfn_auth"."mfa_verifications" ADD CONSTRAINT "mfa_verifications_passkey_id_passkeys_id_fkey" FOREIGN KEY ("passkey_id") REFERENCES "spfn_auth"."passkeys"("id") ON DELETE CASCADE;

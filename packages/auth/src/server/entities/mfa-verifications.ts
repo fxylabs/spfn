@@ -23,8 +23,9 @@
 
 import { sql } from 'drizzle-orm';
 import { check, text, uniqueIndex } from 'drizzle-orm/pg-core';
-import { enumText, foreignKey, id, utcTimestamp } from '@spfn/core/db';
+import { enumText, foreignKey, id, optionalForeignKey, utcTimestamp } from '@spfn/core/db';
 import { users } from './users';
+import { passkeys } from './passkeys';
 import { userPublicKeys } from './user-public-keys';
 import { authSchema } from './schema';
 
@@ -38,6 +39,14 @@ import { authSchema } from './schema';
 export const MFA_VERIFICATION_METHODS = ['totp', 'recovery', 'passkey'] as const;
 
 export type MfaVerificationMethod = typeof MFA_VERIFICATION_METHODS[number];
+
+/**
+ * What proved a verification: its method, and for a passkey which one. The
+ * step-up window asks that passkey whether it is a listed factor now (#539).
+ */
+export type MfaVerificationProof =
+    | { method: 'totp' | 'recovery' }
+    | { method: 'passkey'; passkeyId: number };
 
 export const mfaVerifications = authSchema.table('mfa_verifications',
     {
@@ -55,6 +64,15 @@ export const mfaVerifications = authSchema.table('mfa_verifications',
         profileKeyId: text('profile_key_id'),
 
         method: enumText('method', MFA_VERIFICATION_METHODS).notNull(),
+
+        // The passkey that proved it; null for a TOTP or a recovery code, and
+        // on a passkey row written before this column (#539), which the window
+        // therefore does not count. The window asks the passkey as it is now
+        // (`assertStepUp`): a revoked or unmarked one, which keeps its row,
+        // counts for nothing. Deleting the passkey row, which only destroying
+        // the account does, deletes this one with it, as a device key's
+        // deletion does and as the passkey row dies with its account.
+        passkeyId: optionalForeignKey('passkey', () => passkeys.id, { onDelete: 'cascade' }),
 
         verifiedAt: utcTimestamp('verified_at').notNull().defaultNow(),
     },

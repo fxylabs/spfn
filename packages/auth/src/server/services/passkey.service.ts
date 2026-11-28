@@ -641,11 +641,7 @@ async function keepPasskey(
 
     onAfterCommit(() => passkeyEnrolledEvent.emit(enrolment));
 
-    const answer = await registrationAnswer(
-        params,
-        mark,
-        { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() },
-    );
+    const answer = await registrationAnswer(params, mark, row);
 
     // Everything the registration writes is written: the app's rows join it here.
     await reportPasskeyEnrolled(enrolment);
@@ -661,9 +657,11 @@ async function keepPasskey(
 async function registrationAnswer(
     params: FinishPasskeyEnrollmentParams,
     mark: RegistrationMark,
-    enrolled: FinishPasskeyEnrollmentResult,
+    row: Passkey,
 ): Promise<FinishPasskeyEnrollmentResult>
 {
+    const enrolled = { passkeyId: String(row.id), label: row.label, createdAt: row.createdAt.toISOString() };
+
     if (!mark.marks)
     {
         return enrolled;
@@ -672,8 +670,12 @@ async function registrationAnswer(
     if (mark.enrols)
     {
         // This credential just proved the factor it made, with user verification:
-        // a step-up, as `totp/confirm` records one (#372).
-        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), 'passkey');
+        // a step-up, as `totp/confirm` records one (#372), naming the passkey.
+        await mfaVerificationsRepository.record(
+            params.userId,
+            startingCredentialOf(params.credential),
+            { method: 'passkey', passkeyId: row.id },
+        );
     }
 
     return { ...enrolled, mfaStatus: await mfaStatusService(params.userId) };

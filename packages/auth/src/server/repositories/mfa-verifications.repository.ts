@@ -14,7 +14,7 @@
 import { and, eq, isNull, lt, type SQL } from 'drizzle-orm';
 
 import { mfaVerifications } from '../entities/mfa-verifications';
-import type { MfaVerification, MfaVerificationMethod } from '../entities/mfa-verifications';
+import type { MfaVerification, MfaVerificationProof } from '../entities/mfa-verifications';
 import type { StartingCredential } from '../lib/deferred-stamp';
 import { AccountStateRepository, type AccountWrites } from './account-state.repository';
 
@@ -28,6 +28,14 @@ function credentialIs(userId: number, credential: StartingCredential): SQL
             eq(mfaVerifications.profile, credential.profile),
             eq(mfaVerifications.profileKeyId, credential.keyId),
         )!;
+}
+
+/** The columns naming a credential's row: a device key's id, or a profile and the key id its verifier reported. */
+function credentialColumns(credential: StartingCredential)
+{
+    return credential.kind === 'deviceKey'
+        ? { keyId: credential.keyId }
+        : { profile: credential.profile, profileKeyId: credential.keyId };
 }
 
 export class MfaVerificationsRepository extends AccountStateRepository
@@ -53,31 +61,23 @@ export class MfaVerificationsRepository extends AccountStateRepository
 
     /**
      * Record a fresh verification for this credential, replacing any earlier
-     * one. A device key's row is its key id's; an application profile's is the
-     * profile's and the reported key id's, and never a device key's row, even
-     * when the two ids are the same string.
+     * one — its method and, for a passkey, which passkey proved it. A device
+     * key's row is its key id's; an application profile's is the profile's and
+     * the reported key id's, and never a device key's row, even when the two
+     * ids are the same string.
      */
-    async record(userId: number, credential: StartingCredential, method: MfaVerificationMethod): Promise<void>
+    async record(userId: number, credential: StartingCredential, proof: MfaVerificationProof): Promise<void>
     {
-        if (credential.kind === 'deviceKey')
-        {
-            await this.db
-                .insert(mfaVerifications)
-                .values({ userId, keyId: credential.keyId, method })
-                .onConflictDoUpdate({
-                    target: mfaVerifications.keyId,
-                    set: { userId, method, verifiedAt: new Date() },
-                });
-
-            return;
-        }
+        const recorded = { userId, method: proof.method, passkeyId: proof.method === 'passkey' ? proof.passkeyId : null };
 
         await this.db
             .insert(mfaVerifications)
-            .values({ userId, profile: credential.profile, profileKeyId: credential.keyId, method })
+            .values({ ...credentialColumns(credential), ...recorded })
             .onConflictDoUpdate({
-                target: [mfaVerifications.userId, mfaVerifications.profile, mfaVerifications.profileKeyId],
-                set: { method, verifiedAt: new Date() },
+                target: credential.kind === 'deviceKey'
+                    ? mfaVerifications.keyId
+                    : [mfaVerifications.userId, mfaVerifications.profile, mfaVerifications.profileKeyId],
+                set: { ...recorded, verifiedAt: new Date() },
             });
     }
 

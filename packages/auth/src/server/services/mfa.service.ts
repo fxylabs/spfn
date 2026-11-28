@@ -75,9 +75,9 @@ import type { DeferredLoginEvent, MfaChallenge, MfaChallengeChannel } from '../e
 import type { MfaTotp } from '../entities/mfa-totp';
 import type { UserPublicKey } from '../entities/user-public-keys';
 import type { User } from '../entities/users';
-import type { MfaVerificationMethod } from '../entities/mfa-verifications';
+import type { MfaVerification, MfaVerificationMethod, MfaVerificationProof } from '../entities/mfa-verifications';
 import { stampFor, stampOf } from '../lib/deferred-stamp';
-import { provesSecondFactor } from '../lib/passkey-assertion';
+import { isCandidatePasskey, provesSecondFactor } from '../lib/passkey-assertion';
 import { admitDeferred, deferredRefusalError, startingCredentialOf } from './deferred-admission.service';
 import {
     challengeIsLive,
@@ -143,6 +143,12 @@ export interface AssertStepUpParams
 /**
  * Refuse a sensitive change unless this device proved the second factor recently.
  *
+ * For an enrolled account only a factor the policy lists counts: a window this
+ * device opened with an unlisted proof — which the enrolment-only state below
+ * accepts — opens nothing once the account is enrolled (#539). A passkey's
+ * window counts while the passkey it names is one the proof judgement accepts
+ * now: live and marked.
+ *
  * **No-op for an account with no second factor.** That is the contract of the
  * whole feature: `changePassword` and `revokeAllKeys` have no recency gate
  * today, and adding one for people who never opted in would be a new refusal on
@@ -158,7 +164,8 @@ export interface AssertStepUpParams
  * The unenrolled path therefore costs one indexed lookup and touches no passkey
  * configuration, which is what lets an app with no passkeys at all call it.
  *
- * @throws StepUpRequiredError when the account is enrolled and the window has passed
+ * @throws StepUpRequiredError when the account is enrolled and no listed factor
+ *   was proved on this credential within the window
  */
 export async function assertStepUp(params: AssertStepUpParams): Promise<void>
 {
@@ -169,7 +176,7 @@ export async function assertStepUp(params: AssertStepUpParams): Promise<void>
         return;
     }
 
-    await assertWindowOpen(params);
+    await assertWindowOpen(params, provesListedFactor);
 }
 
 /**
@@ -193,19 +200,67 @@ export async function assertEnrolmentProven(params: AssertStepUpParams): Promise
 {
     if (await enrolmentNeedsProof(params.userId))
     {
-        await assertWindowOpen(params);
+        // Any credential the account holds proves it here, listed or not (#309)
+        await assertWindowOpen(params, () => true);
     }
 }
 
-/** @throws StepUpRequiredError unless this credential verified within the window */
-async function assertWindowOpen(params: AssertStepUpParams): Promise<void>
+/**
+ * Whether a verification proved a factor the policy lists — what
+ * `listedProofs` accepts now. A window the enrolment-only state opened with an
+ * unlisted proof does not count once the account is enrolled (#539).
+ */
+async function provesListedFactor(verification: MfaVerification): Promise<boolean>
+{
+    const accepts = listedProofs();
+
+    switch (verification.method)
+    {
+        case 'totp':
+            return accepts.totp;
+        case 'recovery':
+            return accepts.recoveryCodes;
+        case 'passkey':
+            return await namesAcceptedPasskey(verification, accepts.passkeys);
+    }
+}
+
+/**
+ * Whether the passkey a verification names is one a proof may come from now:
+ * live, and of the `candidates` the check accepts (`isCandidatePasskey`). A
+ * verification naming no passkey — written before it named one — does not
+ * count; nor does one whose passkey was since revoked or unmarked.
+ */
+async function namesAcceptedPasskey(
+    verification: MfaVerification,
+    candidates: AcceptedProofs['passkeys'],
+): Promise<boolean>
+{
+    if (candidates === null || verification.passkeyId === null)
+    {
+        return false;
+    }
+
+    const passkey = await passkeysRepository.findLiveByIdAndUserId(verification.passkeyId, verification.userId);
+
+    return passkey !== null && isCandidatePasskey(passkey.secondFactor, candidates);
+}
+
+/**
+ * @throws StepUpRequiredError unless this credential verified within the
+ *   window, by a proof `counts` accepts
+ */
+async function assertWindowOpen(
+    params: AssertStepUpParams,
+    counts: (verification: MfaVerification) => boolean | Promise<boolean>,
+): Promise<void>
 {
     // A grant never steps up, so its window is never open
     const verifier = sessionCredentialOf(params.credential);
     const verification = verifier && await mfaVerificationsRepository.findFor(params.userId, verifier);
     const window = Math.min(params.maxAgeMs ?? Infinity, getMfaConfig().stepUpWindowMs);
 
-    if (verification && Date.now() - verification.verifiedAt.getTime() <= window)
+    if (verification && Date.now() - verification.verifiedAt.getTime() <= window && await counts(verification))
     {
         return;
     }
@@ -550,7 +605,7 @@ export async function verifyMfaChallengeService(
         await spendStep(row, proof, step);
         await mfaChallengesRepository.activateKey(row);
         await assertSignInAdmitted(row, step);
-        await mfaVerificationsRepository.record(row.userId, { kind: 'deviceKey', keyId: row.keyId }, proof.method);
+        await mfaVerificationsRepository.record(row.userId, { kind: 'deviceKey', keyId: row.keyId }, proof);
 
         const result = await settleStepUpLogin(row);
 
@@ -866,7 +921,7 @@ export async function confirmTotpEnrolmentService(params: ConfirmTotpParams): Pr
             throw new MfaNotEnrolledError();
         }
 
-        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), 'totp');
+        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), { method: 'totp' });
 
         return { recoveryCodes: await issueRecoveryCodes(params.userId, minted) };
     }, { context: 'auth:mfa-confirm' });
@@ -1274,7 +1329,7 @@ export async function stepUpService(params: StepUpParams): Promise<void>
         throw new MfaNotEnrolledError();
     }
 
-    const proof = await checkSecondFactorProof(params.userId, params, { kind: 'stepUp', credential: params.credential });
+    const proof = await judgeSecondFactor(params.userId, params, { kind: 'stepUp', credential: params.credential }, null);
 
     await runInTransaction(async () =>
     {
@@ -1285,7 +1340,7 @@ export async function stepUpService(params: StepUpParams): Promise<void>
             throw new MfaVerificationFailedError();
         }
 
-        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), proof.method);
+        await mfaVerificationsRepository.record(params.userId, startingCredentialOf(params.credential), proof);
     }, { context: 'auth:mfa-step-up' });
 }
 
@@ -1335,6 +1390,9 @@ export interface SecondFactorProof
     spend: () => Promise<boolean>;
 }
 
+/** A proof as the package records it: a passkey's names the passkey (#539). */
+type RecordedProof = SecondFactorProof & MfaVerificationProof;
+
 /**
  * Judge one second-factor proof — the only place a TOTP code, a recovery code
  * or a second-factor passkey assertion is judged. `mfa/verify`, `mfa/step-up`
@@ -1378,7 +1436,7 @@ async function judgeSecondFactor(
     proof: PresentedSecondFactor,
     purpose: SecondFactorPurpose,
     step: SecondStep | null,
-): Promise<SecondFactorProof>
+): Promise<RecordedProof>
 {
     assertOutsideTransaction();
     assertExactlyOneProof(proof, purpose);
@@ -1392,7 +1450,7 @@ async function judgeSecondFactor(
     }
 
     return {
-        method: checked.method,
+        ...checked,
         spend: async () =>
         {
             await assertBudgetStillOpen(userId, step);
@@ -1544,7 +1602,7 @@ async function judgeProof(
     userId: number,
     proof: PresentedSecondFactor,
     purpose: SecondFactorPurpose,
-): Promise<SecondFactorProof | null>
+): Promise<RecordedProof | null>
 {
     if (purpose.kind === 'enrol')
     {
@@ -1582,7 +1640,7 @@ async function judgeProof(
  *
  * @returns null when the code does not verify
  */
-async function verifyTotpProof(userId: number, code: string): Promise<SecondFactorProof | null>
+async function verifyTotpProof(userId: number, code: string): Promise<RecordedProof | null>
 {
     const row = await mfaTotpRepository.findByUserId(userId);
 
@@ -1606,7 +1664,7 @@ async function verifyTotpProof(userId: number, code: string): Promise<SecondFact
  *
  * @returns null when there is no unconfirmed enrolment or the code does not verify
  */
-async function verifyPendingTotpProof(userId: number, code: string): Promise<SecondFactorProof | null>
+async function verifyPendingTotpProof(userId: number, code: string): Promise<RecordedProof | null>
 {
     const row = await mfaTotpRepository.findByUserId(userId);
 
@@ -1633,7 +1691,7 @@ async function verifyPendingTotpProof(userId: number, code: string): Promise<Sec
  *
  * @returns null when the code does not verify
  */
-async function verifyRecoveryProof(userId: number, submitted: string): Promise<SecondFactorProof | null>
+async function verifyRecoveryProof(userId: number, submitted: string): Promise<RecordedProof | null>
 {
     const generation = await mfaRecoveryCodesRepository.currentGeneration(userId);
     const candidates = generation === 0 ? [] : await mfaRecoveryCodesRepository.listUnused(userId, generation);
@@ -1671,7 +1729,7 @@ async function verifyPasskeyProof(
     presented: unknown,
     candidates: 'marked' | 'live',
     ceremony: PasskeyCeremony,
-): Promise<SecondFactorProof | null>
+): Promise<RecordedProof | null>
 {
     const assertion = parseAssertion(presented);
 
@@ -1683,7 +1741,7 @@ async function verifyAssertionProof(
     assertion: PresentedResponse<AuthenticationResponseJSON>,
     candidates: 'marked' | 'live',
     ceremony: PasskeyCeremony,
-): Promise<SecondFactorProof | null>
+): Promise<RecordedProof | null>
 {
     const { challenge } = assertion;
     const passkey = await challengeIsLive(challenge, ceremony.kind, userId)
@@ -1707,6 +1765,7 @@ async function verifyAssertionProof(
 
     return {
         method: 'passkey',
+        passkeyId: passkey.id,
         spend: async () => await spendCeremonyChallenge(ceremony, challenge, userId)
             && await passkeysRepository.recordUse(passkey, outcome.newCounter),
     };
