@@ -1217,7 +1217,8 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
         }
 
         const declared = (property as { type?: string }).type;
-        if (declared === 'integer' || declared === 'string' || declared === 'boolean')
+        const literal = (property as { const?: unknown }).const !== undefined;
+        if (!literal && (declared === 'integer' || declared === 'string' || declared === 'boolean'))
         {
             return declared;
         }
@@ -1226,8 +1227,9 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
         // the declared enum holding exactly those values, so the route schema and
         // the bundle cannot be transcribed apart. `status` is special-cased above
         // only because its branch carries a single literal, not the whole set.
-        const literals = (property as { anyOf?: { const?: unknown }[] }).anyOf;
-        const values = literals?.map((entry) => entry.const);
+        // A union of one literal is that literal, as `KeyReach` is today.
+        const { anyOf: literals, const: single } = property as { anyOf?: { const?: unknown }[]; const?: unknown };
+        const values = literals?.map((entry) => entry.const) ?? (single === undefined ? undefined : [single]);
         const declaredEnum = values && CONTRACT_ENUMS.find((entry) =>
             entry.values.length === values.length && entry.values.every((value) => values.includes(value)));
 
@@ -1304,7 +1306,11 @@ describe('the poll answer keeps a union inside a grammar that has none', () =>
         // owner said yes on a device that is already signed in, which is itself
         // the second factor (#95). Declaring it here would publish a field the
         // approved branch can never carry.
-        const approved = branchFields.filter((field) => field.name !== 'intervalMillis');
+        //
+        // `keyReach` is the one field the other way (#524): it says what the key
+        // a device link let in is held to, which only a link's collection can
+        // narrow — no sign-in answers it, so `LoginResponse` does not declare it.
+        const approved = branchFields.filter((field) => field.name !== 'intervalMillis' && field.name !== 'keyReach');
         const loginFields = typeNamed('LoginResponse').fields.filter((field) => field.name !== 'challenge');
 
         expect(approved.map((field) => field.name)).toEqual(loginFields.map((field) => field.name));
@@ -1728,9 +1734,9 @@ describe('declared proof rules match the implementation', () =>
         replayWindowMillis: number;
     };
 
-    it('the contract line is the revision that carries the required password change (0.15.0, after SignInRefusedError\'s 0.14.7)', () =>
+    it('the contract line is the revision that declares a narrowed device link\'s answers (0.15.1, after the required password change\'s 0.15.0)', () =>
     {
-        expect(bundle.contractVersion).toBe('0.15.0');
+        expect(bundle.contractVersion).toBe('0.15.1');
     });
 
     it('the supported range floor is the current minor, as the 0.x rule has it', () =>
@@ -1742,6 +1748,7 @@ describe('declared proof rules match the implementation', () =>
         // merely not know about a new field. 0.14.0 moves it on 0.11.0's rule:
         // fields the server sends, which every generated decoder meets. 0.15.0
         // moves it on the same rule: OauthNativeResponse.passwordChangeRequired.
+        // 0.15.1 is a patch and leaves it: see CONTRACT_VERSION.
         expect(bundle.supportedRange).toBe('>=0.15.0 <0.16.0');
     });
 

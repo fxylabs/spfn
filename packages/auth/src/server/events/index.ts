@@ -560,6 +560,10 @@ export const authPasswordChangedEvent = defineEvent(
 const OpsTokenViaSchema = Type.Object({
     keyId: Type.Optional(Type.String()),
     profile: Type.Optional(Type.String()),
+    // Present when that key is held to a reach (`KEY_REACH`): a terminal let in
+    // by a narrowed device link, whose `auth.device.registered` names the same
+    // `keyId` and `reach`
+    reach: Type.Optional(Type.Union(KEY_REACH.map(reach => Type.Literal(reach)))),
 });
 
 /**

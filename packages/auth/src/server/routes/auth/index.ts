@@ -10,7 +10,7 @@ import {
     PublicKeySchema, KeyIdSchema, FingerprintSchema, LinkIdSchema, MatchChoiceSchema,
 } from '../schema';
 import { getAuth, getUser } from '../../helpers';
-import { KEY_ALGORITHM } from '../../types';
+import { KEY_ALGORITHM, KEY_REACH } from '../../types';
 import { KeyNotFoundError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 import {
@@ -45,6 +45,7 @@ import {
     pollDeviceLinkService,
     checkPasskeyProof,
     type DeviceLinkIssuer,
+    type DeviceLinkNarrowing,
 } from '../../services';
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
@@ -617,11 +618,23 @@ function issuerOf(c: Parameters<typeof getAuth>[0]): DeviceLinkIssuer
  * refused with 403 `STEP_UP_REQUIRED` and writes nothing. Takes a JSON body
  * (`{}` when there is nothing to send). No `Transactional()`, for
  * `device/approve`'s reason.
+ *
+ * `reach` narrows the link: the key it lets in is held to that reach, for
+ * `keyLifetimeMillis` (the step-up window by default, and at most), and its
+ * issuer types the match number. A lifetime without a reach is 400. The answer
+ * echoes both, so a client can tell a server that ignored them.
  */
 export const issueDeviceLink = route.post('/_auth/device/link/issue')
     .input({
         body: Type.Object({
             passkeyResponse: Type.Optional(PasskeyProofResponseSchema),
+            reach: Type.Optional(Type.Union(KEY_REACH.map(reach => Type.Literal(reach)), {
+                description: 'Hold the key this link lets in to this reach, for a terminal',
+            })),
+            keyLifetimeMillis: Type.Optional(Type.Integer({
+                minimum: 1,
+                description: 'Milliseconds the narrowed key lives from its collection; only with reach. Defaults to the step-up window and is capped at it',
+            })),
         }),
     })
     .use([
@@ -634,8 +647,29 @@ export const issueDeviceLink = route.post('/_auth/device/link/issue')
         return await issueDeviceLinkService(issuerOf(c), {
             credential: getAuth(c).credential,
             passkeyResponse: body.passkeyResponse,
-        });
+        }, narrowingOf(body));
     });
+
+/**
+ * The narrowing an issue body states, if any. A lifetime belongs to a reach:
+ * stated alone it would ask for a full key with a lifetime nothing enforces.
+ *
+ * @throws ValidationError for `keyLifetimeMillis` without `reach`
+ */
+function narrowingOf(body: Partial<DeviceLinkNarrowing>): DeviceLinkNarrowing | undefined
+{
+    if (body.reach === undefined)
+    {
+        if (body.keyLifetimeMillis !== undefined)
+        {
+            throw new ValidationError({ message: 'keyLifetimeMillis is accepted only together with reach' });
+        }
+
+        return undefined;
+    }
+
+    return { reach: body.reach, keyLifetimeMillis: body.keyLifetimeMillis };
+}
 
 /**
  * POST /_auth/device/link/redeem - Park a new device's key on a shown code
@@ -672,7 +706,8 @@ export const redeemDeviceLink = route.post('/_auth/device/link/redeem')
  * route of its own so that each caller's generated client says exactly what it
  * sends — the mobile route's key fields stay required. Shares
  * `device/link/redeem`'s rate-limit policy, so a second route does not double
- * the budget for guessing codes.
+ * the budget for guessing codes. A narrowed link's code answers 404 here: its
+ * key is a terminal's, never a browser session's.
  */
 export const redeemDeviceLinkWeb = route.post('/_auth/device/link/redeem/web')
     .input({
@@ -690,7 +725,7 @@ export const redeemDeviceLinkWeb = route.post('/_auth/device/link/redeem/web')
     {
         const { body } = await c.data();
 
-        return await redeemDeviceLinkService({ userCode: body.userCode, deviceName: body.deviceName, ...proxyDeviceKey(body) });
+        return await redeemDeviceLinkService({ userCode: body.userCode, deviceName: body.deviceName, ...proxyDeviceKey(body) }, 'browser');
     });
 
 /**
@@ -728,7 +763,8 @@ export const getDeviceLinkStatus = route.post('/_auth/device/link/status')
  * POST /_auth/device/link/confirm - Pick the number the new device shows
  *
  * The right number approves the link; any other denies it and answers
- * `DeviceLinkWrongMatchError`, with no second pick. An account with a second
+ * `DeviceLinkWrongMatchError`, with no second pick. On a narrowed link
+ * (`match: 'typed'`) `choice` is the number the issuer typed. An account with a second
  * factor is asked its step-up again before the pick is judged: outside the
  * window the answer is 403 `STEP_UP_REQUIRED`, the link stays `redeemed`, and
  * the same number confirms after a step-up. Not `Transactional()`, on purpose:

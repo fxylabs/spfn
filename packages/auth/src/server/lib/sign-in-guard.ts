@@ -13,6 +13,7 @@
 
 import type { DeviceRegistrationChannel } from '../events';
 import type { User } from '../entities/users';
+import type { KeyReach } from '../types';
 
 import { optionKeys, readOptions } from '@spfn/core/options';
 
@@ -77,12 +78,26 @@ export interface SignInAttempt
     stage: SignInStage;
     /** On `password` and `deletion-cancel`: the email or phone the request named. */
     identifier?: SignInIdentifier;
-    /** The request's client address (`deviceProvenance`). Display material: decide nothing by it. */
+    /**
+     * The request's client address (`deviceProvenance`). Display material,
+     * unless the deployment makes it an address the caller cannot choose:
+     * through the signed Next.js proxy it is the address the proxy attests (a
+     * browser's); with `SERVER_TRUSTED_PROXY_HOPS=n` it is the `X-Forwarded-For`
+     * entry n hops from the right — the caller's only where the server cannot
+     * be reached around those proxies; with no declaration, or a shorter
+     * chain, it is the TCP peer. Decide by it only in such a deployment.
+     */
     ip?: string;
     /** The request's `user-agent`, truncated. Display material. */
     userAgent?: string;
     /** Whether proxy-guard recognised the trusted Next.js proxy — the one attested fact here. */
     webProxy: boolean;
+    /**
+     * What the key this sign-in registers is held to (`KEY_REACH`): set on a
+     * `device-link` attempt whose issuer narrowed the link — a terminal's key —
+     * and absent on every other attempt.
+     */
+    reach?: KeyReach;
 }
 
 /** How an attempt ended, as `settled` is told. */

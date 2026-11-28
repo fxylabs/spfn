@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/auth: a device link may be narrowed to ops tokens by its issuer (#524).** A device let in
+  by another device always got the whole account for 90 days: no door said what the new key was
+  for, so a terminal that needed ops tokens held everything, and its link was confirmed by tapping
+  one of three numbers, sized for a phone. `POST /_auth/device/link/issue` now takes `reach:
+  'opsTokens'` and `keyLifetimeMillis` (only with `reach`, otherwise 400; the step-up window by
+  default and at most), written on the link (`device_links.reach`, `device_links.key_lifetime_ms`,
+  migration `20261128113845_bitter_violations`) and echoed by `issue`, `status` and `redeem`.
+  `status` answers `match: 'choices' | 'typed'`: a narrowed link draws no decoys and its number is
+  typed, one wrong number denying it as a wrong pick does. `redeem/web` answers a narrowed link's
+  code 404. The link's poll registers the key with that narrowing (unbound, at the stated
+  lifetime) and, in the same transaction, copies the issuing key's step-up record onto it whole —
+  method, passkey and `verified_at` — so the terminal's window closes when the issuer's does; the
+  approved answer carries `keyReach` and `keyExpiresAtMillis`. `SignInAttempt.reach` (and so
+  `SignInOutcome`) tells the `signIn` guard a terminal from a phone; the README's guard section
+  gains the recipe "a terminal only from inside the app's network", with the deployment it holds
+  in, and `SignInAttempt.ip` says when it is an address the caller cannot choose.
+  `auth.ops_token.issued` and `auth.ops_token.revoked` carry `via.reach`. Device-code login never
+  narrows. New exports from `@spfn/auth/server`: `DeviceLinkNarrowing`, `DeviceLinkNarrowingEcho`,
+  `DeviceLinkMatch`, `DeviceLinkRedeemDoor`; `issueDeviceLinkService` takes an optional third
+  argument (`narrowing`), `redeemDeviceLinkService` an optional second (`door`). Mobile contract
+  0.15.0 → 0.15.1: `RedeemDeviceLinkResponse.reach?` and `keyLifetimeMillis?`,
+  `PollDeviceAuthResponse.keyReach?`, the `KeyReach` enum and `deviceLink.narrowingRule`.
 - **@spfn/auth: a key may be held to a reach, and admission enforces it (#524).** Every key a
   device got from another device was the whole account for 90 days, and admission had no idea of
   a key's reach: no door could hand out less. A key may now be narrowed —

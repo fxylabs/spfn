@@ -42,6 +42,7 @@ import { authLogger } from '../logger';
 import { usersRepository } from '../repositories';
 import type { AdmissionRefusal } from '../lib/admission-refusal';
 import type { User } from '../entities/users';
+import type { KeyReach } from '../types';
 import {
     SIGN_IN_REFUSAL_CODE,
     signInGuard,
@@ -158,7 +159,7 @@ export function signInAttempt(
     user: User | null,
     channel: SignInChannel,
     request: SignInRequest,
-    more: { stage?: SignInStage; identifier?: SignInIdentifier } = {},
+    more: { stage?: SignInStage; identifier?: SignInIdentifier; reach?: KeyReach } = {},
 ): SignInAttempt | null
 {
     return signInGuard() && {
@@ -169,6 +170,7 @@ export function signInAttempt(
         ip: request.ip,
         userAgent: request.userAgent,
         webProxy: request.webProxy === true,
+        ...(more.reach ? { reach: more.reach } : {}),
     };
 }
 

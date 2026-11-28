@@ -16,6 +16,7 @@ import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { InsufficientPermissionsError } from '@spfn/auth/errors';
 import { opsTokensRepository } from '../repositories/ops-tokens.repository';
 import { usersRepository } from '../repositories/users.repository';
+import { keysRepository } from '../repositories/keys.repository';
 import type { OpsToken } from '../entities/ops-tokens';
 import { opsTokenIssuedEvent, opsTokenRevokedEvent, type OpsTokenIssuedPayload } from '../events';
 import { BUILTIN_PERMISSIONS } from '../rbac/builtin';
@@ -134,6 +135,7 @@ export async function issueOpsTokenService(
             expiresAt,
             issuedBy: issuer.userId,
         });
+        const via = await viaOf(issuer.credential);
 
         onAfterCommit(() => opsTokenIssuedEvent.emit({
             userId: String(issuer.userId),
@@ -142,7 +144,7 @@ export async function issueOpsTokenService(
             scopes: record.scopes,
             expiresAtMillis: record.expiresAt?.getTime(),
             createdAtMillis: record.createdAt.getTime(),
-            via: viaOf(issuer.credential),
+            via,
         }));
 
         return { token, record };
@@ -152,9 +154,11 @@ export async function issueOpsTokenService(
 /**
  * The credential an act was asked through, as the ops-token events name it:
  * the one answer `sessionCredentialOf` gives every reader of a session. A grant
- * is no session and names nothing.
+ * is no session and names nothing. A device key held to a reach — a terminal
+ * let in by a narrowed link — is named with its reach, read off its row, so a
+ * token minted from a terminal is told apart from one minted in a browser.
  */
-function viaOf(credential: PrincipalCredential): OpsTokenIssuedPayload['via']
+async function viaOf(credential: PrincipalCredential): Promise<OpsTokenIssuedPayload['via']>
 {
     const session = sessionCredentialOf(credential);
 
@@ -163,7 +167,14 @@ function viaOf(credential: PrincipalCredential): OpsTokenIssuedPayload['via']
         return { keyId: session.keyId, profile: session.profile };
     }
 
-    return { keyId: session?.keyId };
+    if (!session)
+    {
+        return { keyId: undefined };
+    }
+
+    const key = await keysRepository.findByKeyIdOnPrimary(session.keyId);
+
+    return { keyId: session.keyId, ...(key?.reach ? { reach: key.reach } : {}) };
 }
 
 /** Under the issuer's account lock: their status and permission, then their step-up. */
@@ -254,13 +265,15 @@ export async function revokeOpsTokenService(id: number, revoker?: OpsTokenRevoke
 
     if (record)
     {
+        const via = revoker ? await viaOf(revoker.credential) : undefined;
+
         onAfterCommit(() => opsTokenRevokedEvent.emit({
             userId: revoker ? String(revoker.userId) : undefined,
             tokenId: record.id,
             name: record.name,
             issuedBy: record.issuedBy === null ? undefined : String(record.issuedBy),
             revokedAtMillis: record.revokedAt!.getTime(),
-            via: revoker ? viaOf(revoker.credential) : undefined,
+            via,
         }));
     }
 
