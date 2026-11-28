@@ -29,6 +29,7 @@
  * | S4 | `issueDeviceLinkService` called with a lifetime of 0 or 1.5 ms | ValidationError; no link row | a link issued for a key no registration will write, refused only at its collection |
  * | P | the issuer stepped up with a marked passkey | issuance 200; once that passkey is revoked, 403 | the copy dropping `passkey_id`, or a window outliving its passkey |
  * | B-M | an unenrolled administrator's narrowed key, collected end to end | list, revoke and issuance 200; logout 204; then 401 | a key collected by a link that its reach refuses |
+ * | D | device-code login: `device/start`, `approve` and `poll` each given `reach` and `keyLifetimeMillis` | a full key: no `keyReach`, no reach, the full 90 days | device-code login narrowing a key nobody signed in stated |
  * | C1 | an application profile reporting the issuing key's id issues and confirms; its window opened 9 minutes ago, the key's own at enrolment | the copy the profile's record; issuance 2 minutes later 403 | the key's later window carried over one the confirming profile never opened |
  * | C2 | as C1, the key having no record and the profile a fresh one | the copy the profile's record; issuance 200 | a profile's proven step-up carried over as none |
  * | C3 | the key issues with its window 9 minutes old; the profile reporting its id steps up and confirms | the copy the profile's record; issuance 2 minutes later 200 | the issuing credential's record copied instead of the confirming one's |
@@ -655,6 +656,35 @@ describe.skipIf(!dbAvailable)('a device link narrowed to ops tokens (#524)', () 
 
         await expectError(await issueOpsToken(sessionFor(keyPair)), 403, 'STEP_UP_REQUIRED');
         expect(await tokenRows()).toBe(0);
+    });
+
+    it('D: device-code login given reach and keyLifetimeMillis at start, approve and poll registers a full 90-day key with no reach', async () =>
+    {
+        const approver = await signIn();
+        const keyPair = generateKeyPair('ES256');
+        const asked = { reach: 'opsTokens', keyLifetimeMillis: 60_000 };
+
+        const started = await post('/_auth/device/start', {
+            publicKey: keyPair.publicKey,
+            keyId: keyPair.keyId,
+            fingerprint: keyPair.fingerprint,
+            algorithm: keyPair.algorithm,
+            deviceName: 'spfn CLI',
+            platform: 'desktop',
+            ...asked,
+        });
+        expect(started.status, await started.clone().text()).toBe(200);
+        const { deviceCode, userCode } = await started.json();
+        expect((await post('/_auth/device/approve', { userCode, ...asked }, approver)).status).toBe(200);
+
+        const collectedAt = Date.now();
+        const polled = await post('/_auth/device/poll', { deviceCode, ...asked });
+        expect(polled.status, await polled.clone().text()).toBe(200);
+        expect(await polled.json()).not.toHaveProperty('keyReach');
+
+        const key = (await keyRow(keyPair.keyId))!;
+        expect(key.reach).toBeNull();
+        expectExpiresAfter(key.expiresAt!, collectedAt, FULL_KEY_LIFETIME_MS);
     });
 
     it('A-C1: a profile issues and confirms with a window 9 minutes old — the narrowed key carries the profile\'s, not the fresher one of the key it reports, and 2 minutes later its issuance is 403', async () =>
