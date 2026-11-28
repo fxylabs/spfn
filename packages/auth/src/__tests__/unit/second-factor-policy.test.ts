@@ -79,16 +79,23 @@ describe('second-factor policy (#309)', () =>
         await expect(lifecycle.afterInfrastructure!()).rejects.toThrow(/secondFactor\.methods is empty/);
     });
 
-    it('B2: required with deviceCode or deviceLink on refuses boot, naming the channel', async () =>
+    it('B2: required with deviceCode on refuses boot, naming the channel', async () =>
     {
         const withDeviceCode = lifecycleWith({ required: true }, { deviceCode: true, deviceLink: false });
         await expect(withDeviceCode.afterInfrastructure!()).rejects.toThrow(/the deviceCode channel is on/);
+    });
 
-        __resetSecondFactorPolicyForTests();
+    it('C1 (#528): required boots with deviceLink on, and is still refused once deviceCode is on too', async () =>
+    {
+        configureChannels({ deviceCode: false, deviceLink: true });
+        configureSecondFactor({ required: true });
+
+        expect(() => assertSecondFactorPolicy()).not.toThrow();
+
         __resetChannelsForTests();
+        configureChannels({ deviceCode: true, deviceLink: true });
 
-        const withDeviceLink = lifecycleWith({ required: true }, { deviceCode: false, deviceLink: true });
-        await expect(withDeviceLink.afterInfrastructure!()).rejects.toThrow(/the deviceLink channel is on/);
+        expect(() => assertSecondFactorPolicy()).toThrow(/the deviceCode channel is on/);
     });
 
     it('B2: a policy that does not require a factor boots beside the device channels', () =>

@@ -612,9 +612,11 @@ function issuerOf(c: Parameters<typeof getAuth>[0]): DeviceLinkIssuer
  *
  * An account with session binding on sends `passkeyResponse`, an assertion over
  * `session/passkey-proof/options { procedure: 'linkIssue' }`; without it the
- * issue is refused with 403 `PASSKEY_PROOF_REQUIRED`. Takes a JSON body (`{}`
- * when there is nothing to send). No `Transactional()`, for `device/approve`'s
- * reason.
+ * issue is refused with 403 `PASSKEY_PROOF_REQUIRED`. An account with a second
+ * factor steps up on this device first: outside the window the issue is
+ * refused with 403 `STEP_UP_REQUIRED` and writes nothing. Takes a JSON body
+ * (`{}` when there is nothing to send). No `Transactional()`, for
+ * `device/approve`'s reason.
  */
 export const issueDeviceLink = route.post('/_auth/device/link/issue')
     .input({
@@ -726,10 +728,12 @@ export const getDeviceLinkStatus = route.post('/_auth/device/link/status')
  * POST /_auth/device/link/confirm - Pick the number the new device shows
  *
  * The right number approves the link; any other denies it and answers
- * `DeviceLinkWrongMatchError`, with no second pick. Not `Transactional()`, on
- * purpose: the wrong-number denial has to commit even though the request fails,
- * and each outcome is one conditional statement that needs no transaction to be
- * atomic.
+ * `DeviceLinkWrongMatchError`, with no second pick. An account with a second
+ * factor is asked its step-up again before the pick is judged: outside the
+ * window the answer is 403 `STEP_UP_REQUIRED`, the link stays `redeemed`, and
+ * the same number confirms after a step-up. Not `Transactional()`, on purpose:
+ * the wrong-number denial has to commit even though the request fails, and each
+ * outcome is one conditional statement that needs no transaction to be atomic.
  */
 export const confirmDeviceLink = route.post('/_auth/device/link/confirm')
     .input({
@@ -745,7 +749,12 @@ export const confirmDeviceLink = route.post('/_auth/device/link/confirm')
     {
         const { body } = await c.data();
 
-        return await confirmDeviceLinkService({ linkId: body.linkId, choice: body.choice, issuer: issuerOf(c) });
+        return await confirmDeviceLinkService({
+            linkId: body.linkId,
+            choice: body.choice,
+            issuer: issuerOf(c),
+            credential: getAuth(c).credential,
+        });
     });
 
 /** POST /_auth/device/link/deny - Refuse the device that redeemed the code */

@@ -80,6 +80,7 @@ import { completeDeviceLogin, type ParkedDeviceKey, type PollDeviceAuthResult } 
 import type { PrincipalCredential } from './admission.service';
 import { assertPasskeyProven } from '../lib/passkey-proof';
 import { checkPasskeyProof } from './passkey.service';
+import { assertStepUp } from './mfa.service';
 
 /** The signed-in device a link belongs to, read from the request's principal. Never from a body. */
 export interface DeviceLinkIssuer
@@ -149,6 +150,12 @@ export interface ConfirmDeviceLinkParams extends DeviceLinkParams
 {
     /** The number the issuer picked. */
     choice: number;
+    /**
+     * The credential the confirm was signed with (`getAuth(c).credential`).
+     * Taken from the request, never rebuilt from `issuer.keyId`: the step-up
+     * window it is judged by is per credential (`assertStepUp`).
+     */
+    credential: PrincipalCredential;
 }
 
 /**
@@ -332,6 +339,14 @@ function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
  * itself. The assertion is checked first, outside any transaction (a failed
  * one spends its challenge), and spent under the account lock with the write.
  *
+ * An enrolled issuer proves its second factor on this device first
+ * (`assertStepUp`, a no-op for an unenrolled account): the link lets a device
+ * in with no challenge of its own, and that exemption holds only because the
+ * issuer proved a listed factor here (#528). Judged under the lock and before
+ * the passkey proof is spent and the issuer's earlier link expired, so a
+ * refusal writes nothing.
+ *
+ * @throws StepUpRequiredError when the issuer is enrolled and this device has not stepped up recently
  * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  */
 export async function issueDeviceLinkService(
@@ -353,7 +368,9 @@ export async function issueDeviceLinkService(
     // revoke-all that expires links and revokes keys queues on the same row.
     return await runInTransaction(async () =>
     {
-        await assertPasskeyProven(await usersRepository.lockAccount(issuer.userId), passkeyProof, 'linkIssue');
+        const account = await usersRepository.lockAccount(issuer.userId);
+        await assertStepUp({ userId: issuer.userId, credential: proof.credential });
+        await assertPasskeyProven(account, passkeyProof, 'linkIssue');
 
         return await insertLink(issuer);
     }, { context: 'auth:device-link-issue' });
@@ -489,6 +506,13 @@ export async function getDeviceLinkStatusService(params: DeviceLinkParams): Prom
  * The match number is fixed once a link is redeemed, so comparing against the
  * value read is safe; the transitions still name `redeemed`, so a deny or a
  * cancel landing in between wins or loses cleanly.
+ *
+ * The issuer's step-up is asked again here (`assertStepUp`), before the pick
+ * is compared: the window may have closed since issue. Its refusal rolls the
+ * transaction back with nothing written, so the link stays `redeemed` with its
+ * number and the same pick confirms after a step-up — a refusal spends no pick.
+ *
+ * @throws StepUpRequiredError when the issuer is enrolled and this device has not stepped up recently
  */
 export async function confirmDeviceLinkService(params: ConfirmDeviceLinkParams): Promise<DeviceLinkStatusResult>
 {
@@ -499,6 +523,7 @@ export async function confirmDeviceLinkService(params: ConfirmDeviceLinkParams):
         const record = await lockIssuedLink(params);
 
         assertAwaitingDecision(record);
+        await assertStepUp({ userId: params.issuer.userId, credential: params.credential });
 
         return params.choice === record.matchNumber
             ? { approved: await approve(record, params.linkId) }

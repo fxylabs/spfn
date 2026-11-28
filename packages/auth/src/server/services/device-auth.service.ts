@@ -751,8 +751,11 @@ async function reportCollectionRefusal(params: CompleteDeviceLoginParams, refusa
  *
  * Shared by device-code login and device link, so the two ways a device is let
  * in by another one judge the account alike, register the key alike, and answer
- * alike — a client cannot tell which door it came through, and neither can a
- * weakness be fixed in one and left in the other.
+ * alike — a client cannot tell which door it came through, and a weakness in
+ * the completion cannot be fixed in one and left in the other. The *decision*
+ * before it is not shared, and differs today: a link's issuer steps up at
+ * issue and at confirm (#528), a device-code approval asks no step-up. That
+ * difference is known, and left for its own change (#531).
  *
  * The person is admitted here and not only at approve time — `admitPrincipal`
  * on the approving key, as every door asks it, answering an account that is
@@ -791,9 +794,11 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
     await updateLastLoginService(user.id);
 
     const result: DeviceAuthLogin = {
-        // An approval from a device that is already signed in is itself a
-        // second factor — the owner read the code there and said yes — so
-        // neither channel ever steps up (#95).
+        // Neither door challenges the new device (#95), for a different reason
+        // each. A link's issuer proved a listed factor on the issuing device at
+        // issue and at confirm (#528). A device-code approval proved none: the
+        // owner said yes on a device already signed in, and that door's step-up
+        // is a known gap, left for its own change (#531).
         mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,

@@ -829,17 +829,20 @@ some ways in ask for no password at all:
 | social sign-in, web and native | the provider's sign-in, then a factor | enabling no provider for sign-in — none configured, or each [link-only](#link-only-providers-and-recent-authentication); there is no channel for it |
 | password reset | the mailed link, then a factor | `channels.passwordReset: false` |
 | recovery code | stands in for the factor on every 202 | `secondFactor: { recoveryCodes: false }` |
-| device-code login, device link | — | refused at boot under `required` |
+| device link | a signed-in device of the account, which steps up at issue and at confirm | `channels.deviceLink: false` |
+| device-code login | — | refused at boot under `required` |
 
 So an app that wants **the password and the passkey whenever a person signs in on a device that is
-not already signed in** closes all four:
+not already signed in** closes all five:
 
 ```typescript
 createAuthLifecycle({
     channels: {
         passwordReset: false,  // or keep it, and accept "email + passkey" as a way in
         deviceCode: false,     // required by `required: true`
-        deviceLink: false,
+        deviceLink: false,     // or keep it, and accept "a signed-in device that proved a listed factor"
+                               // as a way in: the device it lets in shows neither the password nor a
+                               // factor of its own
         // passkeyLogin left off, its default: a passkey is never the whole credential
     },
     secondFactor: {
@@ -857,6 +860,10 @@ Then, for an account that has enrolled its passkey, every sign-in route asks for
 sign-in on a device that is not already signed in — a signed-out browser included — answers 202
 until the passkey is proven at `mfa/verify`. The recipe does **not** cover:
 
+- **A device let in by a signed-in device's link, in an app that turns `channels.deviceLink` on**
+  (for a terminal, for one). That is what turning it on accepts: the issuer proves a listed factor
+  at `device/link/issue` and again at `device/link/confirm` ([device link](#device-link)), and the
+  device it lets in shows neither the password nor a factor of its own.
 - **A browser that is still signed in, signing in again.** The proxy sends the live session's key as
   `replacementProof`; that sign-in is the same device, so the password alone answers 200.
 - **Session renewal with [binding](#session-binding) on.** An expired bound key inside its grace is
@@ -888,7 +895,7 @@ In `afterInfrastructure`, beside the channel check:
 | configuration | |
 |---|---|
 | `methods: []` | refused — nothing could ever be enrolled |
-| `required: true` with `channels.deviceCode` or `channels.deviceLink` on | refused, naming the channel: an approval signs a device in with no listed factor |
+| `required: true` with `channels.deviceCode` on | refused, naming the channel: an approval signs a device in with no listed factor. `channels.deviceLink` may stay on: its issuer steps up at issue and at confirm |
 | `required: true`, `methods: ['totp']`, no `SPFN_AUTH_TOKEN_ENCRYPTION_KEYS` | refused — no TOTP secret could be stored |
 | two lifecycles stating different policies | refused |
 
@@ -3567,6 +3574,10 @@ login.
 
 ```typescript
 // On the signed-in device — the issuer. Every call below is signed with its key.
+// An account with a second factor steps up first when this device's window has closed:
+// 403 STEP_UP_REQUIRED here (or at confirm) → stepUpWithPasskey(authApi) or mfa/step-up, then again.
+// A bound account's `passkeyResponse` was not spent by the refusal: send it again, or a new one on
+// 403 PASSKEY_PROOF_REQUIRED (its challenge ran out, or the step-up's passkey moved its counter).
 const { linkId, userCode, expiresAtMillis } = await authApi.issueDeviceLink.call({});
 
 // Show `userCode` (XXXX-XXXX) as text and in a QR code, then wait for a device to use it.
@@ -3688,6 +3699,28 @@ before `@spfn/auth` 0.3.0-beta.39 has no reason recorded and answers as a refusa
   one wrong pick denies the link — there is no second try, and the new device is told the numbers did
   not match. Typing the number would be stronger; three to tap is the trade taken for a flow people
   finish.
+- **An issuer with a second factor steps up, at issue and at confirm.** The new device is never
+  challenged itself (`device-link` is not a [new-device](#step-up-on-a-new-device) channel), so the
+  issuing device proves a listed factor instead: both `issue` and `confirm` ask the
+  [step-up window](#the-step-up-window) of the credential that signed them — that device, not
+  another of the account — and outside it answer **403 `STEP_UP_REQUIRED`**. A refused `issue`
+  writes nothing: no link, and the device's earlier live link is not expired. A refused `confirm` is
+  judged before the pick, so it spends nothing: the link stays `redeemed` with its number, and the
+  same number confirms after `stepUpWithPasskey(authApi)` or `mfa/step-up` with a code. Confirm asks
+  again because time passes between the two — the link lives 5 minutes, the window 10. An account
+  with no second factor is asked nothing; an enrolment-only session (`secondFactor.required`) is
+  refused `issue` with 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`, as on every route that is not an
+  enrolment route. This is what lets `channels.deviceLink` stay on under `secondFactor.required`.
+  Deny and cancel ask nothing: refusing is always safe.
+  On a [bound](#session-binding) account the step-up is asked before the `linkIssue` passkey proof is
+  spent, so a refused `issue` leaves the proof unspent and the page may send the same
+  `passkeyResponse` again after stepping up. That holds while the proof's challenge lives
+  (`SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` from `session/passkey-proof/options`, 300 by default)
+  and while the passkey's signature counter has not passed it — a step-up with the same passkey on
+  an authenticator that counts records the newer counter, and the earlier assertion no longer
+  verifies. A challenge that has run out, or an assertion that no longer verifies, is answered 403
+  `PASSKEY_PROOF_REQUIRED` (`details.procedure: 'linkIssue'`), as an issue with no proof is: ask the
+  options again and send a new assertion.
 - **The new device's key is registered only after a confirm.** It is parked in
   `spfn_auth.device_links`, not in `user_public_keys`, until the poll after the right pick moves it
   over. A key parked on a link that was denied, cancelled, or expired can never sign anything and
@@ -4542,7 +4575,7 @@ current generation are unspent, which is what an app warns on at two remaining.
 
 #### The step-up window
 
-For an **enrolled** account, four kinds of change ask for the second factor again:
+For an **enrolled** account, five kinds of change ask for the second factor again:
 
 | route | what it changes |
 |-------|-----------------|
@@ -4550,6 +4583,7 @@ For an **enrolled** account, four kinds of change ask for the second factor agai
 | `POST /_auth/keys/revoke-all` | every device |
 | `POST /_auth/mfa/disable`, `recovery/regenerate`, `passkey/mark`, `totp/enroll` | the second factor itself |
 | `POST /_auth/passkeys/register/options`, `passkeys/revoke` | the account's credentials |
+| `POST /_auth/device/link/issue`, `device/link/confirm` | a new device on the account ([device link](#device-link)) |
 
 The rule is per **credential** — a device key, or an [application profile](#custom-auth-profiles-registerauthprofile)
 with the key id its verifier reports, which is the profile's own and never the device key that
@@ -4627,8 +4661,11 @@ POST /_auth/mfa/verify       → 200 the LoginResult the sign-in would have give
 ```
 
 Four channels stop: **password**, **oauth** (web), **oauth-native** and **password-reset** —
-the four where one stolen credential would otherwise be enough. A device-code approval does not,
-because it already carried a second proof, and neither does a passkey sign-in whose assertion
+the four where one stolen credential would otherwise be enough. A device-link sign-in does not,
+because its issuer proved a listed factor on the issuing device at issue and at confirm
+([device link](#device-link)). A device-code approval does not either, though it proves no listed
+factor — a known difference between the two doors, and why `required` refuses that channel at
+boot. Neither does a passkey sign-in whose assertion
 carried user verification, marked or not — possession and verification were both shown — while the
 [policy](#requiring-a-second-factor-secondfactor) lists passkeys. A passkey sign-in without user
 verification (a security key with no PIN), or any passkey sign-in when the policy does not list
@@ -5060,7 +5097,7 @@ with no PIN proves only that someone holds it.
 | Procedure | Route | Credential it would let in |
 |---|---|---|
 | `deviceApprove` | `POST /_auth/device/approve` | the waiting device's key — an ordinary 90-day key |
-| `linkIssue` | `POST /_auth/device/link/issue` (`confirm` is bound to the issuing key) | the redeeming device's key — an ordinary 90-day key |
+| `linkIssue` | `POST /_auth/device/link/issue` (`confirm` is bound to the issuing key; both also ask an enrolled issuer's [step-up](#the-step-up-window)) | the redeeming device's key — an ordinary 90-day key |
 | `passkeyAdd` | `POST /_auth/passkeys/register/verify` | a passkey: renews bound sessions, signs in natively, turns binding off |
 | `passwordSet` | `PUT /_auth/password` on an account with no password | a first factor; changing an existing password proves that password and is not asked |
 | `socialLink` | `POST /_auth/oauth/:provider/link` | an identity that signs in natively; the callback refuses a bound account's link started without the proof |
