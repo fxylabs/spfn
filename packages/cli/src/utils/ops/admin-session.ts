@@ -7,11 +7,17 @@
  * the CLI does it here.
  *
  * The key pair lives in memory for one command. It is generated, used to sign
- * the single call that follows, and revoked before the command ends — whether
+ * the single call that follows, and signed out (`POST /_auth/logout`, which
+ * revokes the key the request signs with) before the command ends — whether
  * the call succeeded or not. Nothing is written to disk, so a run killed
  * outright leaves a registered public key whose private half is gone; that key
  * is useless to anyone, but it sits in the administrator's device list until
  * the server's own key expiry (90 days) removes it.
+ *
+ * A 2xx from the sign-in is not by itself a session. The answer is a
+ * `LoginResult`, and the CLI reads it: a 202 (`mfaRequired`) registered the key
+ * inactive, waiting for a second step a terminal cannot take, and a 200 can
+ * carry a session that every ops-token route refuses.
  */
 
 import prompts from 'prompts';
@@ -24,6 +30,15 @@ export interface AdminSession
     /** Bearer value for `Authorization`, signed with the ephemeral key. */
     authorization: string;
     keyId: string;
+}
+
+/** The part of `@spfn/auth`'s `LoginResult` that says whether it is a usable session. */
+interface LoginResult
+{
+    /** The key was registered inactive: no session was started. */
+    mfaRequired: boolean;
+    passwordChangeRequired?: boolean;
+    secondFactorEnrolmentRequired?: boolean;
 }
 
 /**
@@ -113,7 +128,7 @@ export async function openAdminSession(appUrl: string): Promise<AdminSession>
 
     const keyPair = generateKeyPair('ES256');
 
-    await postJson(appUrl, '/_auth/login', {
+    const login: LoginResult = await postJson(appUrl, '/_auth/login', {
         email: answers.email,
         password: answers.password,
         publicKey: keyPair.publicKey,
@@ -123,30 +138,74 @@ export async function openAdminSession(appUrl: string): Promise<AdminSession>
         deviceName: 'spfn CLI',
     });
 
+    // The key is registered inactive and holds only a challenge. Nothing can
+    // sign with it, and no call of the CLI's can remove it — the server
+    // discards it with the challenge.
+    if (login.mfaRequired)
+    {
+        throw new Error('This account signs in with a second step on a new device, and this command cannot complete it.');
+    }
+
     const token = generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', {
         expiresIn: '5m',
     });
+    const session = { authorization: `Bearer ${token}`, keyId: keyPair.keyId };
 
-    return { authorization: `Bearer ${token}`, keyId: keyPair.keyId };
+    await refuseRestrictedSession(appUrl, session, login);
+
+    return session;
 }
 
 /**
- * Revoke the ephemeral key. Best effort: the ops token is already issued by
- * the time this runs, so a failure here is worth a word but not a failed
- * command — the key stops being usable at the server's own expiry.
+ * The remedies a signed-in session still needs before an ops-token route
+ * admits it. Every one of those routes refuses the session until they are done.
+ */
+function pendingRemedies(login: LoginResult): string[]
+{
+    return [
+        ...(login.passwordChangeRequired ? ['change the password in the app'] : []),
+        ...(login.secondFactorEnrolmentRequired ? ['enrol a second factor in the app'] : []),
+    ];
+}
+
+/**
+ * A session the ops-token routes would refuse is signed out at once, and the
+ * command stops naming what the account has to do first. The key is live, so
+ * it is ended here; `logout` is the one call such a session may make.
+ */
+async function refuseRestrictedSession(appUrl: string, session: AdminSession, login: LoginResult): Promise<void>
+{
+    const remedies = pendingRemedies(login);
+
+    if (remedies.length === 0)
+    {
+        return;
+    }
+
+    await closeAdminSession(appUrl, session);
+
+    throw new Error(`This account must ${remedies.join(' and ')} before it can manage ops tokens. Do that, then run this command again.`);
+}
+
+/**
+ * Sign the ephemeral key out. `logout` revokes the key the request signs with,
+ * and unlike `keys/revoke` it admits a session that still has to change its
+ * password or enrol a second factor. Best effort: the ops token is already
+ * issued by the time this runs, so a failure here is worth a word but not a
+ * failed command.
  */
 export async function closeAdminSession(appUrl: string, session: AdminSession): Promise<void>
 {
     try
     {
-        await postJson(appUrl, '/_auth/keys/revoke', { keyId: session.keyId }, session.authorization);
+        await postJson(appUrl, '/_auth/logout', {}, session.authorization);
     }
     catch (err)
     {
         console.error(chalk.yellow(
-            `⚠️  Could not revoke the CLI's temporary key (${err instanceof Error ? err.message : String(err)}).`,
+            `⚠️  Could not sign out the CLI's temporary key (${err instanceof Error ? err.message : String(err)}).`,
         ));
-        console.error(chalk.gray('   It expires on its own; revoke it from the app if you want it gone now.'));
+        console.error(chalk.gray('   Its private half ended with this run, so nothing can sign with it; the server stops accepting it at its expiry.'));
     }
 }
 
@@ -157,15 +216,15 @@ function abort(err: unknown): never
 }
 
 /**
- * Sign in, run one admin-authenticated call, and revoke the ephemeral key
+ * Sign in, run one admin-authenticated call, and sign the ephemeral key out
  * before the command ends — on the failing path as much as the succeeding one.
  *
- * The revoke cannot sit in a `finally` beside a `process.exit()`: exit ends the
+ * The sign-out cannot sit in a `finally` beside a `process.exit()`: exit ends the
  * process synchronously, so the `finally` never runs. A command that failed
  * after signing in — an operator signing in with an account that is not an
  * administrator gets 403 on every attempt — would then leave a registered key
- * behind each time. So the failure is caught, the key revoked, and the exit
- * taken last.
+ * behind each time. So the failure is caught, the key signed out, and the
+ * exit taken last.
  */
 export async function withAdminSession<T>(
     appUrl: string,

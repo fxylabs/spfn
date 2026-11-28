@@ -1356,8 +1356,15 @@ never expires. The upper bound is there because a day count becomes a date by ar
 and a big enough count produces an invalid date rather than a distant one.
 
 SPFN authenticates a request with a JWT the client signs itself, so the CLI generates a key
-pair for the command, signs the one call it needs, and revokes the key before the command
-ends — on the failing path as much as the succeeding one. Nothing is written to disk.
+pair for the command, signs the one call it needs, and signs the key out (`POST /_auth/logout`)
+before the command ends — on the failing path as much as the succeeding one. Nothing is written
+to disk.
+
+A sign-in that does not yield a session the ops-token routes admit stops the command, exit 1. An
+account with a second factor, signing in from the CLI's key — new on every run — is answered
+202: the key stays inactive behind a second step a terminal cannot take, so the CLI signs nothing
+with it and has nothing to sign out. An account that must change its password, or enrol a second
+factor the app requires, is signed out at once, and the message names what to do in the app first.
 
 These three commands need `@spfn/auth` **0.3.0-beta.2 or later** installed in the app: the
 ops token lives in its schema, and the signing comes from its `@spfn/auth/crypto` entry

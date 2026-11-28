@@ -1,9 +1,10 @@
 /**
  * Administrator session lifecycle for `spfn ops token`.
  *
- * The ephemeral key the CLI signs with must be revoked before the command
- * ends, and the failing path is the one that used to lose it: the revoke sat in
- * a `finally` beside `process.exit()`, and exit ends the process synchronously,
+ * The ephemeral key the CLI signs with must be signed out before the command
+ * ends (`POST /_auth/logout`, which revokes the key the request signs with),
+ * and the failing path is the one that used to lose it: the cleanup sat in a
+ * `finally` beside `process.exit()`, and exit ends the process synchronously,
  * so the `finally` never ran. An operator signing in with an account that is
  * not an administrator gets 403 on every attempt, and every attempt left a
  * registered key behind until the server's 90-day expiry removed it.
@@ -15,11 +16,12 @@
  * dependency: the CLI does not depend on that package, so it is not there to
  * stub.
  *
- * The assertions are about ORDER, not merely about the revoke happening. A test
- * has to replace `process.exit` with something it can observe, and anything
- * observable lets execution continue — which runs a `finally` that a real exit
- * would have skipped. So "the revoke happened" passes under both the broken and
- * the fixed arrangement, and only "the revoke happened before exit was called"
+ * The assertions are about ORDER, not merely about the sign-out happening. A
+ * test has to replace `process.exit` with something it can observe, and
+ * anything observable lets execution continue — which runs a `finally` that a
+ * real exit would have skipped. So "the sign-out happened" passes under both
+ * the broken and the fixed arrangement, and only "the sign-out happened before
+ * exit was called"
  * tells them apart. `exit` is recorded into the same trace as the requests for
  * exactly that reason.
  */
@@ -100,7 +102,7 @@ describe('withAdminSession', () =>
         vi.unstubAllGlobals();
     });
 
-    it('signs in, runs the call, and revokes the key it signed with', async () =>
+    it('signs in, runs the call, and signs out the key it signed with', async () =>
     {
         serve(path => path === '/_auth/ops-tokens'
             ? new Response(JSON.stringify({ token: 'spfn_ops_secret' }), { status: 200 })
@@ -113,15 +115,15 @@ describe('withAdminSession', () =>
         expect(trace).toEqual([
             'POST /_auth/login',
             'POST /_auth/ops-tokens',
-            'POST /_auth/keys/revoke',
+            'POST /_auth/logout',
         ]);
 
-        // The revoke carries the session's signature, so the server knows
-        // which key is being given up.
+        // The sign-out carries the session's signature: logout revokes the
+        // key the request signs with.
         expect(lastAuthorization).toBe('Bearer signed-jwt');
     });
 
-    it('revokes the key before exiting when the call failed', async () =>
+    it('signs the key out before exiting when the call failed', async () =>
     {
         serve(path => path === '/_auth/ops-tokens'
             ? new Response(JSON.stringify({ message: 'Forbidden' }), { status: 403 })
@@ -133,12 +135,12 @@ describe('withAdminSession', () =>
 
         expect(exitCode).toBe(1);
 
-        // The revoke comes before the exit. Under a real `process.exit` there is
+        // The sign-out comes before the exit. Under a real `process.exit` there is
         // no "after" to run in, which is the whole point of the ordering.
         expect(trace).toEqual([
             'POST /_auth/login',
             'POST /_auth/ops-tokens',
-            'POST /_auth/keys/revoke',
+            'POST /_auth/logout',
             'exit',
         ]);
     });

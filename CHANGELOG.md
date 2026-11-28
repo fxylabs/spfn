@@ -2097,6 +2097,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **spfn: `spfn ops token` reads the sign-in's answer instead of taking any 2xx for a session
+  (#525).** `issue`, `list` and `revoke` posted the password to `/_auth/login` and treated every
+  answer that was not an error as signed in. An account with a second factor is answered 202
+  (`mfaRequired`) on the CLI's key, which is new on every run: the key is registered inactive, so
+  the next call was refused "Invalid or revoked key", and the cleanup through `keys/revoke` was
+  refused too, with a warning untrue of that key. A 202 now stops the command, exit 1, saying the
+  account signs in with a second step this command cannot complete; nothing is signed with the
+  pending key and nothing is called after the sign-in. A 200 carrying `passwordChangeRequired` or
+  `secondFactorEnrolmentRequired` — a session every ops-token route refuses, the seeded
+  administrator's first state — now names the remedy (change the password, enrol a second factor,
+  in the app), signs out, and exits 1 without calling an ops-token route. Cleanup on every path is
+  `POST /_auth/logout`, which revokes the key the request signs with and admits such a session;
+  `keys/revoke` refused it and left a live key behind. The warning on a failed cleanup now says
+  what is true of that key. No change to the app's routes.
 - **@spfn/auth: every exported service that takes the account lock opens its own transaction
   (#494).** Nine of them took the lock (`usersRepository.lockAccount`) and left the transaction to
   their route's `Transactional()`: `startTotpEnrolmentService`, `regenerateRecoveryCodesService`,
