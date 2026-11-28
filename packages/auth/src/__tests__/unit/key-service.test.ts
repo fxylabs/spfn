@@ -99,6 +99,7 @@ function keyRow(overrides: Record<string, unknown> = {})
         algorithm: 'ES256',
         fingerprint: 'a'.repeat(64),
         binding: 'none',
+        reach: null,
         isActive: true,
         keyEpoch: 0,
         accountKeyEpoch: 0,

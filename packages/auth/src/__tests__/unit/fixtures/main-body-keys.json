@@ -206,6 +206,12 @@
         "message",
         "details"
     ],
+    "KeyOutOfReachError": [
+        "__type",
+        "message",
+        "details",
+        "code"
+    ],
     "KeyRevokedError": [
         "__type",
         "message",

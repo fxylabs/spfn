@@ -27,7 +27,12 @@
  * 3. the account's outstanding requirements — a password to change (#362),
  *    then a second factor to enrol under the policy (#309) — except for
  *    renewal, below. With one outstanding, only a route that admits it is let
- *    in (`ROUTE_ENROLMENT`); with several, a route that admits any one of them.
+ *    in (`ROUTE_ENROLMENT`); with several, a route that admits any one of them;
+ * 4. a key held to a reach (`user_public_keys.reach`) is let in only on a route
+ *    that reach admits (`ROUTE_REACH`). After the requirements and as well as
+ *    them, never instead: a narrowed key satisfies its reach **and** its
+ *    account's requirements. A door with no route in front of it (`route:
+ *    null`) and a completion admit no narrowed key.
  *
  * The principal it answers with is a `Principal`, and the two shapes the doors
  * hand on — `AuthContext` on the request, `VerifiedOAuth2AccessToken` to
@@ -59,7 +64,7 @@ import type { StartingCredential } from '../lib/deferred-stamp';
 import { resolveRoleInForce } from './role-email-domain.service';
 import { isEnrolmentOnly } from './second-factor-policy.service';
 import { isMethodListed } from '../lib/second-factor-policy';
-import { restrictedRouteAdmits, SESSION_REQUIREMENTS, type SessionRequirement } from '../lib/enrolment-routes';
+import { restrictedRouteAdmits, restrictedRouteReaches, SESSION_REQUIREMENTS, type SessionRequirement } from '../lib/enrolment-routes';
 import type { RouteEnrolment, RouteRequirementClasses } from '../routes/channels';
 
 /**
@@ -391,7 +396,8 @@ async function admit(params: AdmitPrincipalParams, completing: RouteRequirementC
         ?? revokedRefusal(read)
         ?? familyRefusal(read.key, params.presentedOn)
         ?? expiredRefusal(read)
-        ?? await requirementRefusal(read.account.user, params, completing);
+        ?? await requirementRefusal(read.account.user, params, completing)
+        ?? reachRefusal(read.key, params.route);
 
     if (refusal !== null)
     {
@@ -605,6 +611,24 @@ async function requirementRefusal(
     return outstanding[0] === 'passwordChange'
         ? { reason: 'passwordChangeRequired', requirements: outstanding }
         : { reason: 'enrolmentRequired' };
+}
+
+/**
+ * Step 4: a key held to a reach is let in only on a route whose marker names
+ * that reach (`restrictedRouteReaches`) — read only from inside the global
+ * `authenticate`, so `optionalAuth`, `opsOrUser`, a one-time token, every
+ * application route and every door with no request in front of it refuse it.
+ * Asked after the requirements, whatever they answered: the reach narrows what
+ * a key may do, and never stands in for what the account must do first.
+ */
+function reachRefusal(key: UserPublicKey | null | undefined, route: Context | null): AdmissionRefusal | null
+{
+    if (!key?.reach || (route !== null && restrictedRouteReaches(route, key.reach)))
+    {
+        return null;
+    }
+
+    return { reason: 'keyOutOfReach', reach: key.reach };
 }
 
 /**

@@ -73,7 +73,8 @@ export const oneTimeTokenAuth = defineMiddleware('oneTimeTokenAuth', async (c, n
  * The answers this middleware has always given: a dead token — here, one whose
  * issuing key has since died — is an invalid one; an account that is not
  * active is a 401 of its own; enrolment-only is the policy's 403, and a
- * password to change its own 403.
+ * password to change its own 403. A token a narrowed key issued is out of that
+ * key's reach, whatever it opens: its 403 `KEY_OUT_OF_REACH`.
  */
 function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
 {
@@ -91,6 +92,7 @@ function oneTimeTokenRefusal(refusal: AdmissionRefusal): Error
         case 'enrolmentRequired':
             return new SecondFactorEnrolmentRequiredError();
         case 'passwordChangeRequired':
+        case 'keyOutOfReach':
             return admissionRefusalError(refusal);
     }
 }

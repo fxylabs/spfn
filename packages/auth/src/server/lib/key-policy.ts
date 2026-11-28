@@ -7,7 +7,7 @@
  * @module server/lib/key-policy
  */
 
-import type { SessionBindingType } from '../types';
+import type { KeyReach, SessionBindingType } from '../types';
 
 /** A registered public key expires this many days after registration. */
 export const KEY_TTL_DAYS = 90;
@@ -46,10 +46,14 @@ export const CONCURRENT_USE_WINDOW_MS = 300_000;
 /**
  * Whether a key registered by some path is bound to a passkey.
  *
- * Two facts and no others: the owner asked for it (`users.session_binding`), and
- * the request came through the proxy this package trusts. The second is what
- * `proxy-guard` answers with `clientType: 'web'`, and it is the only signal the
- * backend has that a request is a browser's rather than a direct caller's.
+ * Three facts and no others: the owner asked for it (`users.session_binding`),
+ * the request came through the proxy this package trusts, and the key is not
+ * narrowed. The second is what `proxy-guard` answers with `clientType: 'web'`,
+ * and it is the only signal the backend has that a request is a browser's
+ * rather than a direct caller's. The third holds a narrowed key
+ * (`user_public_keys.reach`) to the lifetime its issuer stated: a bound key
+ * lives `BOUND_KEY_TTL_HOURS` and renewal extends it, and a narrowed key's
+ * terminal may well have collected it through the proxy.
  *
  * `platform` is not consulted and must not be. Its own documentation says it is
  * what the client declares, display-only, and that nothing is authorized by it —
@@ -64,7 +68,8 @@ export const CONCURRENT_USE_WINDOW_MS = 300_000;
 export function decideKeyBinding(
     accountBinding: SessionBindingType,
     webProxy: boolean | undefined,
+    reach: KeyReach | null,
 ): SessionBindingType
 {
-    return accountBinding === 'passkey' && webProxy === true ? 'passkey' : 'none';
+    return accountBinding === 'passkey' && webProxy === true && reach === null ? 'passkey' : 'none';
 }

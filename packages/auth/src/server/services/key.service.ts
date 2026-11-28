@@ -4,7 +4,7 @@
  * Handles public key registration, rotation, and revocation
  */
 
-import { type KeyAlgorithmType, type KeyPlatformType, type SessionBindingType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType, type KeyReach, type SessionBindingType } from '../types';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import { KEY_TTL_DAYS, decideKeyBinding } from '../lib/key-policy';
 import { exemptsNewDevice, type PasskeyAssertionProof } from '../lib/passkey-assertion';
@@ -155,6 +155,30 @@ export interface RegisterPublicKeyParams
     missingAccount?: () => Error;
     /** The email or phone the sign-in named, for the app's `signIn` guard. On `password` only. */
     identifier?: SignInIdentifier;
+    /**
+     * The key is held to a reach for a stated lifetime, rather than being the
+     * whole account for `KEY_TTL_DAYS` (`KeyNarrowing`). Only a door whose
+     * issuer stated both passes it.
+     */
+    narrowing?: KeyNarrowing;
+}
+
+/**
+ * What a narrowed key is held to: the routes of one reach (`ROUTE_REACH`), and
+ * a lifetime counted from its registration.
+ *
+ * A narrowed key is never bound, whatever request registered it — a bound key
+ * lives `BOUND_KEY_TTL_HOURS` and renewal extends it — and never replaced: a
+ * rotation it signs, a renewal and a sign-in's `replacementProof` it signed
+ * find nothing to replace (`revokeForReplacement`), and a sign-in presenting
+ * it again is refused (`answerForExistingKey`). Nothing but its registration
+ * writes its expiry.
+ */
+export interface KeyNarrowing
+{
+    reach: KeyReach;
+    /** Milliseconds from registration to `expires_at`. */
+    lifetimeMs: number;
 }
 
 /**
@@ -288,6 +312,11 @@ export interface KeySummary
     registeredIp?: string;
     /** `user-agent` of the registering request, on the same terms as above. */
     registeredUserAgent?: string;
+    /**
+     * What the key is held to, when it is not the whole account (`KEY_REACH`);
+     * absent for every key a door did not narrow.
+     */
+    reach?: KeyReach;
     /**
      * `'passkey'` when this key is bound to one, absent when it is not.
      *
@@ -440,9 +469,10 @@ function stepUpChannel(channel: KeyRegistrationChannel): MfaChallengeChannel | u
  *
  * Anything else — another public key under that id, a revoked key of their own
  * (and a key of an ended generation is one, see `keyLiveness`), a pending key
- * presented through a door that cannot step up, somebody else's key — is the
- * one error, told the same way on every path, so a caller cannot probe whether
- * a keyId exists.
+ * presented through a door that cannot step up, somebody else's key, a narrowed
+ * key (`KeyNarrowing`), whose expiry a sign-in would move and whose reach it
+ * would answer as a session of the whole account — is the one error, told the
+ * same way on every path, so a caller cannot probe whether a keyId exists.
  *
  * @throws KeyIdAlreadyRegisteredError
  */
@@ -458,6 +488,7 @@ async function answerForExistingKey(
     }
 
     const sameKey = existing.userId === params.userId
+        && existing.reach === null
         && existing.publicKey === params.publicKey
         && existing.fingerprint === params.fingerprint;
 
@@ -799,8 +830,9 @@ async function keyIdProvenByProof(proof: string, params: RegisterPublicKeyParams
  * recent-authentication gate by rotating.
  *
  * Whether it is bound is decided here, for every path at once, from the
- * account's setting as locked and whether the key is a web session's
- * (`decideKeyBinding`): every web key of a bound account is a bound key.
+ * account's setting as locked, whether the key is a web session's and whether
+ * it is narrowed (`decideKeyBinding`): every web key of a bound account is a
+ * bound key, except a narrowed one.
  */
 function newKeyRow(
     params: RegisterPublicKeyParams,
@@ -812,7 +844,8 @@ function newKeyRow(
 {
     const rotated = params.channel === 'rotation' ? replaced : null;
     const viaWebProxy = params.webProxy === true || replaced?.viaWebProxy === true;
-    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy);
+    const reach = params.narrowing?.reach ?? null;
+    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy, reach);
 
     return {
         userId: params.userId,
@@ -825,6 +858,7 @@ function newKeyRow(
         isActive,
         viaWebProxy,
         binding,
+        reach,
         ...deviceFields(params, replaced, binding),
     };
 }
@@ -851,7 +885,10 @@ function recordedFamily(userAgent: string | undefined): UaFamily | null
     return userAgent ? uaFamily(userAgent) : null;
 }
 
-/** What a registration knows about the device: what this request said about it. */
+/**
+ * What a registration knows about the device: what this request said about it,
+ * and the lifetime its narrowing states, if any.
+ */
 function registeringDevice(params: RegisterPublicKeyParams, binding: SessionBindingType)
 {
     return {
@@ -860,8 +897,10 @@ function registeringDevice(params: RegisterPublicKeyParams, binding: SessionBind
         registeredIp: params.ip ?? null,
         registeredUserAgent: params.userAgent ?? null,
         registeredUaFamily: recordedFamily(params.userAgent),
-        // Hours for a bound key, 90 days otherwise
-        expiresAt: getKeyExpiryDate(binding),
+        // The stated lifetime for a narrowed key; hours for a bound key, 90 days otherwise
+        expiresAt: params.narrowing
+            ? new Date(Date.now() + params.narrowing.lifetimeMs)
+            : getKeyExpiryDate(binding),
     };
 }
 
@@ -963,7 +1002,7 @@ async function reRegisterOwnKey(
 function renewedUnboundKey(existing: UserPublicKey, params: RegisterPublicKeyParams, account: User)
 {
     const viaWebProxy = params.webProxy === true || existing.viaWebProxy;
-    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy);
+    const binding = decideKeyBinding(account.sessionBinding, viaWebProxy, existing.reach);
 
     if (binding === 'none' && !isExpired(existing.expiresAt))
     {
@@ -975,18 +1014,18 @@ function renewedUnboundKey(existing: UserPublicKey, params: RegisterPublicKeyPar
 
 /**
  * Whether a key waits to be bound: a web key — recorded as one, or used through
- * the attested proxy on this request — that is unbound, on an account whose
- * binding is on. A state rather than an event, so a bind that failed once is
- * tried again whenever the key is used. The caller holds a live key; under the
- * account lock `bindWebKeyService` asks liveness too.
+ * the attested proxy on this request — that is unbound and not narrowed, on an
+ * account whose binding is on. A state rather than an event, so a bind that
+ * failed once is tried again whenever the key is used. The caller holds a live
+ * key; under the account lock `bindWebKeyService` asks liveness too.
  */
 export function awaitsWebBinding(
-    key: Pick<UserPublicKey, 'binding' | 'viaWebProxy'>,
+    key: Pick<UserPublicKey, 'binding' | 'viaWebProxy' | 'reach'>,
     account: Pick<User, 'sessionBinding'>,
     webProxy: boolean,
 ): boolean
 {
-    return key.binding === 'none' && decideKeyBinding(account.sessionBinding, key.viaWebProxy || webProxy) === 'passkey';
+    return key.binding === 'none' && decideKeyBinding(account.sessionBinding, key.viaWebProxy || webProxy, key.reach) === 'passkey';
 }
 
 /**
@@ -1111,6 +1150,7 @@ export async function listKeysService(params: ListKeysParams): Promise<KeySummar
         revokedAtMillis: row.revokedAt?.getTime(),
         registeredIp: row.registeredIp ?? undefined,
         registeredUserAgent: row.registeredUserAgent ?? undefined,
+        reach: row.reach ?? undefined,
         binding: row.binding === 'passkey' ? row.binding : undefined,
         concurrentUseAtMillis: row.concurrentUseAt?.getTime(),
     }));

@@ -12,7 +12,8 @@
  * "Ends the session" is the key-refused family: this key or this account can no
  * longer act, so the cookie that holds the key is dead weight. A refusal that asks
  * the same session to do something first — change its password, enrol a second
- * factor — leaves it.
+ * factor — leaves it, and so does a narrowed key's refusal outside its reach: the
+ * key is still good for what it was let in for.
  *
  * An expired key is the family's one member a session may survive: a bound key
  * inside its renewal grace is renewed with the passkey, not signed in again. The
@@ -38,13 +39,14 @@ import {
     AccountNotFoundError,
     AccountPendingDeletionError,
     KeyExpiredError,
+    KeyOutOfReachError,
     KeyRevokedError,
     PasswordChangeRequiredError,
     SecondFactorEnrolmentRequiredError,
     SessionContextChangedError,
 } from '@spfn/auth/errors';
 
-import type { UserStatus } from '../types';
+import type { KeyReach, UserStatus } from '../types';
 import type { SessionRequirement } from './enrolment-routes';
 
 /**
@@ -61,7 +63,8 @@ export type AdmissionRefusal =
     | { reason: 'credentialExpired'; renewable: boolean }
     | { reason: 'contextChanged' }
     | { reason: 'enrolmentRequired' }
-    | { reason: 'passwordChangeRequired'; requirements: readonly SessionRequirement[] };
+    | { reason: 'passwordChangeRequired'; requirements: readonly SessionRequirement[] }
+    | { reason: 'keyOutOfReach'; reach: KeyReach };
 
 type RefusalReason = AdmissionRefusal['reason'];
 
@@ -113,6 +116,11 @@ const REFUSAL_ANSWERS: { [R in RefusalReason]: RefusalAnswer<R> } = {
         errorType: PasswordChangeRequiredError,
         endsSession: false,
         error: refusal => new PasswordChangeRequiredError({ details: { requirements: [...refusal.requirements] } }),
+    },
+    keyOutOfReach: {
+        errorType: KeyOutOfReachError,
+        endsSession: false,
+        error: refusal => new KeyOutOfReachError({ details: { reach: refusal.reach } }),
     },
 };
 

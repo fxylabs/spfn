@@ -224,6 +224,7 @@ export type {
     RevokeAllKeysParams,
     RevokeAllKeysResult,
     KeySummary,
+    KeyNarrowing,
 } from './key.service';
 
 // User Service

@@ -768,6 +768,8 @@ describe.skipIf(!dbAvailable)('the Next.js proxy decides the session once per re
         'MfaVerificationFailedError', 'StepUpRequiredError', 'SecondFactorEnrolmentRequiredError',
         // #362: a session whose account must change its password is the one it changes it with.
         'PasswordChangeRequiredError',
+        // #524: a narrowed key refused outside its reach is still good for what it was let in for.
+        'KeyOutOfReachError',
         // #434: the app refused, or its hook failed, and the change rolled back; the session stays.
         'PasswordChangeRefusedError', 'PasswordChangeHookFailedError',
         // #458: the app's password rule threw; nothing was written, the session stays.

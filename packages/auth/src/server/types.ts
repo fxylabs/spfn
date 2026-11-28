@@ -31,6 +31,22 @@ export const KEY_PLATFORM = ['ios', 'android', 'web', 'desktop'] as const;
  */
 export type KeyPlatformType = typeof KEY_PLATFORM[number];
 
+/**
+ * What a key may be held to instead of the whole account (`user_public_keys.reach`).
+ *
+ * `'opsTokens'`: the three ops-token routes and sign-out — the key a terminal
+ * holds to issue, list or revoke ops tokens and nothing else. A key with no
+ * reach is the whole account, which is every key but the ones a door narrowed.
+ * Which routes each reach admits is `ROUTE_REACH`; admission refuses the rest.
+ * Stored via `enumText`, so adding a value here needs no migration.
+ */
+export const KEY_REACH = ['opsTokens'] as const;
+
+/**
+ * Key reach type derived from the const array
+ */
+export type KeyReach = typeof KEY_REACH[number];
+
 /** Longest device label accepted at registration, and what the list returns. */
 export const KEY_DEVICE_NAME_MAX_LENGTH = 64;
 

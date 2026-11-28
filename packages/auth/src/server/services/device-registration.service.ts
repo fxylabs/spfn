@@ -66,5 +66,6 @@ export async function emitDeviceRegistered(
         createdAtMillis: row.createdAt.getTime(),
         channel,
         mfaEnrolled,
+        reach: row.reach ?? undefined,
     }));
 }

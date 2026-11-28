@@ -21,9 +21,9 @@
  * `fixtures/main-body-keys.json` was taken from `main` at d0105b3b: each
  * registered class, built there with this file's fixtures (the two refusals
  * with `code` beside `details`, main's constructor), serialized, and its keys
- * listed in order. `PasswordRuleFailedError` (#458) and `PasskeyHookFailedError`
- * (#493) are not on `main`: each entry is what the class sends when it is first
- * registered, taken the same way.
+ * listed in order. `PasswordRuleFailedError` (#458), `PasskeyHookFailedError`
+ * (#493) and `KeyOutOfReachError` (#524) are not on `main`: each entry is what
+ * the class sends when it is first registered, taken the same way.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -150,6 +150,7 @@ const fixtures: Fixtures = {
     PasskeyProofRequiredError: PLAIN,
     SecondFactorEnrolmentRequiredError: PLAIN,
     PasswordChangeRequiredError: PLAIN,
+    KeyOutOfReachError: PLAIN,
     SecondFactorMethodDisabledError: PLAIN,
     SecondFactorRequiredError: PLAIN,
     SessionPendingMismatchError: PLAIN,

@@ -1,0 +1,1 @@
+ALTER TABLE "spfn_auth"."user_public_keys" ADD COLUMN "reach" text;

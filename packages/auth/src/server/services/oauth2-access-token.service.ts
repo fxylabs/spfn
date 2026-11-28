@@ -169,6 +169,7 @@ function refuseToken(refusal: AdmissionRefusal): null
         case 'enrolmentRequired':
             throw new SecondFactorEnrolmentRequiredError();
         case 'passwordChangeRequired':
+        case 'keyOutOfReach':
             throw admissionRefusalError(refusal);
     }
 }

@@ -168,6 +168,7 @@ export class KeysRepository extends AccountStateRepository
                 revokedAt: userPublicKeys.revokedAt,
                 registeredIp: userPublicKeys.registeredIp,
                 registeredUserAgent: userPublicKeys.registeredUserAgent,
+                reach: userPublicKeys.reach,
                 binding: userPublicKeys.binding,
                 concurrentUseAt: userPublicKeys.concurrentUseAt,
             })
@@ -265,6 +266,12 @@ export class KeysRepository extends AccountStateRepository
      * the window this exists to close — a revocation committing in between, and
      * the replacement going ahead as though the old key were still the device's.
      *
+     * A narrowed key (`reach` set) is never replaced, so it is never named here:
+     * a replacement skips the new-device challenge and carries the step-up
+     * window over, and a narrowed key's holder who knows the password would get
+     * the whole account by it. A rotation it signs is refused, and a sign-in
+     * whose `replacementProof` it signed is a new device.
+     *
      * Null when nothing was revoked, which every caller reads as "not a
      * replacement". The row, when there is one, is what the replacement inherits
      * from (generation, `authenticatedAt`, and on a rotation the device's
@@ -291,6 +298,7 @@ export class KeysRepository extends AccountStateRepository
                     eq(userPublicKeys.keyId, keyId),
                     eq(userPublicKeys.userId, userId),
                     eq(userPublicKeys.isActive, true),
+                    isNull(userPublicKeys.reach),
                     eq(userPublicKeys.keyEpoch, sql`(SELECT ${users.keyEpoch} FROM ${users} WHERE ${users.id} = ${userId})`),
                 ),
             )

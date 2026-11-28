@@ -2227,6 +2227,30 @@ export class PasswordChangeRequiredError extends ForbiddenError
 }
 
 /**
+ * Key Out Of Reach Error (403)
+ *
+ * The request was signed by a key held to a reach (`user_public_keys.reach`),
+ * and the route it matched is not one that reach admits. `details.reach` names
+ * the reach — `'opsTokens'`: the three ops-token routes and sign-out.
+ *
+ * 403 and not 401, for `SecondFactorEnrolmentRequiredError`'s reason: the
+ * session is not gone — it is still good for what it was let in for.
+ */
+export class KeyOutOfReachError extends ForbiddenError
+{
+    readonly code = 'KEY_OUT_OF_REACH';
+
+    constructor(data: { message?: string; details?: Record<string, any> } = {})
+    {
+        super({
+            message: data.message || 'This key may not be used for this request.',
+            details: data.details,
+        });
+        this.name = 'KeyOutOfReachError';
+    }
+}
+
+/**
  * Second Factor Method Disabled Error (404)
  *
  * A second-factor route of a method the application does not list
