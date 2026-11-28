@@ -446,6 +446,7 @@ export type {
     VerifiedOpsToken,
     IssuedOpsToken,
     OpsTokenIssuer,
+    OpsTokenRevoker,
 } from './ops-token.service';
 
 // =============================================================================

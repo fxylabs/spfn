@@ -566,6 +566,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second bucket, root or provider beside the default service, with the same surface and no state
   shared with it. Provider fields left out fall back to the same environment variables as the
   default service.
+- **@spfn/auth: an ops token's issue and revocation are announced — `auth.ops_token.issued` and
+  `auth.ops_token.revoked` (#527).** Issuance and revocation emitted no event, so an
+  administrator session that minted a token — a credential that outlives every session of the
+  account — or revoked another administrator's told nobody. `opsTokenIssuedEvent` and
+  `opsTokenRevokedEvent` are exported from `@spfn/auth/server` with `OpsTokenIssuedPayload` and
+  `OpsTokenRevokedPayload`, and fire after commit: `issueOpsTokenService` and
+  `revokeOpsTokenService` register them with `onAfterCommit`, so a refused issuance, a revocation
+  of an unknown or already revoked id, and either act rolled back announce nothing. Issued:
+  `userId` (the issuer), `tokenId`, `name`, `scopes`, `expiresAtMillis?` (absent: never expires),
+  `createdAtMillis`, `via`. Revoked: `userId?` (the revoker), `tokenId`, `name`, `issuedBy?`,
+  `revokedAtMillis`, `via?`. `via` names the credential the request presented — `keyId` for a
+  device key, `profile` and its key id for an application profile — never the account. Neither
+  carries the secret or its hash. `revokeOpsTokenService(id, revoker?)` gains an optional
+  `OpsTokenRevoker` (`{ userId, credential }`), which `DELETE /_auth/ops-tokens/:id` passes from
+  `getAuth(c)`; called without one, the event has no `userId` or `via`. Not breaking: new exports
+  and an optional parameter. No schema change; the mobile contract does not move.
 
 ### Changed
 

@@ -144,7 +144,8 @@ export const listOpsTokens = route.get('/_auth/ops-tokens')
 
 /**
  * DELETE /_auth/ops-tokens/:id
- * Revoke a token. Revocation is permanent and takes effect immediately.
+ * Revoke a token. Revocation is permanent and takes effect immediately, and
+ * `auth.ops_token.revoked` names the caller as the revoker.
  */
 export const revokeOpsToken = route.delete('/_auth/ops-tokens/:id')
     .input({
@@ -156,7 +157,8 @@ export const revokeOpsToken = route.delete('/_auth/ops-tokens/:id')
     .handler(async (c) =>
     {
         const { params } = await c.data();
-        const record = await revokeOpsTokenService(params.id);
+        const { userId, credential } = getAuth(c);
+        const record = await revokeOpsTokenService(params.id, { userId: Number(userId), credential });
 
         if (!record)
         {

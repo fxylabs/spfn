@@ -16,22 +16,26 @@
  * records that never held it, since only its hash was ever stored.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 
 import { setupTestDb, teardownTestDb, clearTables, getTestDb, isDatabaseAvailable } from '../helpers/db';
-import { users } from '@/server/entities';
+import { mfaTotp, mfaVerifications, opsTokens, users } from '@/server/entities';
 import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
+import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate } from '@/server/middleware/authenticate';
-import { verifyOpsTokenService } from '@/server/services/ops-token.service';
+import { issueOpsTokenService, verifyOpsTokenService } from '@/server/services/ops-token.service';
+import { opsTokenIssuedEvent, opsTokenRevokedEvent } from '@/server/events';
 
 const { mainAuthRouter } = await import('@/server/routes');
 const { registerRoutes } = await import('@spfn/core/route');
-const { ErrorHandler } = await import('@spfn/core/middleware');
+const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
+const { runInTransaction } = await import('@spfn/core/db');
 
 const dbAvailable = await isDatabaseAvailable();
 
@@ -90,6 +94,11 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
      */
     async function signIn(email: string): Promise<string>
     {
+        return (await signInWithKey(email)).authorization;
+    }
+
+    async function signInWithKey(email: string): Promise<{ authorization: string; keyId: string }>
+    {
         const keyPair = generateKeyPair('ES256');
 
         const response = await app.request('/_auth/login', {
@@ -112,7 +121,7 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
             expiresIn: '5m',
         });
 
-        return `Bearer ${token}`;
+        return { authorization: `Bearer ${token}`, keyId: keyPair.keyId };
     }
 
     async function issue(authorization: string, body: Record<string, unknown>)
@@ -305,6 +314,176 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
 
             expect(admin).toBeDefined();
             expect(admin!.passwordHash).toBeTruthy();
+        });
+    });
+
+    /**
+     * Issuance and revocation are announced after commit, and only then.
+     *
+     * Each payload is recorded with whether the act it names was visible, at
+     * the moment the subscriber ran, from this suite's own connection — so an
+     * emit made inside the transaction reads as uncommitted. A row that asserts
+     * nothing fired also makes an act that does fire, and waits for it: the
+     * absence is then read after a delivery that would have come behind it, not
+     * after a guessed delay.
+     */
+    describe('announcements', () =>
+    {
+        type Seen<T> = { payload: T; committed: boolean };
+
+        let issued: Seen<typeof opsTokenIssuedEvent._payload>[];
+        let revoked: Seen<typeof opsTokenRevokedEvent._payload>[];
+        let unsubscribe: (() => void)[];
+
+        async function tokenRow(tokenId: number)
+        {
+            const [row] = await getTestDb().select().from(opsTokens).where(eq(opsTokens.id, tokenId));
+
+            return row;
+        }
+
+        async function userIdOf(email: string): Promise<string>
+        {
+            const [row] = await getTestDb().select({ id: users.id }).from(users).where(eq(users.email, email));
+
+            return String(row!.id);
+        }
+
+        beforeEach(() =>
+        {
+            // These rows sign in more often than the login route's limiter allows one address.
+            resetMemoryRateLimitStore();
+            issued = [];
+            revoked = [];
+            unsubscribe = [
+                opsTokenIssuedEvent.subscribe(async (payload) =>
+                {
+                    issued.push({ payload, committed: (await tokenRow(payload.tokenId)) !== undefined });
+                }),
+                opsTokenRevokedEvent.subscribe(async (payload) =>
+                {
+                    revoked.push({ payload, committed: (await tokenRow(payload.tokenId))?.revokedAt != null });
+                }),
+            ];
+            // The TOTP secret is encrypted at rest.
+            vi.stubEnv('SPFN_AUTH_TOKEN_ENCRYPTION_KEYS', `active:${Buffer.alloc(32, 7).toString('base64')}`);
+        });
+
+        afterEach(() =>
+        {
+            // Both events are module singletons, and every suite in this package runs in one fork.
+            unsubscribe.forEach(stop => stop());
+            vi.unstubAllEnvs();
+        });
+
+        it('E-M issuance: one auth.ops_token.issued after commit, naming the token, the issuer and the key — never the secret', async () =>
+        {
+            const admin = await signInWithKey('admin@test.com');
+
+            const answer = await (await issue(admin.authorization, {
+                name: 'deploy', scopes: ['waitlist:read'], expiresInDays: 30,
+            })).json();
+            await vi.waitFor(() => expect(issued).toHaveLength(1));
+
+            expect(issued[0]).toEqual({
+                committed: true,
+                payload: {
+                    userId: await userIdOf('admin@test.com'),
+                    tokenId: answer.opsToken.id,
+                    name: 'deploy',
+                    scopes: ['waitlist:read'],
+                    expiresAtMillis: new Date(answer.opsToken.expiresAt).getTime(),
+                    createdAtMillis: new Date(answer.opsToken.createdAt).getTime(),
+                    via: { keyId: admin.keyId },
+                },
+            });
+            const text = JSON.stringify(issued[0]!.payload);
+            expect(text).not.toContain(answer.token);
+            expect(text).not.toContain(createHash('sha256').update(answer.token).digest('hex'));
+        });
+
+        it('E-R1 issuance refused with STEP_UP_REQUIRED: no announcement', async () =>
+        {
+            const admin = await signIn('admin@test.com');
+            const code = (secret: string) => hotp(decodeBase32(secret), totpStep(Date.now()));
+            const { secret } = await (await app.request('/_auth/mfa/totp/enroll', {
+                method: 'POST', headers: { ...JSON_HEADERS, Authorization: admin }, body: '{}',
+            })).json();
+            expect((await app.request('/_auth/mfa/totp/confirm', {
+                method: 'POST', headers: { ...JSON_HEADERS, Authorization: admin }, body: JSON.stringify({ code: code(secret) }),
+            })).status).toBe(200);
+            // The step-up window this device earned by confirming has passed
+            await getTestDb().delete(mfaVerifications);
+
+            const refused = await issue(admin, { name: 'refused', scopes: ['*'] });
+            expect((await refused.json()).code).toBe('STEP_UP_REQUIRED');
+
+            await getTestDb().update(mfaTotp).set({ lastUsedStep: null });
+            expect((await app.request('/_auth/mfa/step-up', {
+                method: 'POST', headers: { ...JSON_HEADERS, Authorization: admin }, body: JSON.stringify({ code: code(secret) }),
+            })).status).toBe(204);
+            const allowed = await (await issue(admin, { name: 'allowed', scopes: ['*'] })).json();
+            await vi.waitFor(() => expect(issued).toHaveLength(1));
+
+            expect(issued.map(({ payload }) => payload.tokenId)).toEqual([allowed.opsToken.id]);
+        });
+
+        it('E-R2 the caller\'s transaction throws after issueOpsTokenService returned: no announcement, no token', async () =>
+        {
+            const admin = await signInWithKey('admin@test.com');
+            const issuer = { userId: Number(await userIdOf('admin@test.com')), credential: { kind: 'deviceKey' as const, keyId: admin.keyId } };
+            let rolledBack = 0;
+
+            await expect(runInTransaction(async () =>
+            {
+                rolledBack = (await issueOpsTokenService('rolled-back', ['*'], null, issuer)).record.id;
+
+                throw new Error('rolled back after the token row was written');
+            })).rejects.toThrow('rolled back');
+            const kept = await runInTransaction(() => issueOpsTokenService('kept', ['*'], null, issuer));
+            await vi.waitFor(() => expect(issued).toHaveLength(1));
+
+            expect(issued.map(({ payload }) => payload.tokenId)).toEqual([kept.record.id]);
+            expect(await tokenRow(rolledBack)).toBeUndefined();
+        });
+
+        it('E-V revocation: auth.ops_token.revoked names the revoker after commit; an unknown or spent id is 404 and announces nothing', async () =>
+        {
+            const issuer = await signIn('admin@test.com');
+            const adminRole = await getRoleByName('admin');
+            await getTestDb().insert(users).values({
+                email: 'revoker@test.com',
+                passwordHash: await hashPassword(PASSWORD),
+                roleId: adminRole!.id,
+                emailVerifiedAt: new Date(),
+            });
+            const revoker = await signInWithKey('revoker@test.com');
+            const first = (await (await issue(issuer, { name: 'first', scopes: ['*'] })).json()).opsToken;
+            const second = (await (await issue(issuer, { name: 'second', scopes: ['*'] })).json()).opsToken;
+            const revoke = (id: number) => app.request(`/_auth/ops-tokens/${id}`, {
+                method: 'DELETE', headers: { Authorization: revoker.authorization },
+            });
+
+            const answer = await (await revoke(first.id)).json();
+            await vi.waitFor(() => expect(revoked).toHaveLength(1));
+            expect(revoked[0]).toEqual({
+                committed: true,
+                payload: {
+                    userId: await userIdOf('revoker@test.com'),
+                    tokenId: first.id,
+                    name: 'first',
+                    issuedBy: await userIdOf('admin@test.com'),
+                    revokedAtMillis: new Date(answer.opsToken.revokedAt).getTime(),
+                    via: { keyId: revoker.keyId },
+                },
+            });
+
+            expect((await revoke(999999)).status).toBe(404);
+            expect((await revoke(first.id)).status).toBe(404);
+            expect((await revoke(second.id)).status).toBe(200);
+            await vi.waitFor(() => expect(revoked).toHaveLength(2));
+
+            expect(revoked.map(({ payload }) => payload.tokenId)).toEqual([first.id, second.id]);
         });
     });
 });
