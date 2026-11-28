@@ -7,8 +7,9 @@
  * (a marking registration records a step-up), M399-1–M399-4 of #399 (a
  * user-verified registration is marked whenever the policy requires a factor),
  * RV412-P1 of its review (only a listed passkey is marked)
- * and SU4–SU5 of #393 (one spend of a step-up assertion across its two
- * consumers), named for its row. The boot
+ * SU4–SU5 of #393 (one spend of a step-up assertion across its two
+ * consumers) and W-M, W-R1, W-R3 of #539 (an enrolled account's window counts
+ * only a listed factor), named for its row. The boot
  * rows B1–B7 and the classification's own guarantees (F4 among them) are in
  * unit/second-factor-policy.test.ts.
  *
@@ -48,6 +49,7 @@ import {
     mfaRecoveryCodes,
     mfaTotp,
     mfaVerifications,
+    opsTokens,
     passkeys,
     userPublicKeys,
     users,
@@ -1743,5 +1745,85 @@ describe.skipIf(!dbAvailable)('second-factor policy (#309 case table)', () =>
             expect(outcomes.filter(outcome => outcome === 'spent' || outcome === 204)).toHaveLength(1);
             expect(outcomes.filter(outcome => outcome === 'refused' || outcome === 401)).toHaveLength(2 * each - 1);
         }
+    });
+
+    // ========================================================================
+    // #539 — the step-up window counts only a factor the policy lists
+    //
+    // | row  | what differs | answer | must not happen |
+    // | ---- | --- | --- | --- |
+    // | W-M  | no policy; an enrolled account's window opened by a recovery code, listed while `recoveryCodes` is on | ops-tokens 200 | a refusal |
+    // | W-R1 | device D's window was opened by the unlisted TOTP in the enrolment-only state; the account then enrolled a passkey on device E | ops-tokens 403 STEP_UP_REQUIRED | an ops token row |
+    // | W-R3 | W-R1, then D steps up with the listed passkey | ops-tokens 200 | a refusal |
+    //
+    // W-M is the recovery code because `recovery` is the one recorded method
+    // whose policy name differs; a TOTP or passkey window admitting is held by
+    // the step-up rows of every other file and by W-R3. W-R2 (an enrolment-only
+    // account enrols with an unlisted proof) is P6.
+    // ========================================================================
+
+    /** The sensitive call these rows ask: issuing an ops token, which needs a step-up once the account is enrolled. */
+    function issueOpsToken(session: Session): Promise<Response>
+    {
+        return post('/_auth/ops-tokens', { name: 'w539', scopes: ['*'] }, session.authorization);
+    }
+
+    async function opsTokenRows(): Promise<number>
+    {
+        return (await getTestDb().select().from(opsTokens)).length;
+    }
+
+    /**
+     * An administrator holding only a TOTP the table's policy does not list.
+     * Device D steps up with it while the account may only enrol (#309), then
+     * the account enrols a passkey on device E, which proves the TOTP first.
+     */
+    async function windowOpenedByUnlistedMethod()
+    {
+        await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id }).where(eq(users.id, userId));
+        const { session: deviceD, secret } = await accountWithUnlistedTotp();
+        expect((await stepUpWithTotp(deviceD, secret)).status).toBe(204);
+        await forgetUsedTotpStep();
+
+        const deviceE = await signIn();
+        expect((await stepUpWithTotp(deviceE, secret)).status).toBe(204);
+        const passkey = await enrolPasskey(deviceE);
+
+        expect(await verificationsFor(deviceD.keyId)).toMatchObject([{ method: 'totp' }]);
+
+        return { deviceD, ...passkey };
+    }
+
+    it('W-M: no policy, a window opened by a recovery code on an enrolled account — ops-tokens issues', async () =>
+    {
+        await getTestDb().update(users).set({ roleId: (await getRoleByName('admin'))!.id }).where(eq(users.id, userId));
+        const session = await signIn();
+        const { recoveryCodes } = await enrolTotp(session);
+        await getTestDb().delete(mfaVerifications);
+
+        expect((await post('/_auth/mfa/step-up', { recoveryCode: recoveryCodes[0] }, session.authorization)).status).toBe(204);
+        expect(await verificationsFor(session.keyId)).toMatchObject([{ method: 'recovery' }]);
+
+        expect((await issueOpsToken(session)).status).toBe(200);
+        expect(await opsTokenRows()).toBe(1);
+    });
+
+    it('W-R1: a window opened by an unlisted TOTP in the enrolment-only state, the account since enrolled — ops-tokens is 403 STEP_UP_REQUIRED and no token is issued', async () =>
+    {
+        const { deviceD } = await windowOpenedByUnlistedMethod();
+
+        await expectRefused(await issueOpsToken(deviceD), 403, 'STEP_UP_REQUIRED');
+        expect(await opsTokenRows()).toBe(0);
+    });
+
+    it('W-R3: after W-R1\'s refusal, a step-up with the listed passkey on the same device — ops-tokens issues', async () =>
+    {
+        const { deviceD, authenticator } = await windowOpenedByUnlistedMethod();
+        await expectRefused(await issueOpsToken(deviceD), 403, 'STEP_UP_REQUIRED');
+
+        await stepUpWithPasskey(deviceD, authenticator, 1);
+
+        expect((await issueOpsToken(deviceD)).status).toBe(200);
+        expect(await opsTokenRows()).toBe(1);
     });
 });

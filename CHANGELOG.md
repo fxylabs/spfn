@@ -2156,6 +2156,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whether a cache is bound and the job-queue count, and no part of the payload, neither values nor
   keys. No other line of the event module logs a payload. Nothing else changes; an app that read
   payloads from this line logs them from a subscriber of its own.
+- **@spfn/auth: the step-up window counts only a factor the policy lists (#539).** For an enrolled
+  account `assertStepUp` asked only whether this credential verified within the window, never by
+  which method, while in the enrolment-only state (#309) `mfa/step-up` accepts any proof the account
+  holds, listed or not, and records it with its method. So under `secondFactor: { required: true,
+  methods: ['passkey'] }` a device that stepped up with an unlisted TOTP before the account enrolled
+  a passkey elsewhere still passed every sensitive route afterwards — `POST /_auth/ops-tokens`
+  issued a token with no listed factor ever proved on that device. The window now counts, for an
+  enrolled account, only a verification whose method the policy lists — a method in
+  `secondFactor.methods`, a recovery code while `recoveryCodes` is on — and answers that device
+  **403 `STEP_UP_REQUIRED`** until it steps up with one; every caller of `assertStepUp` (the
+  password change, `keys/revoke-all`, the second-factor and passkey routes, ops-token issuance,
+  OAuth link and unlink, account deletion, an app's own call) gets the same answer. The
+  enrolment-only proof (`assertEnrolmentProven`) still accepts what the account holds, so such an
+  account still enrols. Only an enrolled account whose open window an unlisted method wrote is
+  answered differently; with the default policy every method is listed and nothing changes. No
+  signature, route, schema or wire change; the mobile contract does not move.
 - **@spfn/auth: every exported service that takes the account lock opens its own transaction
   (#494).** Nine of them took the lock (`usersRepository.lockAccount`) and left the transaction to
   their route's `Transactional()`: `startTotpEnrolmentService`, `regenerateRecoveryCodesService`,

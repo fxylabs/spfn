@@ -143,6 +143,10 @@ export interface AssertStepUpParams
 /**
  * Refuse a sensitive change unless this device proved the second factor recently.
  *
+ * For an enrolled account only a factor the policy lists counts: a window this
+ * device opened with an unlisted proof — which the enrolment-only state below
+ * accepts — opens nothing once the account is enrolled (#539).
+ *
  * **No-op for an account with no second factor.** That is the contract of the
  * whole feature: `changePassword` and `revokeAllKeys` have no recency gate
  * today, and adding one for people who never opted in would be a new refusal on
@@ -158,7 +162,8 @@ export interface AssertStepUpParams
  * The unenrolled path therefore costs one indexed lookup and touches no passkey
  * configuration, which is what lets an app with no passkeys at all call it.
  *
- * @throws StepUpRequiredError when the account is enrolled and the window has passed
+ * @throws StepUpRequiredError when the account is enrolled and no listed factor
+ *   was proved on this credential within the window
  */
 export async function assertStepUp(params: AssertStepUpParams): Promise<void>
 {
@@ -169,7 +174,7 @@ export async function assertStepUp(params: AssertStepUpParams): Promise<void>
         return;
     }
 
-    await assertWindowOpen(params);
+    await assertWindowOpen(params, provesListedFactor);
 }
 
 /**
@@ -193,19 +198,37 @@ export async function assertEnrolmentProven(params: AssertStepUpParams): Promise
 {
     if (await enrolmentNeedsProof(params.userId))
     {
-        await assertWindowOpen(params);
+        // Any credential the account holds proves it here, listed or not (#309)
+        await assertWindowOpen(params, () => true);
     }
 }
 
-/** @throws StepUpRequiredError unless this credential verified within the window */
-async function assertWindowOpen(params: AssertStepUpParams): Promise<void>
+/**
+ * Whether a verification recorded with this method proved a factor the policy
+ * lists — the methods `listedProofs` accepts, recovery codes as the policy
+ * states them. A window the enrolment-only state opened with an unlisted proof
+ * does not count once the account is enrolled (#539).
+ */
+function provesListedFactor(method: MfaVerificationMethod): boolean
+{
+    return isMethodListed(method === 'recovery' ? 'recoveryCodes' : method);
+}
+
+/**
+ * @throws StepUpRequiredError unless this credential verified within the
+ *   window, by a method `counts` accepts
+ */
+async function assertWindowOpen(
+    params: AssertStepUpParams,
+    counts: (method: MfaVerificationMethod) => boolean,
+): Promise<void>
 {
     // A grant never steps up, so its window is never open
     const verifier = sessionCredentialOf(params.credential);
     const verification = verifier && await mfaVerificationsRepository.findFor(params.userId, verifier);
     const window = Math.min(params.maxAgeMs ?? Infinity, getMfaConfig().stepUpWindowMs);
 
-    if (verification && Date.now() - verification.verifiedAt.getTime() <= window)
+    if (verification && counts(verification.method) && Date.now() - verification.verifiedAt.getTime() <= window)
     {
         return;
     }
