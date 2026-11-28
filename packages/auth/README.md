@@ -705,9 +705,10 @@ this device key: `mfa/step-up/options` and `mfa/step-up` are enrolment routes, a
 account is in the enrolment-only state** `mfa/step-up` accepts an assertion from any live passkey of
 the account, a code from a confirmed TOTP whether `'totp'` is listed or not, and a recovery code
 only while `recoveryCodes` is on. It opens the ordinary step-up window, recorded with the method
-that proved it. Once the account is enrolled an unlisted proof is refused again, at `mfa/step-up` as
-at `mfa/verify`, and a window an unlisted proof opened no longer counts: the device steps up again
-with a listed factor (#539).
+that proved it and, for a passkey, which passkey. Once the account is enrolled an unlisted proof is
+refused again, at `mfa/step-up` as at `mfa/verify`, and a window an unlisted proof opened no longer
+counts — an unlisted TOTP's, and an unmarked passkey's unless that passkey has been marked since:
+the device steps up again with a listed factor (#539).
 
 `passkeys/register/options`, `passkeys/register/verify`, `mfa/passkey/mark`, `mfa/totp/enroll` and
 `mfa/totp/confirm` then require that window when the account holds a credential, and answer
@@ -4552,10 +4553,13 @@ For an **enrolled** account, four kinds of change ask for the second factor agai
 
 The rule is per **credential** — a device key, or an [application profile](#custom-auth-profiles-registerauthprofile)
 with the key id its verifier reports, which is the profile's own and never the device key that
-happens to have the same id: this device must have proved a factor the policy lists — a method in
-`secondFactor.methods`, or a recovery code while `recoveryCodes` is on — within
-`SPFN_AUTH_MFA_STEP_UP_MINUTES` (default 10). A window opened by a proof the policy does not list,
-which only the [enrolment-only state](#enrolling-when-the-account-already-holds-a-credential)
+happens to have the same id: this device must have proved, within `SPFN_AUTH_MFA_STEP_UP_MINUTES`
+(default 10), a factor the policy lists as the check finds it — a TOTP code while `'totp'` is in
+`secondFactor.methods`, a recovery code while `recoveryCodes` is on, or a passkey assertion while
+`'passkey'` is listed and the passkey that made it is still live and marked as a second factor.
+The step-up record names that passkey, so revoking or unmarking it closes the windows it opened, and
+a record from before #539, which names none, does not count. A window opened by a proof the policy
+does not list, which only the [enrolment-only state](#enrolling-when-the-account-already-holds-a-credential)
 accepts, does not count once the account is enrolled (#539). Otherwise the answer is **403
 `STEP_UP_REQUIRED`**, and the client sends the user to `POST /_auth/mfa/step-up` — a TOTP
 code, a recovery code, or an assertion with user verification from a marked passkey (options from

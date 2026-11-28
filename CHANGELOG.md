@@ -2158,20 +2158,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payloads from this line logs them from a subscriber of its own.
 - **@spfn/auth: the step-up window counts only a factor the policy lists (#539).** For an enrolled
   account `assertStepUp` asked only whether this credential verified within the window, never by
-  which method, while in the enrolment-only state (#309) `mfa/step-up` accepts any proof the account
-  holds, listed or not, and records it with its method. So under `secondFactor: { required: true,
-  methods: ['passkey'] }` a device that stepped up with an unlisted TOTP before the account enrolled
-  a passkey elsewhere still passed every sensitive route afterwards — `POST /_auth/ops-tokens`
-  issued a token with no listed factor ever proved on that device. The window now counts, for an
-  enrolled account, only a verification whose method the policy lists — a method in
-  `secondFactor.methods`, a recovery code while `recoveryCodes` is on — and answers that device
-  **403 `STEP_UP_REQUIRED`** until it steps up with one; every caller of `assertStepUp` (the
-  password change, `keys/revoke-all`, the second-factor and passkey routes, ops-token issuance,
-  OAuth link and unlink, account deletion, an app's own call) gets the same answer. The
-  enrolment-only proof (`assertEnrolmentProven`) still accepts what the account holds, so such an
-  account still enrols. Only an enrolled account whose open window an unlisted method wrote is
-  answered differently; with the default policy every method is listed and nothing changes. No
-  signature, route, schema or wire change; the mobile contract does not move.
+  which method or which passkey, while in the enrolment-only state (#309) `mfa/step-up` accepts any
+  proof the account holds — an unlisted TOTP, an unmarked passkey — and records it. So under
+  `secondFactor: { required: true, methods: ['passkey'] }` a device that stepped up with an unlisted
+  TOTP or an unmarked passkey before the account enrolled elsewhere still passed every sensitive
+  route afterwards — `POST /_auth/ops-tokens` issued a token with no listed factor ever proved on
+  that device — and under `methods: ['totp', 'passkey']` an unmarked passkey's window did the same
+  once the account enrolled a TOTP. A step-up record now names the passkey that proved it
+  (`mfa_verifications.passkey_id`: nullable, a foreign key onto `passkeys.id` that cascades; the
+  migration adds the column and nothing else), and for an enrolled account the window counts only a
+  record the proof judgement would accept now: a TOTP while `'totp'` is in `secondFactor.methods`, a
+  recovery code while `recoveryCodes` is on, a passkey while `'passkey'` is listed and the passkey
+  the record names is live and marked as a second factor. Anything else is answered **403
+  `STEP_UP_REQUIRED`** until the device steps up with a listed factor; every caller of
+  `assertStepUp` (the password change, `keys/revoke-all`, the second-factor and passkey routes,
+  ops-token issuance, OAuth link and unlink, account deletion, an app's own call) gets the same
+  answer. Under any policy, revoking or unmarking a passkey therefore closes the windows it opened,
+  and marking one makes the windows it opened count. The enrolment-only proof
+  (`assertEnrolmentProven`) still accepts what the account holds, so such an account still enrols.
+  **On upgrade:** a passkey record written before this release names no passkey and does not count,
+  so a person who stepped up with a passkey just before the deploy is asked to step up once more —
+  the 403 `STEP_UP_REQUIRED` every client already handles — for at most the window
+  (`SPFN_AUTH_MFA_STEP_UP_MINUTES`, default 10); a TOTP or recovery-code window counts as before
+  while its method is listed. Not breaking: no signature, route or wire change, and the mobile
+  contract does not move.
 - **@spfn/auth: every exported service that takes the account lock opens its own transaction
   (#494).** Nine of them took the lock (`usersRepository.lockAccount`) and left the transaction to
   their route's `Transactional()`: `startTotpEnrolmentService`, `regenerateRecoveryCodesService`,
