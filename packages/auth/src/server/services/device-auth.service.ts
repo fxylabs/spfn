@@ -718,6 +718,11 @@ async function admittedApprover(params: CompleteDeviceLoginParams): Promise<User
             throw new SecondFactorEnrolmentRequiredError();
         case 'passwordChangeRequired':
             throw admissionRefusalError(admission.refused);
+        // A narrowed approver: admitted at no door without a route, so its
+        // approval vouches for nothing. It could not have approved or issued
+        // (both routes are outside every reach), and the polling device is told
+        // what it is told of an approver that died: the record is spent.
+        case 'keyOutOfReach':
         default:
             throw params.expiredRecord();
     }

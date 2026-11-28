@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **@spfn/auth: a key may be held to a reach, and admission enforces it (#524).** Every key a
+  device got from another device was the whole account for 90 days, and admission had no idea of
+  a key's reach: no door could hand out less. A key may now be narrowed —
+  `registerPublicKeyService({ …, narrowing: { reach, lifetimeMs } })` writes
+  `user_public_keys.reach` (new nullable column, migration `20261128054245_free_jackal`; null is
+  the whole account) and `expires_at` at registration plus `lifetimeMs` (above 0 and at most
+  `KEY_TTL_DAYS`, or a `ValidationError` before anything is written). Admission asks one more
+  step after the requirements and as well as them: a narrowed key is let in only on a route its
+  reach admits (`ROUTE_REACH`; `'opsTokens'`: `issueOpsToken`, `listOpsTokens`, `revokeOpsToken`,
+  `logout`), recognised by the restricted-route marker, so every other route — every application
+  route, `optionalAuth`, `opsOrUser`'s session branch, a one-time token, every door with no route
+  — refuses it with **403 `KeyOutOfReachError`** (`KEY_OUT_OF_REACH`, `details: { reach }`), which
+  does not end a browser session. A narrowed key is never bound (at registration, at use through
+  the proxy, or when binding is turned on), never replaced (a rotation it signs is refused, a
+  `replacementProof` it signed proves nothing, so that sign-in is a new device), never replaces
+  (a narrowed registration's `replacementProof` makes a new device, a signed request's claim is
+  refused) and never signed
+  in again (409 `KeyIdAlreadyRegisteredError`). `listKeys` answers `reach?`;
+  `auth.device.registered` carries `reach?`. New exports from `@spfn/auth/server`: `KEY_REACH`,
+  `KeyReach`, `KeyNarrowing`; from `@spfn/auth/errors`: `KeyOutOfReachError`. No route passes
+  `narrowing` yet, so no answer changes and the mobile contract does not move.
 - **@spfn/core: `@spfn/core/options`, the rule for reading an application's options, where every
   reader can reach it (#492).** The rule of #477 (`readOptions`, `optionKeys`, `readEntries`,
   `readList`, `readRecords`, `OptionTerms`, `OPTION_TERMS`) lived in `@spfn/auth`'s server code,

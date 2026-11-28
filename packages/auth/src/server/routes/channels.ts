@@ -35,6 +35,7 @@ import {
     type SessionRequirement,
 } from '../lib/enrolment-routes';
 import { requireMethod, type SecondFactorFeature, type SecondFactorMethod } from '../lib/second-factor-policy';
+import { KEY_REACH, type KeyReach } from '../types';
 import type { VerificationPurpose } from './schema';
 
 /** A verification code belongs to the channel its `purpose` serves; other purposes are always on. */
@@ -403,6 +404,28 @@ export const ROUTE_ENROLMENT = {
 } as const satisfies Record<keyof typeof ROUTE_CHANNELS, RouteRequirementClasses>;
 
 /**
+ * Which routes a key held to each reach (`user_public_keys.reach`) is let in
+ * on — and so, a permissive table: a route not named here admits no narrowed
+ * key. Every route an application declares is one, and so is every door that
+ * produces a principal without the global `authenticate` (`optionalAuth`,
+ * `opsOrUser`, a one-time token): none of them carries a marker this table
+ * put there.
+ *
+ * A narrowed key is held to its reach **and** to the account's requirements
+ * (`admitPrincipal`): a route here still refuses it while the account must
+ * change its password or enrol a second factor, unless `ROUTE_ENROLMENT`
+ * admits it under that requirement too, as it does `logout`.
+ *
+ * `opsTokens` — what a terminal is let in for: issuing, listing and revoking
+ * ops tokens, and signing out, which is how it removes its key on every path.
+ */
+export const ROUTE_REACH = {
+    opsTokens: ['issueOpsToken', 'listOpsTokens', 'revokeOpsToken', 'logout'],
+} as const satisfies Record<KeyReach, readonly (keyof typeof ROUTE_CHANNELS)[]>;
+// Every name is a route: `ROUTE_CHANNELS` holds every key of `mainAuthRouter`,
+// and `gateChannels` refuses a route it lacks at import.
+
+/**
  * The second-factor routes of one method, answered 404
  * `SECOND_FACTOR_METHOD_DISABLED` while the policy does not list it.
  *
@@ -425,6 +448,9 @@ export const ROUTE_SECOND_FACTOR_METHODS = {
  * its method is unlisted its own gate answers the 404, which is the answer
  * that route owes every caller, and a 403 from `authenticate` would hide it.
  *
+ * The marker also carries the reaches whose keys the route admits
+ * (`ROUTE_REACH`).
+ *
  * @throws when a route has no entry in `ROUTE_ENROLMENT`, or no class in one of its columns
  */
 export function markEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any, any, any>>>(
@@ -434,7 +460,7 @@ export function markEnrolmentRoutes<TRoutes extends Record<string, RouteDef<any,
 {
     return Object.fromEntries(Object.entries(routes).map(([key, route]) =>
     {
-        const admits = restrictedRouteAdmission(key, classes[key]);
+        const admits = { ...restrictedRouteAdmission(key, classes[key]), ...reachAdmission(key) };
 
         if (Object.keys(admits).length === 0)
         {
@@ -475,6 +501,14 @@ function restrictedRouteAdmission(key: string, row: RouteRequirementClasses | un
             : { secondFactorEnrolment: enrolment === 'always' || gated ? null : enrolment },
         ...row.passwordChange === 'admit' ? { passwordChange: true } : {},
     };
+}
+
+/** The reaches whose keys a route admits, from `ROUTE_REACH`; nothing for a route it does not name. */
+function reachAdmission(key: string): RestrictedRouteAdmission
+{
+    const reach = KEY_REACH.filter(candidate => (ROUTE_REACH[candidate] as readonly string[]).includes(key));
+
+    return reach.length === 0 ? {} : { reach };
 }
 
 type RouteMiddleware = MiddlewareHandler | NamedMiddleware<string>;

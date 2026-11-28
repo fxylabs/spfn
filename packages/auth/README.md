@@ -3738,7 +3738,7 @@ revoked one either. A global revocation deletes it outright rather than revoking
 const { keys } = await authApi.listKeys.call({ body: {} });
 // → [{ keyId, deviceName?, platform?, algorithm, fingerprintPrefix, createdAtMillis,
 //      lastUsedAtMillis?, expiresAtMillis?, isExpired, isActive, revokedAtMillis?,
-//      registeredIp?, registeredUserAgent?, binding?, concurrentUseAtMillis? }]
+//      registeredIp?, registeredUserAgent?, reach?, binding?, concurrentUseAtMillis? }]
 
 await authApi.listKeys.call({ body: { includeRevoked: true } });   // also what was cut off
 ```
@@ -3836,6 +3836,8 @@ Rotation carries the replaced key's label over unless the client sends a new one
   registered before the columns existed; the literal string `unknown` is never stored. They are
   unauthenticated display material, spoofable on any request that does not come through a verified
   proxy, so render them and decide nothing by them. Mobile contract 0.11.0.
+- **`reach` says the key is [held to a reach](#a-key-held-to-a-reach)** — `'opsTokens'` for a
+  terminal let in for ops tokens only — and is absent on every key that is the whole account.
 - **`binding` says the key is tied to a passkey**, and is absent on every key that is not — which
   is every key on an account that did not turn [session binding](#session-binding) on. A bound key
   expires in hours and only a passkey assertion renews it.
@@ -6901,7 +6903,10 @@ registered on an account, on every channel that registers one — `channel` says
 `password-reset` or `passkey`. It carries `userId`, `keyId`, `algorithm`, a 12-character `fingerprintPrefix`,
 `createdAtMillis`, and whatever the registration knew about the device: `deviceName?`, `platform?`,
 `ip?` and `userAgent?` — the web OAuth callback has neither label, because the sealed state does
-not carry them. Subscribe to tell the owner a device was added: a login event says a session began
+not carry them. `reach?` is present when the key is [held to a reach](#a-key-held-to-a-reach) —
+`'opsTokens'` for a terminal — and absent for a key that is the whole account; such a key is
+announced like any other, since an approval somebody was tricked into is the device its owner most
+needs to hear about. Subscribe to tell the owner a device was added: a login event says a session began
 and not what it began on, so a stolen password used on a new machine was silent until this event.
 Send it with a [sign-out-everywhere link](#the-sign-out-everywhere-link), which is the action the
 notice should offer.
@@ -7109,6 +7114,10 @@ is named after it; the other doors answer in their own vocabulary (below).
 5. **The second-factor policy** (#309) — `SecondFactorEnrolmentRequiredError`. Except for
    renewal, deliberately: renewal admits no request, it continues a key the person holds into its
    replacement, which meets the policy on its first request like any key.
+6. **A narrowed key stays inside its reach** — `KeyOutOfReachError`. A key
+   [held to a reach](#a-key-held-to-a-reach) is let in only on a route that reach admits. It is
+   asked after the requirements and as well as them, never instead: a narrowed key must satisfy
+   both.
 
 The account, its role and the credential's row are one primary read, so `authenticate` makes
 no query it did not make before. Each door answers a refusal as it always has: 401/403 with the
@@ -7128,6 +7137,7 @@ alone — so a client can tell "this session is over" from any other 401:
 | account disabled / deleted | `AccountDisabledError` | 403 | yes |
 | deletion requested | `AccountPendingDeletionError` | 403 | yes |
 | second factor to enrol | `SecondFactorEnrolmentRequiredError` | 403 | no |
+| narrowed key outside its reach | `KeyOutOfReachError` (`KEY_OUT_OF_REACH`, `details: { reach }`) | 403 | no |
 
 `KeyRevokedError` and `AccountNotFoundError` extend core's `UnauthorizedError`; the plain
 `UnauthorizedError` is never one of these and never ends a session. On a client the classes —
@@ -7150,6 +7160,48 @@ Once admitted, a request writes one info line, `API access`, on `@spfn/auth:midd
 address, no name; `userId` finds the account. `path` is read through `loggedPath(c)` from
 `@spfn/core/middleware`, so a prefix declared with `defineServerConfig().logging({ redactPaths })`
 is written `<prefix>/[redacted]` here too.
+
+### A key held to a reach
+
+A key may be **narrowed**: held to a reach (`user_public_keys.reach`, one of `KEY_REACH`) and to a
+lifetime stated when it was registered, instead of being the whole account for 90 days. The one
+reach is `'opsTokens'` — the key a terminal holds to issue, list and revoke [ops
+tokens](#ops-tokens-spfn-ops):
+
+| reach | routes it admits (`ROUTE_REACH`) |
+|---|---|
+| `opsTokens` | `issueOpsToken`, `listOpsTokens`, `revokeOpsToken`, `logout` |
+
+- **Every other request is refused** with 403 `KEY_OUT_OF_REACH` (`KeyOutOfReachError`,
+  `details: { reach }`) — 403 because the key is still good for what it was let in for. The table
+  is permissive: a route it does not name admits no narrowed key, so every application route
+  refuses one, and so do `optionalAuth` (which reads it as anonymous), `opsOrUser`'s session
+  branch, a one-time token the key issued and every door with no route in front of it. A route
+  is recognised the way an [enrolment route](#the-enrolment-only-state) is: by a marker on the
+  route that matched, read only by the global `authenticate` and `logout`'s own door.
+- **The reach does not stand in for the account's requirements.** While the account must change
+  its password or enrol a second factor, a narrowed key is refused issuance like any key, and is
+  refused the change itself too: it is outside the reach. `logout` admits it in both states.
+- **It is never bound**, whatever request registered it: binding would give it a bound key's
+  24 hours, which renewal extends. Turning [session binding](#session-binding) on leaves it as
+  it is.
+- **It is never replaced.** `keys/rotate` is outside the reach; a sign-in whose
+  `replacementProof` it signed is a new device — challenged for the second factor when the
+  account has one — and the narrowed key stays as it was; a sign-in presenting the narrowed key
+  again is refused 409 `KeyIdAlreadyRegisteredError`. Nothing moves its expiry. **Nor does it
+  replace**: a narrowed registration carrying `replaces` leaves the claimed key as it was — a
+  `replacementProof` makes it a new device, announced and carrying no step-up record; a signed
+  request's claim answers its `refusal`. A narrowed registration naming a key id that already
+  exists — a narrowed key's or a full one's, the same public key or another — is refused 409
+  `KeyIdAlreadyRegisteredError`, and that key stays as it was.
+- **It is listed** — `listKeys` answers `reach` on its entry — and announced:
+  `auth.device.registered` carries `reach`.
+
+Keys are narrowed by `registerPublicKeyService({ …, narrowing: { reach, lifetimeMs } })` alone.
+`lifetimeMs` is a finite number above 0 and at most a full key's 90 days (`KEY_TTL_DAYS`);
+anything else is a `ValidationError`, before the account is locked or `signIn.admit` asked,
+and before anything is written or announced.
+No route registers one yet; a device link narrowed by its issuer will (#524).
 
 ### Account status (`setAccountStatus`)
 

@@ -5,7 +5,7 @@
  * Supports key rotation and multi-key management per user
  */
 
-import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, KEY_REACH, SESSION_BINDINGS } from '../types';
 import { text, boolean, bigint, index, integer } from 'drizzle-orm/pg-core';
 import { id, foreignKey, enumText, utcTimestamp } from '@spfn/core/db';
 import { CLIENT_KINDS } from '../client-proof/wire-headers';
@@ -136,6 +136,15 @@ export const userPublicKeys = authSchema.table(
         // Never read off a request body, and `platform` is not consulted: that
         // field is display-only and a native client may declare any value it likes
         binding: enumText('binding', SESSION_BINDINGS).notNull().default('none'),
+
+        // What this key may be used for, when that is less than the whole account
+        // null: the whole account — every key but the ones a door narrowed
+        // 'opsTokens': the three ops-token routes and sign-out; admission refuses
+        //   every other request (`ROUTE_REACH`)
+        // Written once, at registration, from `registerPublicKeyService`'s
+        // `narrowing`, with the expiry stated beside it. A narrowed key is never
+        // bound, never replaced and never rotated, so nothing moves that expiry
+        reach: enumText('reach', KEY_REACH),
 
         // Whether this key is a web session's — what session binding applies to
         // true: the registering request came through the trusted Next.js proxy

@@ -9,7 +9,7 @@
 import { defineEvent } from '@spfn/core/event';
 import { Type, type Static } from '@sinclair/typebox';
 
-import { SOCIAL_PROVIDERS } from '../types';
+import { KEY_REACH, SOCIAL_PROVIDERS } from '../types';
 
 /**
  * Auth provider type
@@ -158,6 +158,11 @@ export type DeviceRegistrationChannel = Static<typeof DeviceRegistrationChannelS
  * new device can also be the moment an app offers a second factor to the
  * accounts that have none.
  *
+ * `reach` is present when the key is held to one (`KEY_REACH`) — a terminal
+ * let in for ops tokens only — and absent for a key that is the whole account.
+ * Such a key is announced like any other: an approval somebody was tricked
+ * into is exactly the device its owner needs to hear about.
+ *
  * @example
  * ```typescript
  * authDeviceRegisteredEvent.subscribe(async ({ userId, deviceName, ip, channel }) => {
@@ -179,6 +184,7 @@ export const authDeviceRegisteredEvent = defineEvent(
         createdAtMillis: Type.Number(),
         channel: DeviceRegistrationChannelSchema,
         mfaEnrolled: Type.Boolean(),
+        reach: Type.Optional(Type.Union(KEY_REACH.map(reach => Type.Literal(reach)))),
     }),
 );
 

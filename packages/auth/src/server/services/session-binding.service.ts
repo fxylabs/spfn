@@ -56,6 +56,7 @@ import { isRenewable, renewalGraceCutoff, type PrincipalCredential } from './adm
 import { sweepEachAccount, SWEEP_BATCH } from './account-sweep.service';
 import { keyLiveness, type KeyWithAccountEpoch } from '../lib/key-liveness';
 import { getKeyExpiryDate } from './key.service';
+import { decideKeyBinding } from '../lib/key-policy';
 import { authLogger } from '../logger';
 import type { PasskeyProofProcedure } from '../entities/webauthn-challenges';
 
@@ -225,14 +226,15 @@ async function bindAccount(params: SessionBindingParams, proof: RenewalProof | n
  * request is signed with, and every web key (`viaWebProxy`) that still opens a
  * session — live (`keyLiveness`), or waiting on a second factor, which would
  * otherwise be activated unbound. An expired or revoked key is not given a new
- * life by being bound.
+ * life by being bound, and a narrowed key is never bound (`decideKeyBinding`).
  */
 async function webSessionKeyIds(params: SessionBindingParams): Promise<string[]>
 {
     const keys = await keysRepository.findUnrevokedWithAccountEpochByUserId(params.userId);
 
     return keys
-        .filter(key => (key.viaWebProxy || key.keyId === params.keyId) && opensASession(key))
+        .filter(key => decideKeyBinding('passkey', key.viaWebProxy || key.keyId === params.keyId, key.reach) === 'passkey')
+        .filter(opensASession)
         .map(key => key.keyId);
 }
 

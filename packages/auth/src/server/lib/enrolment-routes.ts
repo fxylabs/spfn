@@ -16,6 +16,11 @@
  * function object this module mints and never hands to anything but the
  * router, so the only way onto a route is the classification.
  *
+ * A key held to a reach (`user_public_keys.reach`) is the same question asked
+ * the other way round: it is let in only on a route whose marker names its
+ * reach (`restrictedRouteReaches`), so a route without one — every application
+ * route among them — admits no narrowed key.
+ *
  * Only a registered gate may be exempted by a marker (`registerEnrolmentGate`)
  * — `authenticate`, the middleware every marked route runs, registers its
  * own handler. Another producer of a person principal asking from its own
@@ -43,6 +48,7 @@ import { COMPOSED_HANDLER } from 'hono/utils/constants';
 
 import { assertRequestFromThisHono } from './hono-copy';
 import { isMethodListed, type SecondFactorMethod } from './second-factor-policy';
+import type { KeyReach } from '../types';
 
 /**
  * What an account can be held to before its session may do anything else, in
@@ -67,12 +73,14 @@ export type EnrolmentRequirement = SecondFactorMethod | null;
  * Which requirements a marked route admits a session held to: under
  * `secondFactorEnrolment` while its method is listed (`null`: always), and
  * under `passwordChange` when true. A requirement absent is one the route
- * does not admit.
+ * does not admit. `reach` lists the reaches whose keys it admits
+ * (`ROUTE_REACH`); a key of a reach not listed is refused there.
  */
 export interface RestrictedRouteAdmission
 {
     secondFactorEnrolment?: EnrolmentRequirement;
     passwordChange?: true;
+    reach?: readonly KeyReach[];
 }
 
 /** Every marker minted, and what it admits. Module state: nothing outside reads or adds to it. */
@@ -144,30 +152,57 @@ function readMatchedRoutes(c: Context): RouterRoute[]
  * Whether the route this request matched admits a session held to
  * `requirement` — for `secondFactorEnrolment`, under the policy in force.
  *
- * Read from the middleware that calls it, which must be a registered gate: the
- * search starts after the entry Hono is running (`c.req.routeIndex`) and stays
- * inside that route's chain — the entries of the same method and path, up to
- * the next appearance of the gate, which is where the next route at this path
- * begins, since every route behind the gate runs it before its own middlewares.
+ * Read from the middleware that calls it, which must be a registered gate
+ * (`matchedMarker`).
  *
  * @throws Error when the request was built by another copy of Hono, whose match
  *   result cannot be read
  */
 export function restrictedRouteAdmits(c: Context, requirement: SessionRequirement): boolean
 {
+    const admits = matchedMarker(c);
+
+    return admits !== null && admitsUnder(admits, requirement);
+}
+
+/**
+ * Whether the route this request matched admits a key held to `reach`: its
+ * marker lists the reach. A route with no marker, or a caller that is not a
+ * registered gate, admits none (`matchedMarker`).
+ *
+ * @throws Error when the request was built by another copy of Hono, whose match
+ *   result cannot be read
+ */
+export function restrictedRouteReaches(c: Context, reach: KeyReach): boolean
+{
+    return matchedMarker(c)?.reach?.includes(reach) === true;
+}
+
+/**
+ * What the marker on the route this request matched admits, or null when
+ * there is none to read.
+ *
+ * Read from the middleware that calls it, which must be a registered gate: the
+ * search starts after the entry Hono is running (`c.req.routeIndex`) and stays
+ * inside that route's chain — the entries of the same method and path, up to
+ * the next appearance of the gate, which is where the next route at this path
+ * begins, since every route behind the gate runs it before its own middlewares.
+ */
+function matchedMarker(c: Context): RestrictedRouteAdmission | null
+{
     const routes = readMatchedRoutes(c);
     const self = routes[c.req.routeIndex];
 
     if (self === undefined)
     {
-        return false;
+        return null;
     }
 
     const caller = registeredHandler(self.handler);
 
     if (!GATES.has(caller))
     {
-        return false;
+        return null;
     }
 
     for (const entry of routes.slice(c.req.routeIndex + 1))
@@ -176,16 +211,16 @@ export function restrictedRouteAdmits(c: Context, requirement: SessionRequiremen
 
         if (entry.method !== self.method || entry.path !== self.path || handler === caller)
         {
-            return false;
+            return null;
         }
 
         if (MARKERS.has(handler))
         {
-            return admitsUnder(MARKERS.get(handler)!, requirement);
+            return MARKERS.get(handler)!;
         }
     }
 
-    return false;
+    return null;
 }
 
 /** Whether a marker's admission covers `requirement` now. */

@@ -37,7 +37,7 @@ import { awaitsWebBinding, bindWebKeyService } from '../services/key.service';
  */
 export function recordKeyUse(
     c: Context,
-    key: Pick<UserPublicKey, 'id' | 'userId' | 'keyId' | 'binding' | 'viaWebProxy'>,
+    key: Pick<UserPublicKey, 'id' | 'userId' | 'keyId' | 'binding' | 'viaWebProxy' | 'reach'>,
     account: Pick<User, 'sessionBinding'>,
 ): void
 {
