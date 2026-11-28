@@ -42,11 +42,19 @@
  * transactions open, as device-code login's does, and every transition wakes
  * both after commit.
  *
+ * A link may be narrowed by its issuer (`DeviceLinkNarrowing`): the key it lets
+ * in is held to a reach (`KEY_REACH`) for at most the step-up window, carries
+ * a copy of the issuing key's step-up record, and is confirmed by typing the
+ * match number rather than tapping one of three (`match: 'typed'`) — the
+ * terminal's door. Only a direct client redeems one: `redeem/web` answers its
+ * code as unknown.
+ *
  * Nothing here logs a user code, a device code, a match number or a key.
  */
 
 import { randomUUID } from 'node:crypto';
 
+import { ValidationError } from '@spfn/core/errors';
 import {
     DeviceLinkAlreadyHandledError,
     DeviceLinkDeniedError,
@@ -59,9 +67,10 @@ import {
 import { getShutdownManager } from '@spfn/core/server';
 import { runInTransaction } from '@spfn/core/db';
 
-import { deviceLinksRepository, usersRepository, type DeviceLinkRecord } from '../repositories';
+import { deviceLinksRepository, mfaVerificationsRepository, usersRepository, type DeviceLinkRecord } from '../repositories';
 import type { DeviceLink, DeviceLinkDeniedReason, DeviceLinkStatus } from '../entities/device-links';
-import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType, type KeyReach } from '../types';
+import { getMfaConfig } from '../lib/config';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
 import { getDeviceLinkConfig } from '../lib/device-link-config';
 import { generateChoices, generateMatchNumber } from '../lib/device-link-match';
@@ -75,7 +84,7 @@ import {
     hashDeviceCode,
     normalizeUserCode,
 } from '../lib/device-code';
-import { DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH } from './key.service';
+import { DEFAULT_KEY_ALGORITHM, KEY_FINGERPRINT_PREFIX_LENGTH, type KeyNarrowing } from './key.service';
 import { completeDeviceLogin, type ParkedDeviceKey, type PollDeviceAuthResult } from './device-auth.service';
 import type { PrincipalCredential } from './admission.service';
 import { assertPasskeyProven } from '../lib/passkey-proof';
@@ -102,7 +111,32 @@ export interface DeviceLinkIssueProof
     passkeyResponse?: unknown;
 }
 
-export interface IssueDeviceLinkResult
+/**
+ * What an issuer states about the key its link lets in: held to `reach`, and
+ * living `keyLifetimeMillis` from its collection rather than a full key's 90
+ * days. Stated by the signed-in issuer alone — the redeeming device states
+ * nothing, and device-code login has no way to ask for it.
+ */
+export interface DeviceLinkNarrowing
+{
+    reach: KeyReach;
+    /**
+     * Milliseconds the key lives from its collection: a whole number above 0.
+     * Defaults to the step-up window (`SPFN_AUTH_MFA_STEP_UP_MINUTES`) and is
+     * capped at it, so the key never outlives the window it carries.
+     */
+    keyLifetimeMillis?: number;
+}
+
+/** The narrowing a link answers with: absent on an ordinary link. */
+export interface DeviceLinkNarrowingEcho
+{
+    reach?: KeyReach;
+    /** The lifetime as stored — after the cap. */
+    keyLifetimeMillis?: number;
+}
+
+export interface IssueDeviceLinkResult extends DeviceLinkNarrowingEcho
 {
     /** The issuer's handle on the link, for status, confirm, deny and cancel. */
     linkId: string;
@@ -126,12 +160,19 @@ export interface RedeemDeviceLinkParams
     platform?: KeyPlatformType;
 }
 
-export interface RedeemDeviceLinkResult
+/**
+ * Which route a redeem came through: a direct client's (`device/link/redeem`),
+ * or a browser's behind the Next.js proxy (`device/link/redeem/web`). Decided by
+ * the route, never by the `platform` the caller declares — that is display only.
+ */
+export type DeviceLinkRedeemDoor = 'direct' | 'browser';
+
+export interface RedeemDeviceLinkResult extends DeviceLinkNarrowingEcho
 {
     /** Returned once. The new device polls with it; the server stores only its hash. */
     deviceCode: string;
 
-    /** The number the new device shows, 10–99, for the issuer to pick out of three. */
+    /** The number the new device shows, 10–99, for the issuer to pick out of three — or, on a narrowed link, to type. */
     matchNumber: number;
 
     expiresAtMillis: number;
@@ -159,16 +200,25 @@ export interface ConfirmDeviceLinkParams extends DeviceLinkParams
 }
 
 /**
+ * How the issuer gives the match number back: by tapping one of three
+ * (`choices`), or, on a narrowed link, by typing it (`typed`) — one in 90 for
+ * someone who does not look at the device, where three to tap is one in three.
+ */
+export type DeviceLinkMatch = 'choices' | 'typed';
+
+/**
  * The issuer's view of its link, which every issuer operation answers with.
  *
  * The device fields appear once a device has redeemed the code; `choices` only
- * while the link waits on the issuer's pick (`redeemed`), since that is the only
- * moment a number means anything. `expired` is only ever cancel's answer: a
- * link that is dead when it is asked about answers `DeviceLinkExpiredError`.
+ * while an ordinary link waits on the issuer's pick (`redeemed`), since that is
+ * the only moment a number means anything — and never on a narrowed one, which
+ * draws none. `expired` is only ever cancel's answer: a link that is dead when
+ * it is asked about answers `DeviceLinkExpiredError`.
  */
-export interface DeviceLinkStatusResult
+export interface DeviceLinkStatusResult extends DeviceLinkNarrowingEcho
 {
     status: DeviceLinkStatus;
+    match: DeviceLinkMatch;
     expiresAtMillis: number;
     deviceName?: string;
     platform?: KeyPlatformType;
@@ -307,10 +357,20 @@ function describeLink(record: DeviceLink): DeviceLinkStatusResult
 {
     return {
         status: record.status,
+        match: record.reach ? 'typed' : 'choices',
         expiresAtMillis: record.expiresAt.getTime(),
+        ...narrowingEcho(record),
         ...describeDevice(record),
         ...(record.status === 'redeemed' && record.choices ? { choices: record.choices } : {}),
     };
+}
+
+/** A narrowed link's reach and key lifetime, for every answer that names the link; nothing for an ordinary one. */
+function narrowingEcho(record: Pick<DeviceLink, 'reach' | 'keyLifetimeMs'>): DeviceLinkNarrowingEcho
+{
+    return record.reach && record.keyLifetimeMs !== null
+        ? { reach: record.reach, keyLifetimeMillis: record.keyLifetimeMs }
+        : {};
 }
 
 function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
@@ -346,14 +406,23 @@ function describeDevice(record: DeviceLink): Partial<DeviceLinkStatusResult>
  * the passkey proof is spent and the issuer's earlier link expired, so a
  * refusal writes nothing.
  *
+ * A `narrowing` holds the key the link lets in to a reach, for a lifetime
+ * capped at the step-up window: its collection carries the issuing key's
+ * step-up record over to it (`judgeLinkPoll`), and a window is all that record
+ * is worth. The answer echoes the narrowing as stored, so a client can tell a
+ * server that narrows from one that ignored the field.
+ *
+ * @throws ValidationError when `narrowing.keyLifetimeMillis` is not a whole number above 0
  * @throws StepUpRequiredError when the issuer is enrolled and this device has not stepped up recently
  * @throws PasskeyProofRequiredError when the account is bound and no proof holds
  */
 export async function issueDeviceLinkService(
     issuer: DeviceLinkIssuer,
     proof: DeviceLinkIssueProof,
+    narrowing?: DeviceLinkNarrowing,
 ): Promise<IssueDeviceLinkResult>
 {
+    const keyNarrowing = cappedNarrowing(narrowing);
     const passkeyProof = await checkPasskeyProof({
         userId: issuer.userId,
         credential: proof.credential,
@@ -372,12 +441,36 @@ export async function issueDeviceLinkService(
         await assertStepUp({ userId: issuer.userId, credential: proof.credential });
         await assertPasskeyProven(account, passkeyProof, 'linkIssue');
 
-        return await insertLink(issuer);
+        return await insertLink(issuer, keyNarrowing);
     }, { context: 'auth:device-link-issue' });
 }
 
+/**
+ * The narrowing as the link stores it: the lifetime defaulted to the step-up
+ * window and capped at it.
+ *
+ * @throws ValidationError when a stated lifetime is not a whole number above 0
+ */
+function cappedNarrowing(narrowing: DeviceLinkNarrowing | undefined): KeyNarrowing | null
+{
+    if (!narrowing)
+    {
+        return null;
+    }
+
+    const window = getMfaConfig().stepUpWindowMs;
+    const stated = narrowing.keyLifetimeMillis ?? window;
+
+    if (!Number.isSafeInteger(stated) || stated <= 0)
+    {
+        throw new ValidationError({ message: 'keyLifetimeMillis must be a whole number of milliseconds above 0' });
+    }
+
+    return { reach: narrowing.reach, lifetimeMs: Math.min(stated, window) };
+}
+
 /** Expire the issuing key's live link and insert a new one, under the account lock. */
-async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResult>
+async function insertLink(issuer: DeviceLinkIssuer, narrowing: KeyNarrowing | null): Promise<IssueDeviceLinkResult>
 {
     await deviceLinksRepository.expireLiveByIssuerKey(issuer.userId, issuer.keyId);
 
@@ -391,6 +484,8 @@ async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResu
             issuerUserId: issuer.userId,
             issuerKeyId: issuer.keyId,
             expiresAt,
+            reach: narrowing?.reach ?? null,
+            keyLifetimeMs: narrowing?.lifetimeMs ?? null,
         });
 
         // null means the user code was already taken — redraw and retry.
@@ -400,6 +495,7 @@ async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResu
                 linkId: record.linkId,
                 userCode: formatUserCode(record.userCode),
                 expiresAtMillis: expiresAt.getTime(),
+                ...narrowingEcho(record),
             };
         }
     }
@@ -418,17 +514,27 @@ async function insertLink(issuer: DeviceLinkIssuer): Promise<IssueDeviceLinkResu
  * holds, so every refusal that could tell a guesser the code was real — someone
  * redeemed it first, it was already used — is the same NotFound as a code never
  * issued. Only a code that died of age answers Expired, as the state table asks.
+ *
+ * A narrowed link is a direct client's: through `redeem/web` (`door:
+ * 'browser'`) its code is NotFound too, so no browser session ever holds a key
+ * held to a reach. Its answer echoes the narrowing, and its issuer is drawn no
+ * choices — the number is typed.
+ *
+ * @param door the route the redeem came through — never the caller's `platform`
  */
-export async function redeemDeviceLinkService(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLinkResult>
+export async function redeemDeviceLinkService(
+    params: RedeemDeviceLinkParams,
+    door: DeviceLinkRedeemDoor = 'direct',
+): Promise<RedeemDeviceLinkResult>
 {
     return await runInTransaction(
-        () => parkKey(params),
+        () => parkKey(params, door),
         { context: 'auth:device-link-redeem' },
     );
 }
 
 /** The redeem, run in `redeemDeviceLinkService`'s transaction. */
-async function parkKey(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLinkResult>
+async function parkKey(params: RedeemDeviceLinkParams, door: DeviceLinkRedeemDoor): Promise<RedeemDeviceLinkResult>
 {
     // Checked now, as `startDeviceAuthService` does: the fingerprint prefix is
     // what the issuer recognises the device by, and a key that cannot sign for
@@ -450,7 +556,7 @@ async function parkKey(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLink
     await usersRepository.lockAccount(found.issuerUserId);
     const record = assertReachable(await deviceLinksRepository.findByUserCode(userCode));
 
-    if (record.status !== 'issued' || record.issuerUserId !== found.issuerUserId)
+    if (record.status !== 'issued' || record.issuerUserId !== found.issuerUserId || (record.reach && door === 'browser'))
     {
         throw new DeviceLinkNotFoundError();
     }
@@ -469,7 +575,7 @@ async function parkKey(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLink
         deviceName: params.deviceName,
         platform: params.platform,
         matchNumber,
-        choices: generateChoices(matchNumber),
+        choices: record.reach ? null : generateChoices(matchNumber),
     });
 
     if (!redeemed)
@@ -486,6 +592,7 @@ async function parkKey(params: RedeemDeviceLinkParams): Promise<RedeemDeviceLink
         matchNumber,
         expiresAtMillis: redeemed.expiresAt.getTime(),
         intervalMillis: getDeviceAuthConfig().intervalMs,
+        ...narrowingEcho(redeemed),
     };
 }
 
@@ -496,7 +603,8 @@ export async function getDeviceLinkStatusService(params: DeviceLinkParams): Prom
 }
 
 /**
- * The issuer picked a number.
+ * The issuer picked a number — tapped one of three, or typed it on a narrowed
+ * link; `choice` is that number either way.
  *
  * The right one approves the link; any other denies it on the spot, and the
  * refusal is committed before the error answers — there is no second pick. The
@@ -643,6 +751,9 @@ async function cancelIssuedLink(params: DeviceLinkParams): Promise<DeviceLinkSta
  * one-shot: the link is spent by a conditional update naming `approved` — and the
  * issuing key, so a link whose issuer signed out after confirming registers
  * nothing — and of two polls arriving together exactly one registers the key.
+ *
+ * A narrowed link's key is registered held to its reach for its lifetime, and
+ * given a copy of the issuing key's step-up record in the same transaction.
  */
 export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promise<PollDeviceAuthResult>
 {
@@ -688,18 +799,46 @@ async function judgeLinkPoll(params: PollDeviceLinkParams): Promise<PollDeviceAu
         );
     }
 
-    return {
-        status: 'approved',
-        ...await completeDeviceLogin({
-            userId: consumed.issuerUserId,
-            approvingKeyId: consumed.issuerKeyId,
-            key: parkedKey(consumed),
-            channel: 'device-link',
-            provenance: params,
-            missingAccount: () => new DeviceLinkNotFoundError(),
-            expiredRecord: () => new DeviceLinkExpiredError(),
-        }),
-    };
+    const key = parkedKey(consumed);
+    const narrowing = keyNarrowingOf(consumed);
+    const login = await completeDeviceLogin({
+        userId: consumed.issuerUserId,
+        approvingKeyId: consumed.issuerKeyId,
+        key,
+        channel: 'device-link',
+        provenance: params,
+        narrowing,
+        missingAccount: () => new DeviceLinkNotFoundError(),
+        expiredRecord: () => new DeviceLinkExpiredError(),
+    });
+
+    if (narrowing)
+    {
+        await carryIssuerStepUp(consumed, key.keyId);
+    }
+
+    return { status: 'approved', ...login };
+}
+
+/** The narrowing a consumed link registers its key under; undefined for an ordinary link. */
+function keyNarrowingOf(link: DeviceLink): KeyNarrowing | undefined
+{
+    return link.reach && link.keyLifetimeMs !== null
+        ? { reach: link.reach, lifetimeMs: link.keyLifetimeMs }
+        : undefined;
+}
+
+/**
+ * Give a narrowed key the issuing device key's step-up record, the whole proof
+ * as it stands at collection — so the key's window is the issuer's, judged
+ * the same way and closing at the same moment. After the key is written (the
+ * record names it) and in the poll's transaction, under the account lock it
+ * holds. An ordinary link's key carries none: a full key never inherits a
+ * window.
+ */
+async function carryIssuerStepUp(link: DeviceLink, keyId: string): Promise<void>
+{
+    await mfaVerificationsRepository.copyToKeyId(link.issuerUserId, link.issuerKeyId, keyId);
 }
 
 /** What the new device is told about a denied link, by the reason the denial recorded. */

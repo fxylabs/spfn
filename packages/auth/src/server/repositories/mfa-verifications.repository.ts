@@ -11,7 +11,7 @@
  * that grows with every step-up for no reader.
  */
 
-import { and, eq, isNull, lt, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, lt, sql, type SQL } from 'drizzle-orm';
 
 import { mfaVerifications } from '../entities/mfa-verifications';
 import type { MfaVerification, MfaVerificationProof } from '../entities/mfa-verifications';
@@ -43,6 +43,7 @@ export class MfaVerificationsRepository extends AccountStateRepository
     static override readonly accountWrites: AccountWrites<MfaVerificationsRepository> = {
         record: { account: userId => userId },
         moveToKeyId: { account: userId => userId },
+        copyToKeyId: { account: userId => userId },
         deleteByUserId: { account: userId => userId },
         deleteVerifiedBeforeOf: { account: userId => userId },
     };
@@ -99,6 +100,36 @@ export class MfaVerificationsRepository extends AccountStateRepository
                 eq(mfaVerifications.userId, userId),
                 isNull(mfaVerifications.profile),
             ));
+    }
+
+    /**
+     * Give a new device key a copy of another device key's verification, the
+     * whole proof unchanged — its method, its passkey and its `verified_at` —
+     * so the new key's window is judged exactly as the other's is, and closes
+     * when the other's would have. One `INSERT … SELECT`: `record` stamps the
+     * current time, which would restart the window.
+     *
+     * Scoped by owner and to device keys, as `moveToKeyId` is. Nothing to copy
+     * is not an error: a device that never stepped up gives the new key none.
+     */
+    async copyToKeyId(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
+    {
+        await this.db
+            .insert(mfaVerifications)
+            .select(this.db
+                .select({
+                    userId: mfaVerifications.userId,
+                    keyId: sql<string>`${toKeyId}`.as('key_id'),
+                    method: mfaVerifications.method,
+                    passkeyId: mfaVerifications.passkeyId,
+                    verifiedAt: mfaVerifications.verifiedAt,
+                })
+                .from(mfaVerifications)
+                .where(and(
+                    eq(mfaVerifications.keyId, fromKeyId),
+                    eq(mfaVerifications.userId, userId),
+                    isNull(mfaVerifications.profile),
+                )));
     }
 
     /** Accounts holding a verification from before `cutoff`, at most `limit`, for the sweep. */

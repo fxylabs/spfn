@@ -389,10 +389,10 @@ routes use `.skip(['auth'])`; the rest require `Authorization: Bearer <client-si
 | `getDeviceAuthInfo` | POST `/_auth/device/info` | yes | what device is asking, so the approval screen can show it |
 | `approveDeviceAuth` | POST `/_auth/device/approve` | yes | let the waiting device in |
 | `denyDeviceAuth` | POST `/_auth/device/deny` | yes | refuse it |
-| `issueDeviceLink` | POST `/_auth/device/link/issue` | yes | show a code a new device can come in by — see [Device link](#device-link) |
+| `issueDeviceLink` | POST `/_auth/device/link/issue` | yes | show a code a new device can come in by — or, with `reach`, a terminal held to ops tokens; see [Device link](#device-link) |
 | `redeemDeviceLink` | POST `/_auth/device/link/redeem` | public | the new device parks its key on that code and gets the match number to show |
 | `redeemDeviceLinkWeb` | POST `/_auth/device/link/redeem/web` | public | the same from a browser behind the proxy, which supplies the key |
-| `getDeviceLinkStatus` | POST `/_auth/device/link/status` | issuing key | where the link stands; the device and three numbers once redeemed |
+| `getDeviceLinkStatus` | POST `/_auth/device/link/status` | issuing key | where the link stands; the device and three numbers once redeemed (`match: 'typed'` and none on a narrowed link) |
 | `confirmDeviceLink` | POST `/_auth/device/link/confirm` | issuing key | pick the number the new device shows |
 | `denyDeviceLink` | POST `/_auth/device/link/deny` | issuing key | refuse the new device |
 | `cancelDeviceLink` | POST `/_auth/device/link/cancel` | issuing key | close the link before anyone is let in |
@@ -1044,9 +1044,11 @@ interface SignInAttempt
     channel: SignInChannel;
     stage: SignInStage;
     identifier?: { email?: string; phone?: string };   // password and deletion-cancel
-    ip?: string;                    // display material (deviceProvenance), never decide by it
+    ip?: string;                    // deviceProvenance: display material, unless your deployment makes it
+                                    // an address the caller cannot choose — see the terminal recipe below
     userAgent?: string;
     webProxy: boolean;              // proxy-guard recognised the Next.js proxy: the one attested fact
+    reach?: KeyReach;               // 'opsTokens' on a device-link attempt whose issuer narrowed the link
 }
 
 type SignInOutcome = SignInAttempt & (
@@ -1267,6 +1269,67 @@ by its own.
 `loginService` and `cancelAccountDeletionService` own their transactions: with a guard configured,
 calling them inside one of yours throws, as `checkSecondFactorProof` does — a recorded failure would
 roll back with the refusal.
+
+#### Recipe — a terminal only from inside the app's network
+
+A [narrowed device link](#a-link-for-a-terminal) lets a terminal in with a key held to ops tokens,
+and its attempt says so: `channel: 'device-link'` and `reach: 'opsTokens'`. An app whose CLI runs
+inside its own network can refuse such a sign-in from anywhere else — **only where the address is
+one the caller cannot choose**. `attempt.ip` is that address in exactly these deployments:
+
+- the backend is reachable only through the proxies `SERVER_TRUSTED_PROXY_HOPS=n` (or
+  `trustedProxyHops(n)`) declares, so the `X-Forwarded-For` entry n hops from the right is the
+  one the nearest of them wrote ([per-IP limits count the address a caller cannot
+  choose](#migration--per-ip-limits-count-the-address-a-caller-cannot-choose));
+- or nothing is declared and the backend is reachable only from inside: the address is then the
+  TCP peer, `127.0.0.1` for a CLI inside the container.
+
+A chain shorter than n falls back to the TCP peer too. Through the signed Next.js proxy the
+address is the one the proxy attests — a browser's, never a terminal's: a narrowed link is
+redeemed only by a direct client. Anywhere else the address is whatever the caller sent, and this
+recipe refuses nobody it should; it is no defence on its own.
+
+```typescript
+// server.config.ts — a terminal comes in only from inside the network the app runs in.
+// Holds only where the backend is reachable solely through the proxies SERVER_TRUSTED_PROXY_HOPS
+// declares (or, with none declared, only from inside).
+import { BlockList, isIPv4 } from 'node:net';
+import { createAuthLifecycle } from '@spfn/auth/server';
+
+const network = new BlockList();
+network.addSubnet('10.0.0.0', 8, 'ipv4');   // the VPC
+network.addAddress('127.0.0.1', 'ipv4');     // the container itself
+network.addAddress('::1', 'ipv6');
+
+function inside(ip: string | undefined): boolean
+{
+    if (!ip)
+    {
+        return false;
+    }
+
+    // BlockList does not match an IPv4-mapped IPv6 address against an IPv4 subnet
+    const plain = ip.startsWith('::ffff:') && isIPv4(ip.slice(7)) ? ip.slice(7) : ip;
+
+    return network.check(plain, isIPv4(plain) ? 'ipv4' : 'ipv6');
+}
+
+export const authLifecycle = createAuthLifecycle({
+    signIn: {
+        admit: (attempt) =>
+            attempt.reach === 'opsTokens' && !inside(attempt.ip)
+                ? { refuse: { code: 'TERMINAL_OUTSIDE_NETWORK' } }
+                : undefined,
+    },
+});
+```
+
+A refused terminal's poll answers **403 `SignInRefusedError`** with `details.code:
+'TERMINAL_OUTSIDE_NETWORK'`, and no key is registered; the link stays `approved` until its TTL
+and registers nothing. `settled` is told `failed`, `reason: 'refused'`, with `reach` and `ip` —
+the place to alert. An app on the "password plus passkey" recipe that turns `deviceLink` on only
+for its CLI can also refuse `attempt.channel === 'device-link' && attempt.reach === undefined`, so
+no phone comes in by link.
 
 #### Worked example — lock after five attempts, lifted by an administrator
 
@@ -3698,7 +3761,8 @@ before `@spfn/auth` 0.3.0-beta.39 has no reason recorded and answers as a refusa
   the new device picks the right number one time in three.** That is the whole of the odds, because
   one wrong pick denies the link — there is no second try, and the new device is told the numbers did
   not match. Typing the number would be stronger; three to tap is the trade taken for a flow people
-  finish.
+  finish. A [link for a terminal](#a-link-for-a-terminal) takes the other side of that trade: its
+  number is typed.
 - **An issuer with a second factor steps up, at issue and at confirm.** The new device is never
   challenged itself (`device-link` is not a [new-device](#step-up-on-a-new-device) channel), so the
   issuing device proves a listed factor instead: both `issue` and `confirm` ask the
@@ -3753,8 +3817,74 @@ createAuthLifecycle({
 
 The mobile contract carries the new device's half — `auth.deviceLink.redeem` and
 `auth.deviceLink.poll`, since contract 0.13.2; since 0.13.3 the poll answers a wrong pick with
-`DeviceLinkWrongMatchError` rather than `DeviceLinkDeniedError`. The issuer's five routes run on the
+`DeviceLinkWrongMatchError` rather than `DeviceLinkDeniedError`; since 0.15.1 it declares a
+narrowed link's `reach`, `keyLifetimeMillis` and `keyReach`. The issuer's five routes run on the
 signed-in device and are not on that surface.
+
+#### A link for a terminal
+
+A terminal — the `spfn` CLI, an operator's shell — needs an administrator's session for one
+thing: ops tokens. A link may be narrowed to exactly that by its issuer, so the terminal never
+holds the whole account:
+
+```typescript
+// On the signed-in browser — the issuer states the narrowing; the terminal states nothing.
+const issued = await authApi.issueDeviceLink.call({ body: { reach: 'opsTokens' } });
+// → { linkId, userCode, expiresAtMillis, reach: 'opsTokens', keyLifetimeMillis: 600000 }
+// Show the code only when the answer echoes `reach`: a server that does not narrow ignores the
+// field and issues an ordinary link. "Never read this code to anyone — nobody, support included,
+// needs it."
+
+const link = await authApi.getDeviceLinkStatus.call({ body: { linkId: issued.linkId, waitMillis: 20_000 } });
+// → { status: 'redeemed', match: 'typed', reach: 'opsTokens', keyLifetimeMillis, deviceName?,
+//     fingerprintPrefix, redeemedAtMillis, expiresAtMillis }   — no `choices`
+
+// A two-digit input, no prefill, no autocomplete, one submit: "Type the number your terminal
+// shows. If it shows an error and no number, press Refuse."
+await authApi.confirmDeviceLink.call({ body: { linkId: issued.linkId, choice: typed } });
+```
+
+- **What the issuer states.** `reach: 'opsTokens'`, and optionally `keyLifetimeMillis`: how long
+  the terminal's key lives from its collection. It defaults to the
+  [step-up window](#the-step-up-window) (`SPFN_AUTH_MFA_STEP_UP_MINUTES`, 10 minutes) and is
+  capped at it; the answer echoes the value stored. A `keyLifetimeMillis` without `reach` is 400.
+  Both are written on the link at issue (`device_links.reach`, `device_links.key_lifetime_ms`) and
+  never changed. `redeem` takes no reach, and device-code login cannot ask for one: only a
+  signed-in issuer narrows.
+- **The number is typed** (`match: 'typed'`). No decoys are drawn; `confirm` keeps its body, and
+  `choice` is the typed number. One wrong number denies the link with `wrong_match`, as a wrong
+  pick does. Someone who types without looking is right one time in 90 (10–99), where tapping one
+  of three is one in three — and a terminal hands over ops-token authority, to an administrator
+  at a keyboard. Every ordinary link answers `match: 'choices'` with three, as before.
+- **Only a direct client redeems it.** `device/link/redeem` echoes `reach` and
+  `keyLifetimeMillis` beside the match number; `device/link/redeem/web` answers a narrowed link's
+  code 404 `DeviceLinkNotFoundError`, decided by the route and never by `platform`. No browser
+  session ever holds a terminal's key.
+- **What the poll registers.** A key held to `opsTokens` ([Registered
+  devices](#registered-devices-key-management): `reach`), expiring `keyLifetimeMillis` after
+  its collection, never bound — whatever request collected it — and never rotated or replaced.
+  The approved answer carries `keyReach: 'opsTokens'` and `keyExpiresAtMillis`. In the same
+  transaction the issuing key's step-up record is copied onto the new key, the whole proof
+  unchanged (method, the passkey that proved it, `verified_at`): the terminal's window is the
+  issuer's, judged the same way and closing at the same moment, so issuing a token from the
+  terminal asks nothing new inside it and `STEP_UP_REQUIRED` after it. An ordinary link's key
+  carries no record.
+- **What the key may do.** Issue, list and revoke ops tokens, and sign out (`logout`); every other
+  route answers 403 `KEY_OUT_OF_REACH`. On a [bound](#session-binding) account issuance still asks
+  the `opsTokenIssue` passkey proof, which a terminal cannot make: issue from the browser. The
+  events name the key: `auth.device.registered` carries `channel: 'device-link'` and `reach`, and
+  `auth.ops_token.issued` / `revoked` carry `via.reach`.
+- **A client checks what it was given.** Before showing a number it checks redeem's echo; at
+  collection, `keyReach: 'opsTokens'` and `keyExpiresAtMillis` no later than redeem's
+  `expiresAtMillis` plus `keyLifetimeMillis` — otherwise it signs out (`logout`) at once. A
+  server that does not narrow echoes nothing, and nothing is registered until a poll after a
+  confirm, so a client that stops at redeem leaves the link to die at its TTL.
+- **What the page says at the number:** "Type only the number your own terminal shows; never one
+  someone tells you." A terminal whose code was read off the screen and redeemed first shows an
+  error (404) and no number, while the page shows the stranger's device.
+- **Keep it inside.** [A terminal only from inside the app's
+  network](#recipe--a-terminal-only-from-inside-the-apps-network) refuses a terminal's sign-in from
+  anywhere else, where the deployment lets the address decide.
 
 ### Registered devices (key management)
 
@@ -5097,7 +5227,7 @@ with no PIN proves only that someone holds it.
 | Procedure | Route | Credential it would let in |
 |---|---|---|
 | `deviceApprove` | `POST /_auth/device/approve` | the waiting device's key — an ordinary 90-day key |
-| `linkIssue` | `POST /_auth/device/link/issue` (`confirm` is bound to the issuing key; both also ask an enrolled issuer's [step-up](#the-step-up-window)) | the redeeming device's key — an ordinary 90-day key |
+| `linkIssue` | `POST /_auth/device/link/issue` (`confirm` is bound to the issuing key; both also ask an enrolled issuer's [step-up](#the-step-up-window)) | the redeeming device's key — an ordinary 90-day key, or a [narrowed terminal key](#a-link-for-a-terminal) held to ops tokens for at most the step-up window |
 | `passkeyAdd` | `POST /_auth/passkeys/register/verify` | a passkey: renews bound sessions, signs in natively, turns binding off |
 | `passwordSet` | `PUT /_auth/password` on an account with no password | a first factor; changing an existing password proves that password and is not asked |
 | `socialLink` | `POST /_auth/oauth/:provider/link` | an identity that signs in natively; the callback refuses a bound account's link started without the proof |
@@ -6999,6 +7129,8 @@ need: until now a stolen administrator session could mint a token silently.
 `via` names the credential the request presented, never the account: `keyId` for a device key —
 the same `keyId` that device's `auth.device.registered` carried — and `profile` with the key id its
 verifier reported for an [application profile](#custom-auth-profiles-registerauthprofile).
+`via.reach` is `'opsTokens'` when that device key is a terminal's, let in by a
+[narrowed link](#a-link-for-a-terminal); absent for every full key.
 `userId` and `via` are absent on `auth.ops_token.revoked` when the application revoked the token
 itself (`revokeOpsTokenService(id)` with no revoker); `issuedBy` is absent on a token from before
 issuers were recorded. "Absent" is exact only in the JSON that carries an event to another instance

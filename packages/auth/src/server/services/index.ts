@@ -125,6 +125,10 @@ export type {
     ConfirmDeviceLinkParams,
     DeviceLinkStatusResult,
     PollDeviceLinkParams,
+    DeviceLinkNarrowing,
+    DeviceLinkNarrowingEcho,
+    DeviceLinkMatch,
+    DeviceLinkRedeemDoor,
 } from './device-link.service';
 
 // Passkey Service (WebAuthn)

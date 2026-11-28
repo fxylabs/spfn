@@ -48,7 +48,7 @@ import { getShutdownManager } from '@spfn/core/server';
 import { deviceAuthorizationsRepository, usersRepository } from '../repositories';
 import type { User } from '../entities/users';
 import type { DeviceAuthorization, DeviceAuthStatus } from '../entities/device-authorizations';
-import { type KeyAlgorithmType, type KeyPlatformType } from '../types';
+import { type KeyAlgorithmType, type KeyPlatformType, type KeyReach } from '../types';
 import { getDeviceAuthConfig } from '../lib/device-auth-config';
 import { holdDeviceAuthWait, waitForDeviceAuthAnswer, waitingOnDeviceAuth } from '../lib/device-auth-waiters';
 import type { DeviceProvenance } from '../lib/device-provenance';
@@ -65,6 +65,7 @@ import {
     registeredBinding,
     DEFAULT_KEY_ALGORITHM,
     KEY_FINGERPRINT_PREFIX_LENGTH,
+    type KeyNarrowing,
 } from './key.service';
 import { updateLastLoginService } from './user.service';
 import { admissionRefusalError, admitPrincipal, type AdmissionRefusal, type PrincipalCredential } from './admission.service';
@@ -203,6 +204,12 @@ export type DeviceAuthApprovedResult = { status: 'approved' } & LoginResult & {
     userId: string;
     publicId: string;
     passwordChangeRequired: boolean;
+    /**
+     * What the registered key is held to, when the link that let it in was
+     * narrowed (`KEY_REACH`); `keyExpiresAtMillis` comes with it. Absent for
+     * every full key — and so always on device-code login, which never narrows.
+     */
+    keyReach?: KeyReach;
 };
 
 /** The login an approval produced, before `status` is put in front of it. */
@@ -677,6 +684,12 @@ export interface CompleteDeviceLoginParams
     channel: 'device-code' | 'device-link';
     /** The polling device's request — the device that will be signing. */
     provenance: DeviceProvenance;
+    /**
+     * What the key is held to and for how long, as a narrowed link's issuer
+     * stated it (`KeyNarrowing`). Only the link's poll passes it; device-code
+     * login never does, so its keys are always the whole account.
+     */
+    narrowing?: KeyNarrowing;
     /** The flow's own refusal for an account that is gone by the time the key is collected. */
     missingAccount: () => Error;
     /** The flow's own refusal for a record whose approving key died before collection. */
@@ -742,7 +755,24 @@ async function reportCollectionRefusal(params: CompleteDeviceLoginParams, refusa
 
     const account = await usersRepository.findByIdOnPrimary(params.userId);
 
-    await reportAccountRefusal(account && signInAttempt(account, params.channel, params.provenance), refusal, params.key.keyId);
+    const attempt = account && signInAttempt(account, params.channel, params.provenance, { reach: params.narrowing?.reach });
+
+    await reportAccountRefusal(attempt, refusal, params.key.keyId);
+}
+
+/**
+ * A narrowed key's reach and expiry, for the client that holds it to check
+ * against what it was promised; nothing for a full key. A narrowed key is
+ * never bound, so the binding fields never carry the expiry for it.
+ */
+function narrowedKeyFields(
+    narrowing: KeyNarrowing | undefined,
+    registered: { expiresAt: Date | null },
+): Pick<DeviceAuthLogin, 'keyReach' | 'keyExpiresAtMillis'>
+{
+    return narrowing && registered.expiresAt
+        ? { keyReach: narrowing.reach, keyExpiresAtMillis: registered.expiresAt.getTime() }
+        : {};
 }
 
 /**
@@ -789,10 +819,12 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         ip: provenance.ip,
         userAgent: provenance.userAgent,
         webProxy: provenance.webProxy,
+        narrowing: params.narrowing,
     });
 
     await updateLastLoginService(user.id);
 
+    const binding = registeredBinding(registered);
     const result: DeviceAuthLogin = {
         // Neither door challenges the new device (#95), for a different reason
         // each. A link's issuer proved a listed factor on the issuing device at
@@ -805,7 +837,8 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         email: user.email || undefined,
         phone: user.phone || undefined,
         passwordChangeRequired: user.passwordChangeRequired,
-        ...loginBindingFields(registeredBinding(registered)),
+        ...loginBindingFields(binding),
+        ...narrowedKeyFields(params.narrowing, binding),
         ...await secondFactorEnrolmentFields(user.id),
     };
 

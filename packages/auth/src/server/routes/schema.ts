@@ -7,7 +7,7 @@
 
 import { Type, Static } from '@sinclair/typebox';
 import { EMAIL_PATTERN, PHONE_PATTERN } from '@spfn/auth';
-import { KEY_DEVICE_NAME_MAX_LENGTH, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
+import { KEY_DEVICE_NAME_MAX_LENGTH, KEY_PLATFORM, KEY_REACH, SESSION_BINDINGS } from '../types';
 
 // ============================================================================
 // Basic Schemas
@@ -176,6 +176,10 @@ export const DeviceAuthPollResponseSchema = Type.Union([
         // second-factor policy that requires one refuses boot while device-code
         // login or device link is on.
         secondFactorEnrolmentRequired: Type.Optional(Type.Boolean()),
+        // What the registered key is held to, on a device link its issuer
+        // narrowed (#524) — `keyExpiresAtMillis` comes with it then, a narrowed
+        // key being never bound. Absent for every full key.
+        keyReach: Type.Optional(Type.Union(KEY_REACH.map(reach => Type.Literal(reach)))),
     }),
 ], {
     description: 'Pending, or the login the approval produced',

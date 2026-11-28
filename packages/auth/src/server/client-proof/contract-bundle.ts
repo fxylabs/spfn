@@ -31,7 +31,7 @@ import {
     type RouteChannel,
     type RouteEnrolment,
 } from '../routes/channels';
-import { KEY_ALGORITHM, KEY_PLATFORM, SESSION_BINDINGS } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, KEY_REACH, SESSION_BINDINGS } from '../types';
 import { CLIENT_PROOF_CONTENT_TYPE, CLIENT_PROOF_HEADERS } from './admission';
 import {
     AUTH_SURFACE_OPERATIONS,
@@ -510,8 +510,21 @@ import { CLIENT_IDENTITY_HEADERS, CLIENT_KINDS, SERVER_CONTRACT_HEADERS } from '
  *
  * A minor, by 0.11.0's rule: an optional field the server sends is a new
  * declared field every generated decoder meets, so the range moves with it.
+ *
+ * 0.15.1 declares what a narrowed device link answers (#524). A signed-in
+ * issuer may hold the key its link lets in to a reach — a terminal's key, for
+ * ops tokens only, living at most the step-up window — and then
+ * `RedeemDeviceLinkResponse` carries `reach` and `keyLifetimeMillis`, and the
+ * approved `PollDeviceAuthResponse` carries `keyReach` with
+ * `keyExpiresAtMillis`; `KeyReach` is the enum of the reaches. All three are
+ * absent on every ordinary link and on device-code login, which never narrows,
+ * so a phone redeeming an ordinary link reads byte for byte what it read in
+ * 0.15.0. A patch rather than 0.11.0's minor, by the design this change
+ * implements (d175c, #524): the fields appear only on a link whose issuer
+ * narrowed it for a terminal, which is not the device this contract's
+ * consumer is. `deviceLink.narrowingRule` states the pairing.
  */
-export const CONTRACT_VERSION = '0.15.0';
+export const CONTRACT_VERSION = '0.15.1';
 export const CONTRACT_MAJOR = 0;
 export const CONTRACT_NAME = 'spfn-mobile-contract';
 
@@ -618,6 +631,7 @@ type ReferencedTypeName =
     | 'KeyAlgorithm'
     | 'KeyPlatform'
     | 'KeyBinding'
+    | 'KeyReach'
     | 'MfaChallenge'
     | 'MfaMethod'
     | 'DeviceAuthPollStatus'
@@ -1117,6 +1131,7 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             optional('sessionBinding', 'KeyBinding'),
             optional('keyExpiresAtMillis', 'integer'),
             optional('secondFactorEnrolmentRequired', 'boolean'),
+            optional('keyReach', 'KeyReach'),
         ],
     },
     /**
@@ -1177,6 +1192,8 @@ export const CONTRACT_TYPES: readonly TypeDeclaration[] = [
             required('matchNumber', 'integer'),
             required('expiresAtMillis', 'integer'),
             required('intervalMillis', 'integer'),
+            optional('reach', 'KeyReach'),
+            optional('keyLifetimeMillis', 'integer'),
         ],
     },
     {
@@ -1211,6 +1228,8 @@ export const CONTRACT_ENUMS: readonly EnumDeclaration[] = [
     { name: 'KeyAlgorithm', values: [...KEY_ALGORITHM] },
     { name: 'KeyPlatform', values: [...KEY_PLATFORM] },
     { name: 'KeyBinding', values: [...SESSION_BINDINGS] },
+    // What a key may be held to instead of the whole account (`KEY_REACH`).
+    { name: 'KeyReach', values: [...KEY_REACH] },
     { name: 'DeviceAuthPollStatus', values: ['pending', 'approved'] },
     // The two things an account screen can show as enrolled. `recovery` is a
     // verification method but never a method the account *has* — a recovery code
@@ -1883,6 +1902,12 @@ export function buildMobileContractBundle(): MobileContractBundle
                 'matchNumber is a whole number from 10 to 99. The new device shows it and nothing else about the link; '
                 + 'the signed-in device picks it from three distinct numbers. One wrong pick denies the link, so a '
                 + 'pick made without looking at this device succeeds one time in three and is never retried',
+            narrowingRule:
+                'reach and keyLifetimeMillis are present in RedeemDeviceLinkResponse exactly when the signed-in device '
+                + 'narrowed the link: the key the poll registers is then held to that reach, for keyLifetimeMillis from '
+                + 'its collection, and the approved poll answers keyReach and keyExpiresAtMillis for it. Such a link is '
+                + 'for a terminal: its issuer types the matchNumber instead of picking it from three. Both are absent on '
+                + 'every other link, whose key is the whole account',
             pollRule:
                 'poll answers PollDeviceAuthResponse, read exactly as deviceAuthorization.pollStatusRule and pendingRule '
                 + 'say: status "pending" with intervalMillis while the signed-in device has not picked, status '

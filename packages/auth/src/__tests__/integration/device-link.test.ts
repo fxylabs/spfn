@@ -447,7 +447,7 @@ describe.skipIf(!dbAvailable)('Device link', () =>
 
             const answer = await status(link.linkId, issuer);
             expect(answer.status).toBe(200);
-            expect(await answer.json()).toEqual({ status: 'issued', expiresAtMillis: link.expiresAtMillis });
+            expect(await answer.json()).toEqual({ status: 'issued', match: 'choices', expiresAtMillis: link.expiresAtMillis });
 
             const startedAt = Date.now();
             const waiting = status(link.linkId, issuer, 5000);

@@ -48,7 +48,8 @@ export interface DeviceLinkRedemption
     deviceName?: string;
     platform?: DeviceLink['platform'];
     matchNumber: number;
-    choices: number[];
+    /** The match and two decoys; null on a narrowed link, whose issuer types the number. */
+    choices: number[] | null;
 }
 
 /** The states a link is still in play in: an issuer can abandon it, and a revocation must reach it. */

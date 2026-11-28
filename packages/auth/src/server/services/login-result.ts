@@ -59,7 +59,11 @@ export interface LoginResult
     passwordChangeRequired?: boolean;
     /** `'passkey'` when the key registered by this sign-in is bound. Absent otherwise. */
     sessionBinding?: SessionBindingType;
-    /** Epoch milliseconds that key expires at. Only sent alongside `sessionBinding`. */
+    /**
+     * Epoch milliseconds that key expires at. Sent alongside `sessionBinding`
+     * for a bound key, and — on a device link's approved poll — alongside
+     * `keyReach` for a narrowed one (`DeviceAuthApprovedResult`); never alone.
+     */
     keyExpiresAtMillis?: number;
     /**
      * `true` exactly when the application requires a second factor

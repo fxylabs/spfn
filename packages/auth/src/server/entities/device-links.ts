@@ -4,8 +4,9 @@
  * Backs device link: the mirror image of device-code login. A device that is
  * already signed in (the issuer) asks for a short code and shows it; a new
  * device with no key on file reads it, parks its public key here, and shows a
- * two-digit match number; the issuer picks that number out of three, and the
- * new device's next poll registers the parked key under the issuer's account.
+ * two-digit match number; the issuer picks that number out of three — or, on
+ * a link narrowed to a reach, types it — and the new device's next poll
+ * registers the parked key under the issuer's account.
  *
  * A separate table from `device_authorizations` rather than a mode of it. The
  * two records are owned from opposite ends — a device authorization gains an
@@ -22,9 +23,10 @@
  * key on read, so a stale row authorizes nothing.
  */
 
-import { integer, text, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { bigint, check, integer, text, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { id, timestamps, enumText, utcTimestamp, foreignKey } from '@spfn/core/db';
-import { KEY_ALGORITHM, KEY_PLATFORM } from '../types';
+import { KEY_ALGORITHM, KEY_PLATFORM, KEY_REACH } from '../types';
 import { users } from './users';
 import { authSchema } from './schema';
 
@@ -99,7 +101,17 @@ export const deviceLinks = authSchema.table('device_links',
         // The three numbers the issuer picks from — the match and two distinct
         // decoys, shuffled once at redeem so every status answer shows the same
         // order
+        // null on a narrowed link: its issuer types the number, so none are drawn
         choices: integer('choices').array(),
+
+        // What the key this link lets in is held to (`KEY_REACH`), as its issuer
+        // stated it; null for an ordinary link, whose key is the whole account
+        // Written by the issuing insert, under the issuer's lock, and never changed
+        reach: enumText('reach', KEY_REACH),
+
+        // How long that key lives from its collection, in milliseconds; set
+        // exactly when `reach` is, already capped at the step-up window
+        keyLifetimeMs: bigint('key_lifetime_ms', { mode: 'number' }),
 
         status: enumText('status', DEVICE_LINK_STATUSES).notNull().default('issued'),
 
@@ -132,6 +144,9 @@ export const deviceLinks = authSchema.table('device_links',
 
         // A global revocation expires every live link of the account
         index('device_link_issuer_user_idx').on(table.issuerUserId),
+
+        // A lifetime belongs to a narrowing: never one without the other
+        check('device_links_narrowing_whole', sql`(${table.reach} IS NULL) = (${table.keyLifetimeMs} IS NULL)`),
     ],
 );
 

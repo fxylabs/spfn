@@ -653,6 +653,7 @@ function signInAttemptOf(params: RegisterPublicKeyParams, account: User): SignIn
             ip: params.ip,
             userAgent: params.userAgent,
             webProxy: params.webProxy === true,
+            ...(params.narrowing ? { reach: params.narrowing.reach } : {}),
         }
         : null;
 }
