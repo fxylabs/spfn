@@ -37,7 +37,7 @@ import type { AuthLoginProvider } from '../events';
  * `device-link` is exempt because its issuer proved a listed factor on the
  * issuing device at issue and again at confirm (`assertStepUp`, #528).
  * `device-code` is exempt with no such proof: its approval asks no step-up, a
- * known difference between the two doors, left for its own change (#524). And
+ * known difference between the two doors, left for its own change (#531). And
  * `register`, `signup-link`, `invitation` and `renewal` cannot apply (a
  * brand-new account has nothing enrolled, and a renewal replaces a key on a
  * device that is already signed in).

@@ -755,7 +755,7 @@ async function reportCollectionRefusal(params: CompleteDeviceLoginParams, refusa
  * the completion cannot be fixed in one and left in the other. The *decision*
  * before it is not shared, and differs today: a link's issuer steps up at
  * issue and at confirm (#528), a device-code approval asks no step-up. That
- * difference is known, and left for its own change (#524).
+ * difference is known, and left for its own change (#531).
  *
  * The person is admitted here and not only at approve time — `admitPrincipal`
  * on the approving key, as every door asks it, answering an account that is
@@ -798,7 +798,7 @@ export async function completeDeviceLogin(params: CompleteDeviceLoginParams): Pr
         // each. A link's issuer proved a listed factor on the issuing device at
         // issue and at confirm (#528). A device-code approval proved none: the
         // owner said yes on a device already signed in, and that door's step-up
-        // is a known gap, left for its own change (#524).
+        // is a known gap, left for its own change (#531).
         mfaRequired: false,
         userId: String(user.id),
         publicId: user.publicId,
