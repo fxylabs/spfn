@@ -957,14 +957,14 @@ describe.skipIf(!dbAvailable)('Device link', () =>
             const realApprove = deviceLinksRepository.approve.bind(deviceLinksRepository);
 
             const spy = vi.spyOn(deviceLinksRepository, 'approve')
-                .mockImplementationOnce(async (handle: LinkHandle) =>
+                .mockImplementationOnce(async (handle: LinkHandle, approverProfile: string | null) =>
                 {
                     await getTestDb()
                         .update(userPublicKeys)
                         .set({ isActive: false, revokedAt: new Date() })
                         .where(eq(userPublicKeys.keyId, issuer.keyId));
 
-                    return realApprove(handle);
+                    return realApprove(handle, approverProfile);
                 });
 
             try

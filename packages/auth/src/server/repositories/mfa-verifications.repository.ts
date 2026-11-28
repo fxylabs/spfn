@@ -103,16 +103,18 @@ export class MfaVerificationsRepository extends AccountStateRepository
     }
 
     /**
-     * Give a new device key a copy of another device key's verification, the
-     * whole proof unchanged — its method, its passkey and its `verified_at` —
-     * so the new key's window is judged exactly as the other's is, and closes
-     * when the other's would have. One `INSERT … SELECT`: `record` stamps the
-     * current time, which would restart the window.
+     * Give a new device key a copy of another credential's verification — a
+     * device key's, or an application profile's — the whole proof unchanged:
+     * its method, its passkey and its `verified_at`, so the new key's window
+     * is judged exactly as that credential's is, and closes when its would
+     * have. One `INSERT … SELECT`: `record` stamps the current time, which
+     * would restart the window.
      *
-     * Scoped by owner and to device keys, as `moveToKeyId` is. Nothing to copy
-     * is not an error: a device that never stepped up gives the new key none.
+     * Scoped by owner, so a caller naming somebody else's credential copies
+     * nothing. Nothing to copy is not an error: a credential that never
+     * stepped up gives the new key none.
      */
-    async copyToKeyId(userId: number, fromKeyId: string, toKeyId: string): Promise<void>
+    async copyToKeyId(userId: number, from: StartingCredential, toKeyId: string): Promise<void>
     {
         await this.db
             .insert(mfaVerifications)
@@ -125,11 +127,7 @@ export class MfaVerificationsRepository extends AccountStateRepository
                     verifiedAt: mfaVerifications.verifiedAt,
                 })
                 .from(mfaVerifications)
-                .where(and(
-                    eq(mfaVerifications.keyId, fromKeyId),
-                    eq(mfaVerifications.userId, userId),
-                    isNull(mfaVerifications.profile),
-                )));
+                .where(credentialIs(userId, from)));
     }
 
     /** Accounts holding a verification from before `cutoff`, at most `limit`, for the sweep. */

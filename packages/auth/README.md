@@ -3864,11 +3864,14 @@ await authApi.confirmDeviceLink.call({ body: { linkId: issued.linkId, choice: ty
   devices](#registered-devices-key-management): `reach`), expiring `keyLifetimeMillis` after
   its collection, never bound — whatever request collected it — and never rotated or replaced.
   The approved answer carries `keyReach: 'opsTokens'` and `keyExpiresAtMillis`. In the same
-  transaction the issuing key's step-up record is copied onto the new key, the whole proof
-  unchanged (method, the passkey that proved it, `verified_at`): the terminal's window is the
-  issuer's, judged the same way and closing at the same moment, so issuing a token from the
-  terminal asks nothing new inside it and `STEP_UP_REQUIRED` after it. An ordinary link's key
-  carries no record.
+  transaction the step-up record of the credential that confirmed the link is copied onto the
+  new key, the whole proof unchanged (method, the passkey that proved it, `verified_at`): the
+  issuing device key's own record, or, when an [auth
+  profile](#custom-auth-profiles-registerauthprofile) reporting that key's id confirmed, the
+  profile's — never the other one's. The terminal's window is the confirming credential's,
+  judged the same way and closing at the same moment, so issuing a token from the terminal asks
+  nothing new inside it and `STEP_UP_REQUIRED` after it. An ordinary link's key carries no
+  record.
 - **What the key may do.** Issue, list and revoke ops tokens, and sign out (`logout`); every other
   route answers 403 `KEY_OUT_OF_REACH`. On a [bound](#session-binding) account issuance still asks
   the `opsTokenIssue` passkey proof, which a terminal cannot make: issue from the browser. The

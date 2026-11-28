@@ -21,8 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `status` answers `match: 'choices' | 'typed'`: a narrowed link draws no decoys and its number is
   typed, one wrong number denying it as a wrong pick does. `redeem/web` answers a narrowed link's
   code 404. The link's poll registers the key with that narrowing (unbound, at the stated
-  lifetime) and, in the same transaction, copies the issuing key's step-up record onto it whole —
-  method, passkey and `verified_at` — so the terminal's window closes when the issuer's does; the
+  lifetime) and, in the same transaction, copies the step-up record of the credential that
+  confirmed the link onto it whole — method, passkey and `verified_at` — so the terminal's window
+  closes when that credential's does (an application profile that confirmed is recorded on the
+  link, `device_links.approver_profile`, so its record is copied, not the device key's whose id
+  it reports); the
   approved answer carries `keyReach` and `keyExpiresAtMillis`. `SignInAttempt.reach` (and so
   `SignInOutcome`) tells the `signIn` guard a terminal from a phone; the README's guard section
   gains the recipe "a terminal only from inside the app's network", with the deployment it holds

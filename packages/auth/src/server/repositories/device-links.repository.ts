@@ -133,13 +133,17 @@ export class DeviceLinksRepository extends AccountStateRepository
      * The key is not registered here, for the reason device-code approval gives:
      * the redeeming device may never come back for it.
      *
+     * `approverProfile` is the application profile that confirmed, written in
+     * the same statement; null when the issuing key confirmed, and on an
+     * ordinary link.
+     *
      * @returns the updated row, or null if it was no longer redeemed, expired, or its issuer signed out
      */
-    async approve(link: LinkHandle): Promise<DeviceLink | null>
+    async approve(link: LinkHandle, approverProfile: string | null): Promise<DeviceLink | null>
     {
         return this.transition(
             link.issuerUserId,
-            { status: 'approved', approvedAt: new Date() },
+            { status: 'approved', approvedAt: new Date(), approverProfile },
             and(eq(deviceLinks.id, link.id), eq(deviceLinks.status, 'redeemed'), notExpired(), this.issuerKeyLive(true)),
         );
     }

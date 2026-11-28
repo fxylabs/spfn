@@ -76,6 +76,7 @@ import { getDeviceLinkConfig } from '../lib/device-link-config';
 import { generateChoices, generateMatchNumber } from '../lib/device-link-match';
 import { holdDeviceLinkWait, waitForDeviceLinkMove, waitingOnDeviceLink } from '../lib/device-link-waiters';
 import type { DeviceProvenance } from '../lib/device-provenance';
+import type { StartingCredential } from '../lib/deferred-stamp';
 import { assertKeyMatchesAlgorithm, verifyKeyFingerprint } from '../helpers/jwt';
 import {
     formatUserCode,
@@ -634,7 +635,7 @@ export async function confirmDeviceLinkService(params: ConfirmDeviceLinkParams):
         await assertStepUp({ userId: params.issuer.userId, credential: params.credential });
 
         return params.choice === record.matchNumber
-            ? { approved: await approve(record, params.linkId) }
+            ? { approved: await approve(record, params.linkId, approverProfileOf(record, params.credential)) }
             : { denied: await refuse(record, 'wrong_match') };
     }, { context: 'auth:device-link-confirm' });
 
@@ -659,13 +660,24 @@ async function lockIssuedLink(params: DeviceLinkParams): Promise<DeviceLinkRecor
 }
 
 /**
+ * The application profile confirming a narrowed link, recorded so the poll
+ * copies that profile's step-up record rather than the record of the device
+ * key whose id it reports; null for any other credential, and on an ordinary
+ * link, whose key carries no record.
+ */
+function approverProfileOf(record: DeviceLinkRecord, credential: PrincipalCredential): string | null
+{
+    return record.reach !== null && credential.kind === 'appProfile' ? credential.profile : null;
+}
+
+/**
  * Move a redeemed link to approved. The issuing key is judged again in the
  * statement, under a share lock on its row: an issuer signed out between the
  * read and now approves nothing.
  */
-async function approve(record: DeviceLinkRecord, linkId: string): Promise<DeviceLink>
+async function approve(record: DeviceLinkRecord, linkId: string, approverProfile: string | null): Promise<DeviceLink>
 {
-    const approved = await deviceLinksRepository.approve(record);
+    const approved = await deviceLinksRepository.approve(record, approverProfile);
 
     if (!approved)
     {
@@ -753,7 +765,8 @@ async function cancelIssuedLink(params: DeviceLinkParams): Promise<DeviceLinkSta
  * nothing — and of two polls arriving together exactly one registers the key.
  *
  * A narrowed link's key is registered held to its reach for its lifetime, and
- * given a copy of the issuing key's step-up record in the same transaction.
+ * given a copy of the confirming credential's step-up record in the same
+ * transaction.
  */
 export async function pollDeviceLinkService(params: PollDeviceLinkParams): Promise<PollDeviceAuthResult>
 {
@@ -814,7 +827,7 @@ async function judgeLinkPoll(params: PollDeviceLinkParams): Promise<PollDeviceAu
 
     if (narrowing)
     {
-        await carryIssuerStepUp(consumed, key.keyId);
+        await carryApproverStepUp(consumed, key.keyId);
     }
 
     return { status: 'approved', ...login };
@@ -829,16 +842,27 @@ function keyNarrowingOf(link: DeviceLink): KeyNarrowing | undefined
 }
 
 /**
- * Give a narrowed key the issuing device key's step-up record, the whole proof
- * as it stands at collection — so the key's window is the issuer's, judged
- * the same way and closing at the same moment. After the key is written (the
- * record names it) and in the poll's transaction, under the account lock it
- * holds. An ordinary link's key carries none: a full key never inherits a
- * window.
+ * Give a narrowed key the step-up record of the credential that confirmed its
+ * link, the whole proof as it stands at collection — so the key's window is
+ * that credential's, judged the same way and closing at the same moment. After
+ * the key is written (the record names it) and in the poll's transaction,
+ * under the account lock it holds. An ordinary link's key carries none: a full
+ * key never inherits a window.
  */
-async function carryIssuerStepUp(link: DeviceLink, keyId: string): Promise<void>
+async function carryApproverStepUp(link: DeviceLink, keyId: string): Promise<void>
 {
-    await mfaVerificationsRepository.copyToKeyId(link.issuerUserId, link.issuerKeyId, keyId);
+    await mfaVerificationsRepository.copyToKeyId(link.issuerUserId, approverOf(link), keyId);
+}
+
+/**
+ * The credential that confirmed a link: the application profile it records,
+ * reporting the issuing key's id, or else the issuing key itself.
+ */
+function approverOf(link: DeviceLink): StartingCredential
+{
+    return link.approverProfile === null
+        ? { kind: 'deviceKey', keyId: link.issuerKeyId }
+        : { kind: 'appProfile', profile: link.approverProfile, keyId: link.issuerKeyId };
 }
 
 /** What the new device is told about a denied link, by the reason the denial recorded. */
