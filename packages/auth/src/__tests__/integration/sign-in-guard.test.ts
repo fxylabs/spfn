@@ -52,6 +52,10 @@
  *     or `user: null` let through
  * 21. the worked example's lift that clears nothing, or that reads the account
  *     instead of taking its lock before it clears the counts
+ * 22. a terminal's sign-in the guard cannot tell from a phone's (#524): a
+ *     narrowed device link's attempt without its `reach` — at the deciding
+ *     `admit` and in a refusal at collection — or every link's attempt with
+ *     one; the README's recipe run as printed
  *
  * The app's side is what the README tells an app to write: a repository
  * extending `BaseRepository` whose writes join the package's transaction.
@@ -64,6 +68,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTes
 import { Hono } from 'hono';
 import postgres from 'postgres';
 import { readdirSync, readFileSync } from 'node:fs';
+import { BlockList, isIPv4 } from 'node:net';
 import { join, resolve } from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { generateKeyPair as generateJoseKeyPair, SignJWT, createRemoteJWKSet } from 'jose';
@@ -73,6 +78,7 @@ import { enableBinding, FixtureAuthenticator } from '../helpers/webauthn-fixture
 import { restoredByAuthApi } from '../helpers/auth-api-restore';
 import {
     accountDeletionRequests,
+    deviceLinks,
     mfaAttemptBudgets,
     mfaChallenges,
     mfaTotp,
@@ -1933,6 +1939,119 @@ describe.skipIf(!dbAvailable)('the sign-in guard (#361)', () =>
         expect(answered).toEqual([401, 401, 401, 401, 401, 403]);
         expect(liftCalls).toEqual(['lockAccount', 'clear']);
         expect((await login('known@test.com', PASSWORD)).status).toBe(200);
+    });
+
+    // ========================================================================
+    // Row 22 — a terminal let in by a narrowed device link (#524), told apart
+    // by `reach`, with the README's recipe "a terminal only from inside the
+    // app's network" as the guard. One trusted proxy hop (vitest.config.ts),
+    // so the address is the `X-Forwarded-For` entry the hop wrote.
+    //
+    // | row | poll | answer | settled |
+    // | --- | --- | --- | --- |
+    // | G-M | narrowed link, from 10.0.0.5 | 200, the key written | succeeded, with `reach` |
+    // | G-R1 | narrowed link, from 203.0.113.9 | 403 TERMINAL_OUTSIDE_NETWORK; no key, the link not spent | failed / refused, with `reach` |
+    // | G-R2 | then an ordinary link, from the same address | 200 | succeeded, no `reach` |
+    //
+    // G-R2 is G-R1's second half rather than a row of its own: alone it
+    // passes wherever `reach` is never set, and guards something only beside
+    // the refusal it is the counterpart of.
+    // | G-D | narrowed link, the account suspended after confirm | 403 AccountDisabledError | failed / accountDisabled, with `reach` |
+    // ========================================================================
+
+    /** The README's recipe, as printed: a terminal comes in only from inside the network the app runs in. */
+    function terminalInsideNetwork(): (attempt: SignInAttempt) => SignInAdmission
+    {
+        const network = new BlockList();
+        network.addSubnet('10.0.0.0', 8, 'ipv4');
+        network.addAddress('127.0.0.1', 'ipv4');
+        network.addAddress('::1', 'ipv6');
+
+        const inside = (ip: string | undefined): boolean =>
+        {
+            if (!ip)
+            {
+                return false;
+            }
+
+            const plain = ip.startsWith('::ffff:') && isIPv4(ip.slice(7)) ? ip.slice(7) : ip;
+
+            return network.check(plain, isIPv4(plain) ? 'ipv4' : 'ipv6');
+        };
+
+        return attempt => attempt.reach === 'opsTokens' && !inside(attempt.ip)
+            ? { refuse: { code: 'TERMINAL_OUTSIDE_NETWORK' } }
+            : undefined;
+    }
+
+    /** A link issued, redeemed by a terminal's key and confirmed; then the recipe guards, and `settled` is recorded. */
+    async function confirmedLink(email: string, issueBody: Record<string, unknown>)
+    {
+        await seedUser(email);
+        const { authorization } = await signIn(email);
+        const { linkId, userCode } = await (await post('/_auth/device/link/issue', issueBody, { authorization })).json();
+        const device = deviceKeyBody();
+        const { deviceCode, matchNumber } = await (await post('/_auth/device/link/redeem', { userCode, ...device })).json();
+        expect((await post('/_auth/device/link/confirm', { linkId, choice: matchNumber }, { authorization })).status).toBe(200);
+
+        const outcomes: SignInOutcome[] = [];
+        const admit = terminalInsideNetwork();
+        policy.admit = async attempt => admit(attempt);
+        policy.settled = async (outcome) =>
+        {
+            outcomes.push(outcome);
+        };
+
+        return { deviceCode, keyId: device.keyId, linkId, outcomes };
+    }
+
+    async function linkStatus(linkId: string)
+    {
+        const [row] = await getTestDb().select({ status: deviceLinks.status }).from(deviceLinks).where(eq(deviceLinks.linkId, linkId));
+
+        return row!.status;
+    }
+
+    it('row 22 G-M — a narrowed link polled from inside the network is admitted, and settled is told succeeded with the reach', async () =>
+    {
+        const { deviceCode, keyId, outcomes } = await confirmedLink('terminal-in@test.com', { reach: 'opsTokens' });
+
+        expect((await post('/_auth/device/link/poll', { deviceCode }, { forwardedFor: '10.0.0.5' })).status).toBe(200);
+
+        expect(await keyRow(keyId)).toBeDefined();
+        expect(outcomes).toMatchObject([{ channel: 'device-link', result: 'succeeded', reach: 'opsTokens', ip: '10.0.0.5', keyId }]);
+    });
+
+    it('row 22 G-R1, G-R2 — from outside, a narrowed link\'s poll is 403 TERMINAL_OUTSIDE_NETWORK (no key, the link unspent, settled told refused with the reach); an ordinary link\'s is admitted, with no reach', async () =>
+    {
+        const terminal = await confirmedLink('terminal-out@test.com', { reach: 'opsTokens' });
+
+        const response = await post('/_auth/device/link/poll', { deviceCode: terminal.deviceCode }, { forwardedFor: '203.0.113.9' });
+        const body = await response.json();
+
+        expect(response.status).toBe(403);
+        expect(body).toMatchObject({ error: { code: 'SignInRefusedError' }, details: { code: 'TERMINAL_OUTSIDE_NETWORK' } });
+        expect(await keyRow(terminal.keyId)).toBeUndefined();
+        expect(await linkStatus(terminal.linkId)).toBe('approved');
+        expect(terminal.outcomes).toMatchObject([{ channel: 'device-link', result: 'failed', reason: 'refused', reach: 'opsTokens', ip: '203.0.113.9' }]);
+
+        const phone = await confirmedLink('phone-out@test.com', {});
+
+        expect((await post('/_auth/device/link/poll', { deviceCode: phone.deviceCode }, { forwardedFor: '203.0.113.9' })).status).toBe(200);
+        expect(await keyRow(phone.keyId)).toBeDefined();
+        expect(phone.outcomes).toMatchObject([{ channel: 'device-link', result: 'succeeded' }]);
+        expect(phone.outcomes[0]).not.toHaveProperty('reach');
+    });
+
+    it('row 22 G-D — a narrowed link\'s account suspended after confirm: the poll is refused, and settled is told accountDisabled with the reach', async () =>
+    {
+        const { deviceCode, keyId, outcomes } = await confirmedLink('terminal-suspended@test.com', { reach: 'opsTokens' });
+        await getTestDb().update(users).set({ status: 'suspended' }).where(eq(users.email, 'terminal-suspended@test.com'));
+
+        expect((await post('/_auth/device/link/poll', { deviceCode }, { forwardedFor: '10.0.0.5' })).status).toBe(403);
+
+        expect(await keyRow(keyId)).toBeUndefined();
+        expect(outcomes).toMatchObject([{ channel: 'device-link', result: 'failed', reason: 'accountDisabled', reach: 'opsTokens' }]);
     });
 });
 

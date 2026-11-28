@@ -28,6 +28,7 @@ import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate } from '@/server/middleware/authenticate';
 import { issueOpsTokenService, revokeOpsTokenService, verifyOpsTokenService } from '@/server/services/ops-token.service';
+import { registerPublicKeyService } from '@/server/services/key.service';
 import { opsTokenIssuedEvent, opsTokenRevokedEvent } from '@/server/events';
 
 const { mainAuthRouter } = await import('@/server/routes');
@@ -496,6 +497,30 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
             await vi.waitFor(() => expect(issued).toHaveLength(1));
 
             expect(issued[0]!.payload.via).toEqual({ keyId: 'verifier-key', profile: 'mobile' });
+        });
+
+        it('E-R3 a key held to ops tokens issues and revokes: both announcements name it in `via` with its reach', async () =>
+        {
+            const keyPair = generateKeyPair('ES256');
+            await registerPublicKeyService({
+                userId: Number(await userIdOf('admin@test.com')),
+                keyId: keyPair.keyId,
+                publicKey: keyPair.publicKey,
+                fingerprint: keyPair.fingerprint,
+                algorithm: keyPair.algorithm,
+                channel: 'device-link',
+                narrowing: { reach: 'opsTokens', lifetimeMs: 5 * 60_000 },
+            });
+            const terminal = `Bearer ${generateClientToken({ keyId: keyPair.keyId }, keyPair.privateKey, 'ES256', { expiresIn: '5m' })}`;
+
+            const answer = await (await issue(terminal, { name: 'from-terminal', scopes: ['*'] })).json();
+            expect((await app.request(`/_auth/ops-tokens/${answer.opsToken.id}`, {
+                method: 'DELETE', headers: { Authorization: terminal },
+            })).status).toBe(200);
+            await vi.waitFor(() => expect(revoked).toHaveLength(1));
+
+            expect(issued.map(({ payload }) => payload.via)).toEqual([{ keyId: keyPair.keyId, reach: 'opsTokens' }]);
+            expect(revoked.map(({ payload }) => payload.via)).toEqual([{ keyId: keyPair.keyId, reach: 'opsTokens' }]);
         });
 
         it('E-A revocation by the application itself, no revoker: announced without `userId` or `via`, and no throw', async () =>
