@@ -544,6 +544,79 @@ export const authPasswordChangedEvent = defineEvent(
 );
 
 /**
+ * The credential an ops-token act was asked through — the request's, never the
+ * account's: `keyId` for a device key, `profile` and the key id its verifier
+ * reported for an application profile (the same `keyId` a device key's
+ * `auth.device.registered` carries, so a subscriber can tie the act to the
+ * device that asked). A field is absent when the credential has none, as for
+ * an OAuth grant. Every field is optional, so one added later is additive.
+ */
+const OpsTokenViaSchema = Type.Object({
+    keyId: Type.Optional(Type.String()),
+    profile: Type.Optional(Type.String()),
+});
+
+/**
+ * auth.ops_token.issued — an ops token was minted
+ *
+ * 발행 시점:
+ * - issueOpsTokenService() (`POST /_auth/ops-tokens`)가 커밋된 직후
+ *
+ * A token outlives every session and key of the account that issued it and
+ * borrows that account's authority, so this is the notice the other
+ * administrators need: a stolen administrator session that mints a token was
+ * silent until now. `userId` is the issuer. Nothing fires for a refused
+ * issuance or one whose transaction rolled back.
+ *
+ * Never carries the secret or its hash. `expiresAtMillis` is absent for a token
+ * that never expires.
+ *
+ * @example
+ * ```typescript
+ * opsTokenIssuedEvent.subscribe(async ({ tokenId, name, scopes, userId }) => {
+ *     await notifyAdministrators(`Ops token #${tokenId} "${name}" (${scopes.join(', ')}) was issued by user ${userId}`);
+ * });
+ * ```
+ */
+export const opsTokenIssuedEvent = defineEvent(
+    'auth.ops_token.issued',
+    Type.Object({
+        userId: Type.String(),
+        tokenId: Type.Number(),
+        name: Type.String(),
+        scopes: Type.Array(Type.String()),
+        expiresAtMillis: Type.Optional(Type.Number()),
+        createdAtMillis: Type.Number(),
+        via: OpsTokenViaSchema,
+    }),
+);
+
+/**
+ * auth.ops_token.revoked — an ops token was revoked
+ *
+ * 발행 시점:
+ * - revokeOpsTokenService() (`DELETE /_auth/ops-tokens/:id`)가 커밋된 직후
+ *
+ * Any administrator may revoke any administrator's token, so the issuer learns
+ * of it here. `userId` and `via` name the revoker and the credential they asked
+ * through; both are absent when the application revoked the token itself
+ * (`revokeOpsTokenService(id)` with no revoker). `issuedBy` is absent on a token
+ * from before issuers were recorded. Nothing fires for an unknown or already
+ * revoked id, nor for a revocation that rolled back.
+ */
+export const opsTokenRevokedEvent = defineEvent(
+    'auth.ops_token.revoked',
+    Type.Object({
+        userId: Type.Optional(Type.String()),
+        tokenId: Type.Number(),
+        name: Type.String(),
+        issuedBy: Type.Optional(Type.String()),
+        revokedAtMillis: Type.Number(),
+        via: Type.Optional(OpsTokenViaSchema),
+    }),
+);
+
+/**
  * Auth event payload types
  */
 export type AuthLoginPayload = typeof authLoginEvent._payload;
@@ -562,3 +635,5 @@ export type AuthDeletionCompletedPayload = typeof authDeletionCompletedEvent._pa
 export type OAuthUnlinkedPayload = typeof oauthUnlinkedEvent._payload;
 export type OAuthLinkedPayload = typeof oauthLinkedEvent._payload;
 export type OAuthLinkRemovedPayload = typeof oauthLinkRemovedEvent._payload;
+export type OpsTokenIssuedPayload = typeof opsTokenIssuedEvent._payload;
+export type OpsTokenRevokedPayload = typeof opsTokenRevokedEvent._payload;

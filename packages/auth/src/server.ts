@@ -163,6 +163,8 @@ export {
     oauthUnlinkedEvent,
     oauthLinkedEvent,
     oauthLinkRemovedEvent,
+    opsTokenIssuedEvent,
+    opsTokenRevokedEvent,
     AuthProviderSchema,
 } from './server/events';
 
@@ -184,4 +186,6 @@ export type {
     OAuthUnlinkedPayload,
     OAuthLinkedPayload,
     OAuthLinkRemovedPayload,
+    OpsTokenIssuedPayload,
+    OpsTokenRevokedPayload,
 } from './server/events';

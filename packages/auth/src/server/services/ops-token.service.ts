@@ -12,16 +12,17 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { runInTransaction } from '@spfn/core/db';
+import { onAfterCommit, runInTransaction } from '@spfn/core/db';
 import { InsufficientPermissionsError } from '@spfn/auth/errors';
 import { opsTokensRepository } from '../repositories/ops-tokens.repository';
 import { usersRepository } from '../repositories/users.repository';
 import type { OpsToken } from '../entities/ops-tokens';
+import { opsTokenIssuedEvent, opsTokenRevokedEvent, type OpsTokenIssuedPayload } from '../events';
 import { BUILTIN_PERMISSIONS } from '../rbac/builtin';
 import { authLogger } from '../logger';
 import { resolveAuthority } from './permission.service';
 import { assertStepUp } from './mfa.service';
-import type { PrincipalCredential } from './admission.service';
+import { sessionCredentialOf, type PrincipalCredential } from './admission.service';
 import { assertPasskeyProven, type PasskeyProof } from '../lib/passkey-proof';
 
 /**
@@ -95,6 +96,10 @@ export interface OpsTokenIssuer
  * one that commits after it waits for this insert and stops the token through
  * `verifyOpsTokenService`. The token borrows the issuer's authority from then on.
  *
+ * `auth.ops_token.issued` is announced after the transaction commits — after the
+ * caller's, when this runs inside one — so a refused issuance and a rolled-back
+ * one announce nothing.
+ *
  * @param name - Operator-facing label
  * @param scopes - Permission strings the token grants ('*' grants all)
  * @param expiresAt - null for a non-expiring token
@@ -130,8 +135,35 @@ export async function issueOpsTokenService(
             issuedBy: issuer.userId,
         });
 
+        onAfterCommit(() => opsTokenIssuedEvent.emit({
+            userId: String(issuer.userId),
+            tokenId: record.id,
+            name: record.name,
+            scopes: record.scopes,
+            expiresAtMillis: record.expiresAt?.getTime(),
+            createdAtMillis: record.createdAt.getTime(),
+            via: viaOf(issuer.credential),
+        }));
+
         return { token, record };
     }, { context: 'auth:ops-token-issue' });
+}
+
+/**
+ * The credential an act was asked through, as the ops-token events name it:
+ * the one answer `sessionCredentialOf` gives every reader of a session. A grant
+ * is no session and names nothing.
+ */
+function viaOf(credential: PrincipalCredential): OpsTokenIssuedPayload['via']
+{
+    const session = sessionCredentialOf(credential);
+
+    if (session?.kind === 'appProfile')
+    {
+        return { keyId: session.keyId, profile: session.profile };
+    }
+
+    return { keyId: session?.keyId };
 }
 
 /** Under the issuer's account lock: their status and permission, then their step-up. */
@@ -196,9 +228,43 @@ async function issuerStillAuthorizes(record: OpsToken): Promise<boolean>
     return permissions.some(permission => permission.name === OPS_TOKEN_ISSUE_PERMISSION);
 }
 
-export async function revokeOpsTokenService(id: number): Promise<OpsToken | null>
+/** Who revokes a token, and the credential their request presented. */
+export interface OpsTokenRevoker
 {
-    return await opsTokensRepository.revokeById(id);
+    userId: number;
+    credential: PrincipalCredential;
+}
+
+/**
+ * Revoke an active token. Null when the id is unknown or already revoked.
+ *
+ * `auth.ops_token.revoked` is announced after commit — the caller's, when this
+ * runs inside a transaction; otherwise the revocation is one statement, already
+ * committed — naming the revoker when one is given: any administrator may revoke
+ * any token, so the issuer learns of it there. Nothing is announced for a null
+ * answer or a rolled-back revocation.
+ *
+ * @param id - The token's id
+ * @param revoker - The administrator revoking it, and their request's credential;
+ *     omitted when the application revokes a token itself
+ */
+export async function revokeOpsTokenService(id: number, revoker?: OpsTokenRevoker): Promise<OpsToken | null>
+{
+    const record = await opsTokensRepository.revokeById(id);
+
+    if (record)
+    {
+        onAfterCommit(() => opsTokenRevokedEvent.emit({
+            userId: revoker ? String(revoker.userId) : undefined,
+            tokenId: record.id,
+            name: record.name,
+            issuedBy: record.issuedBy === null ? undefined : String(record.issuedBy),
+            revokedAtMillis: record.revokedAt!.getTime(),
+            via: revoker ? viaOf(revoker.credential) : undefined,
+        }));
+    }
+
+    return record;
 }
 
 export async function listOpsTokensService(): Promise<OpsToken[]>

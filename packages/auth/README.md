@@ -6931,6 +6931,30 @@ made for another key, registers a new device and fires the event. `ip` and `user
 `invitationCreatedEvent` (`auth.invitation.created`) carries the invitation `token` — the only
 copy, since only its hash is stored. Mail it from the subscriber; do not log or persist it.
 
+`opsTokenIssuedEvent` (`auth.ops_token.issued`) and `opsTokenRevokedEvent`
+(`auth.ops_token.revoked`) fire after commit when an [ops token](#ops-tokens-spfn-ops) is issued or
+revoked — the caller's commit, when an app calls `issueOpsTokenService` or `revokeOpsTokenService`
+inside a transaction of its own. Nothing fires for a refused issuance (a missing permission,
+`STEP_UP_REQUIRED`, `PASSKEY_PROOF_REQUIRED`), for a revocation of an unknown or already revoked id
+(404), or for either act rolled back. A token outlives every session of the account that issued it
+and any administrator may revoke any token, so these are the notices the other administrators
+need: until now a stolen administrator session could mint a token silently.
+
+| Event | Payload |
+| --- | --- |
+| `auth.ops_token.issued` | `userId` (the issuer), `tokenId`, `name`, `scopes`, `expiresAtMillis?` (absent: never expires), `createdAtMillis`, `via` |
+| `auth.ops_token.revoked` | `userId?` (the revoker), `tokenId`, `name`, `issuedBy?`, `revokedAtMillis`, `via?` |
+
+`via` names the credential the request presented, never the account: `keyId` for a device key —
+the same `keyId` that device's `auth.device.registered` carried — and `profile` with the key id its
+verifier reported for an [application profile](#custom-auth-profiles-registerauthprofile).
+`userId` and `via` are absent on `auth.ops_token.revoked` when the application revoked the token
+itself (`revokeOpsTokenService(id)` with no revoker); `issuedBy` is absent on a token from before
+issuers were recorded. "Absent" is exact only in the JSON that carries an event to another instance
+or a job: a subscriber in the emitting process sees `userId`, `via`, `issuedBy`, `expiresAtMillis`
+and a grant's `via.keyId` as keys holding `undefined`, so test the value, never `in`. Neither event
+carries the secret or its hash. `name` and `scopes` are the text the issuer sent.
+
 Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`,
 `AuthPasswordChangedPayload`,
 `AuthDeviceRegisteredPayload`, `InvitationCreatedPayload`,
@@ -6938,10 +6962,46 @@ Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayl
 `AuthDeletionCompletedPayload`, `OAuthUnlinkedPayload` (`auth.oauth.unlinked` — provider-side
 disconnect, see the OAuth unlink-notify section), `OAuthLinkedPayload`, `OAuthLinkRemovedPayload`,
 `PasskeyEnrolledPayload`,
-`PasskeyRevokedPayload`, `MfaLockedPayload`. `AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
+`PasskeyRevokedPayload`, `MfaLockedPayload`, `OpsTokenIssuedPayload`, `OpsTokenRevokedPayload`.
+`AuthLoginPayload` and `AuthDeviceRegisteredPayload` both gained
 `mfaEnrolled` in 0.3.0-beta.23; `AuthLoginPayload` gained `secondFactorEnrolmentRequired` with
 the second-factor policy (#309). These events also bind to `@spfn/core/job`
 jobs via `.on(event)`.
+
+#### Recipe — tell the administrators when an ops token is issued or revoked
+
+```typescript
+// src/server/events/ops-token-notices.ts
+import { opsTokenIssuedEvent, opsTokenRevokedEvent, type OpsTokenIssuedPayload } from '@spfn/auth/server';
+import { sendEmail } from '@spfn/notification/server';
+import { administratorAddresses } from '../repositories/administrators.repository';
+
+function askedFrom(via: OpsTokenIssuedPayload['via']): string
+{
+    return via.profile ? `the ${via.profile} profile` : via.keyId ? `device key ${via.keyId}` : 'a grant';
+}
+
+async function tellAdministrators(text: string): Promise<void>
+{
+    await sendEmail({ to: await administratorAddresses(), subject: 'Ops token activity', text });
+}
+
+opsTokenIssuedEvent.subscribe(async ({ tokenId, name, scopes, userId, via }) =>
+{
+    await tellAdministrators(`Ops token #${tokenId} "${name}" (${scopes.join(', ')}) was issued by user ${userId} from ${askedFrom(via)}.`);
+});
+
+opsTokenRevokedEvent.subscribe(async ({ tokenId, name, userId, via }) =>
+{
+    const by = userId && via ? `user ${userId} from ${askedFrom(via)}` : 'the application';
+    await tellAdministrators(`Ops token #${tokenId} "${name}" was revoked by ${by}.`);
+});
+```
+
+The subscriber looks the addresses up itself — `administratorAddresses` is the app's own read of
+its administrators — because the events carry ids, not addresses. It runs after the commit, so
+the token it describes is already readable from any connection; a subscriber that throws is
+logged and cannot undo the issuance.
 
 ## Registration gate (`beforeRegister`)
 
@@ -7394,6 +7454,9 @@ before the command ends — on the failing path as much as the succeeding one.
 `@spfn/auth/crypto` exports the two functions that take part (`generateKeyPair`,
 `generateClientToken`) without pulling in the auth server; it exists from **0.3.0-beta.2**,
 which is the floor the `spfn` CLI declares for this package.
+
+Issuance and revocation are announced after commit as `auth.ops_token.issued` and
+`auth.ops_token.revoked` — see [Events](#events), with a recipe that tells the administrators.
 
 Verification refuses uniformly: an expired, revoked, or never-issued token all answer the
 same 401, so whether a presented secret ever existed is not inferable. A valid token
