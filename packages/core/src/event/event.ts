@@ -237,8 +237,9 @@ function createEventImpl<TPayload>(
 
     const emit = async (payload?: TPayload): Promise<void> =>
     {
+        // The event's name, never its payload: masking goes by key name only,
+        // so a payload's `email` or `name` would be written as it is.
         eventLogger.debug(`Emitting event: ${name}`, {
-            payload,
             hasCache: !!cache,
             jobQueueCount: jobQueueManager.size,
         });

@@ -2111,6 +2111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /_auth/logout`, which revokes the key the request signs with and admits such a session;
   `keys/revoke` refused it and left a live key behind. The warning on a failed cleanup now says
   what is true of that key. No change to the app's routes.
+- **@spfn/core: an emitted event's debug line names the event, not its payload (#526).** `emit`
+  logged `Emitting event: <name>` with the whole payload in its context. The logger masks a context
+  value only when its key's name contains a sensitive word (`password`, `token`, `auth`, …), so a
+  payload's `email`, `name` or any text it carried from a request was written as it was whenever
+  debug logging was on — `auth.login`'s address among them. The line now carries the event's name,
+  whether a cache is bound and the job-queue count, and no part of the payload, neither values nor
+  keys. No other line of the event module logs a payload. Nothing else changes; an app that read
+  payloads from this line logs them from a subscriber of its own.
 - **@spfn/auth: every exported service that takes the account lock opens its own transaction
   (#494).** Nine of them took the lock (`usersRepository.lockAccount`) and left the transaction to
   their route's `Transactional()`: `startTotpEnrolmentService`, `regenerateRecoveryCodesService`,
