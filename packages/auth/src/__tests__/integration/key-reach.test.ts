@@ -9,6 +9,7 @@
  * | Row | Request | Answer | Unnoticed without it |
  * | --- | --- | --- | --- |
  * | B-M | list, revoke, `logout` on the narrowed key | 200, 200, 204; then 401 | a reach that refuses its own routes: every row below passes while the terminal can do nothing |
+ * | B-I | issuance on the narrowed key; the answered secret at an `opsTokenAuth` route | 200, a token row issued by the owner; 200, handler run | issuance outside the reach: the terminal lists and revokes but cannot mint the token it is let in for |
  * | B-K | the owner's full key lists its keys; the device notice | `reach`, the stated expiry, the notice's `reach` | the key list and the notice telling a terminal apart from a full device, and the stated lifetime written as 90 days |
  * | B-R1 | `device/link/issue` | 403 `KEY_OUT_OF_REACH`, no link row | a package route outside the reach admitting the key |
  * | B-R2 | `keys/rotate` | 403, no new key, expiry unmoved | a rotation handing the key a fresh, full one |
@@ -43,6 +44,7 @@ import { signKeyReplacementProof } from '@/server/lib/key-replacement-proof';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { opsOrUser } from '@/server/middleware/ops-or-user';
+import { opsTokenAuth } from '@/server/middleware/ops-token-auth';
 import { authDeviceRegisteredEvent } from '@/server/events';
 import { admitPrincipal } from '@/server/services/admission.service';
 import { registerPublicKeyService } from '@/server/services/key.service';
@@ -51,6 +53,7 @@ import { ValidationError } from '@spfn/core/errors';
 
 const { mainAuthRouter } = await import('@/server/routes');
 const { registerRoutes, route, defineRouter } = await import('@spfn/core/route');
+const { createOpsRouter, opsRoute } = await import('@spfn/core/ops');
 const { ErrorHandler, resetMemoryRateLimitStore } = await import('@spfn/core/middleware');
 const { initializeAuth } = await import('@/server/services/rbac.service');
 const { getRoleByName } = await import('@/server/services/role.service');
@@ -100,6 +103,20 @@ function appRouter()
     });
 }
 
+/** The application's ops surface: what an issued token is for. */
+function opsRouter()
+{
+    return createOpsRouter({
+        whoami: opsRoute.get('/whoami')
+            .handler(async () =>
+            {
+                handled.push('ops');
+
+                return { ok: true };
+            }),
+    }, { auth: opsTokenAuth });
+}
+
 describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
 {
     let app: Hono;
@@ -137,6 +154,7 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         const serverMiddlewares = [{ name: authenticate.name, handler: authenticate.handler }];
 
         registerRoutes(app, appRouter(), serverMiddlewares);
+        registerRoutes(app, opsRouter(), serverMiddlewares);
         registerRoutes(app, mainAuthRouter, serverMiddlewares);
         app.onError(ErrorHandler());
     });
@@ -305,6 +323,22 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         expect((await send('DELETE', `/_auth/ops-tokens/${tokenId}`, session)).status).toBe(200);
         expect((await send('POST', '/_auth/logout', session, {})).status).toBe(204);
         expect((await send('GET', '/_auth/ops-tokens', session)).status).toBe(401);
+    });
+
+    it('B-I: the narrowed key issues an ops token — 200, a token row the owner issued, and its secret admitted at an opsTokenAuth route', async () =>
+    {
+        const { session } = await narrowedKey();
+
+        const issued = await issueOpsToken(session);
+        expect(issued.status).toBe(200);
+        const { token, opsToken } = await issued.json() as { token: string; opsToken: { id: number } };
+
+        const [row] = await getTestDb().select().from(opsTokens).where(eq(opsTokens.id, opsToken.id));
+        expect(row).toMatchObject({ name: 'terminal', issuedBy: userId, revokedAt: null });
+
+        const admitted = await app.request('/_ops/whoami', { headers: { Authorization: `Bearer ${token}` } });
+        expect(admitted.status).toBe(200);
+        expect(handled).toEqual(['ops']);
     });
 
     it('B-K: the owner\'s key list shows the narrowed key\'s reach and stated expiry, and its device notice carries the reach', async () =>
