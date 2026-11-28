@@ -709,6 +709,10 @@ function inactiveAccountError(refusal: AdmissionRefusal, params: RegisterPublicK
         return params.inactiveAccount();
     }
 
+    // Only the account half reaches here — `accountRefusal`, or the lock finding
+    // no row — so `default` is `accountMissing`. A key's refusals,
+    // `keyOutOfReach` among them, are a presented key's, and a key write is
+    // presented none: the key it writes has no reach until it exists.
     switch (refusal.reason)
     {
         case 'accountDisabled':
