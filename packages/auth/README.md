@@ -3576,6 +3576,8 @@ login.
 // On the signed-in device — the issuer. Every call below is signed with its key.
 // An account with a second factor steps up first when this device's window has closed:
 // 403 STEP_UP_REQUIRED here (or at confirm) → stepUpWithPasskey(authApi) or mfa/step-up, then again.
+// A bound account's `passkeyResponse` was not spent by the refusal: send it again, or a new one on
+// 403 PASSKEY_PROOF_REQUIRED (its challenge ran out, or the step-up's passkey moved its counter).
 const { linkId, userCode, expiresAtMillis } = await authApi.issueDeviceLink.call({});
 
 // Show `userCode` (XXXX-XXXX) as text and in a QR code, then wait for a device to use it.
@@ -3710,6 +3712,15 @@ before `@spfn/auth` 0.3.0-beta.39 has no reason recorded and answers as a refusa
   refused `issue` with 403 `SECOND_FACTOR_ENROLMENT_REQUIRED`, as on every route that is not an
   enrolment route. This is what lets `channels.deviceLink` stay on under `secondFactor.required`.
   Deny and cancel ask nothing: refusing is always safe.
+  On a [bound](#session-binding) account the step-up is asked before the `linkIssue` passkey proof is
+  spent, so a refused `issue` leaves the proof unspent and the page may send the same
+  `passkeyResponse` again after stepping up. That holds while the proof's challenge lives
+  (`SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS` from `session/passkey-proof/options`, 300 by default)
+  and while the passkey's signature counter has not passed it — a step-up with the same passkey on
+  an authenticator that counts records the newer counter, and the earlier assertion no longer
+  verifies. A challenge that has run out, or an assertion that no longer verifies, is answered 403
+  `PASSKEY_PROOF_REQUIRED` (`details.procedure: 'linkIssue'`), as an issue with no proof is: ask the
+  options again and send a new assertion.
 - **The new device's key is registered only after a confirm.** It is parked in
   `spfn_auth.device_links`, not in `user_public_keys`, until the poll after the right pick moves it
   over. A key parked on a link that was denied, cancelled, or expired can never sign anything and

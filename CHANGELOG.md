@@ -621,7 +621,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mobile contract does not change: it carries only the new device's half (`auth.deviceLink.redeem`,
   `auth.deviceLink.poll`). Migration: on 403 `STEP_UP_REQUIRED` from `device/link/issue` or
   `device/link/confirm`, run `stepUpWithPasskey(api)` or `mfa/step-up` with a code, then call
-  again; a refused confirm has not spent the pick. A direct caller of `confirmDeviceLinkService`
+  again; a refused confirm has not spent the pick. On a bound account a refused issue has not spent
+  its `linkIssue` passkey proof either: the assertion is checked before the account lock and spent
+  only under it, after the step-up, so the page may send the same `passkeyResponse` again after
+  stepping up. That holds while the proof's challenge lives (`SPFN_AUTH_PASSKEY_CHALLENGE_TTL_SECONDS`
+  from `session/passkey-proof/options`, 300 by default) and while the passkey's signature counter has
+  not passed it: a step-up with the same passkey on an authenticator that counts records the newer
+  counter, and the earlier assertion then no longer verifies. A challenge that has run out, or an
+  assertion that no longer verifies, is answered 403 `PASSKEY_PROOF_REQUIRED`
+  (`details.procedure: 'linkIssue'`), as an issue with no proof is: the page asks
+  `session/passkey-proof/options` again and sends a new assertion. A direct caller of `confirmDeviceLinkService`
   passes `credential: getAuth(c).credential` (`ConfirmDeviceLinkParams.credential`, required).
 - **BREAKING (at compile time): @spfn/core: an env schema entry may only state what the schema
   declares (#492).** The seven helpers (`envString`, `envSecret`, `envNumber`, `envBoolean`,
