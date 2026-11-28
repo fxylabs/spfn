@@ -24,6 +24,8 @@
  * | B-N1 | a narrowed registration carrying a full key's `replacementProof` | the full key live with its verification; the narrowed key announced, with none | a narrowed key replacing a full one: revoking it and taking its step-up record unannounced |
  * | B-N2 | a narrowed registration claiming to replace the key that signed the request | the claim's refusal; the signing key live, no new key | the same, by a rotation |
  * | B-L | a narrowed registration whose `lifetimeMs` is 0, negative, NaN, Infinity, 2e14 or 91 days | `ValidationError`; no key row, no notice | a key dead at birth announced, a `RangeError` inside the transaction, or a key outliving a full one |
+ * | B-L90 | a narrowed registration whose `lifetimeMs` is exactly 90 days | accepted, `expires_at` 90 days from the registration | the cap refusing its own edge, or counted in seconds |
+ * | B-LF | an out-of-bounds `lifetimeMs` under a key id that exists, with a `signIn` guard | `ValidationError`, `admit` not asked | the lifetime checked after the lock and the app's `admit`, which the rollback hides |
  * | B-X | a narrowed registration with a live full key's own id and public key | 409; the key row and its verification unchanged | the full key renewed and the caller answered 200 for a narrowing never applied |
  * | B-D | `admitPrincipal` with the narrowed key and `route: null` | `keyOutOfReach` | a door with no route in front of it admitting the key |
  *
@@ -50,6 +52,7 @@ import { authDeviceRegisteredEvent } from '@/server/events';
 import { admitPrincipal } from '@/server/services/admission.service';
 import { registerPublicKeyService } from '@/server/services/key.service';
 import { KEY_TTL_DAYS } from '@/server/lib/key-policy';
+import { configureSignIn, resetSignInGuardForTests } from '@/server/lib/sign-in-guard';
 import { KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 
@@ -69,6 +72,7 @@ const RP_ID = 'localhost';
 const ORIGIN = 'http://localhost:3000';
 const CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const LIFETIME_MS = 5 * 60_000;
+const FULL_KEY_LIFETIME_MS = KEY_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 /** Header the test middleware reads instead of running proxy-guard for real. */
 const CLIENT_TYPE_HEADER = 'x-test-client-type';
@@ -563,7 +567,7 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         ['NaN', Number.NaN],
         ['Infinity', Number.POSITIVE_INFINITY],
         ['2e14 (the year 8364)', 2e14],
-        ['91 days', (KEY_TTL_DAYS + 1) * 24 * 60 * 60 * 1000],
+        ['91 days', FULL_KEY_LIFETIME_MS + 24 * 60 * 60 * 1000],
     ])('B-L: a lifetimeMs of %s is a ValidationError, with no key row and no notice', async (_label, lifetimeMs) =>
     {
         const next = generateKeyPair('ES256');
@@ -575,6 +579,43 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         expect(failure).toBeInstanceOf(ValidationError);
         expect(notices).toEqual([]);
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, next.keyId))).toHaveLength(0);
+    });
+
+    it('B-L90: a lifetimeMs of exactly a full key\'s 90 days is accepted, and expires_at is that far from the registration', async () =>
+    {
+        const next = generateKeyPair('ES256');
+        const before = Date.now();
+
+        await registerNarrowed(next, { narrowing: { reach: 'opsTokens', lifetimeMs: FULL_KEY_LIFETIME_MS } });
+
+        const after = Date.now();
+        const expiresAt = (await keyRow(next.keyId)).expiresAt!.getTime();
+
+        expect(expiresAt).toBeGreaterThanOrEqual(before + FULL_KEY_LIFETIME_MS);
+        expect(expiresAt).toBeLessThanOrEqual(after + FULL_KEY_LIFETIME_MS);
+    });
+
+    it('B-LF: a lifetimeMs out of bounds under a key id that exists is a ValidationError, not a 409, and signIn.admit is never asked', async () =>
+    {
+        const owner = await signIn();
+        const admit = vi.fn(async () => undefined);
+        configureSignIn({ admit });
+        let failure: unknown;
+
+        try
+        {
+            await registerNarrowed(generateKeyPair('ES256'), {
+                keyId: owner.keyId,
+                narrowing: { reach: 'opsTokens', lifetimeMs: 0 },
+            }).catch(error => void (failure = error));
+        }
+        finally
+        {
+            resetSignInGuardForTests();
+        }
+
+        expect(failure).toBeInstanceOf(ValidationError);
+        expect(admit).not.toHaveBeenCalled();
     });
 
     it('B-X: a narrowed registration naming a live full key\'s own id and public key answers 409, the key row and its verification as they were', async () =>
