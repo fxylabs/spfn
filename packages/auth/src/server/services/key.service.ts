@@ -171,7 +171,8 @@ export interface RegisterPublicKeyParams
  * lives `BOUND_KEY_TTL_HOURS` and renewal extends it — and never replaced: a
  * rotation it signs, a renewal and a sign-in's `replacementProof` it signed
  * find nothing to replace (`revokeForReplacement`), and a sign-in presenting
- * it again is refused (`answerForExistingKey`). Nor does it replace: a
+ * it again is refused (`answerForExistingKey`), as is a narrowed
+ * registration naming any key id that exists. Nor does it replace: a
  * registration carrying both `narrowing` and `replaces` is a new device, or
  * the signed request's `refusal` (`claimReplacement`). Nothing but its
  * registration writes its expiry.
@@ -497,6 +498,12 @@ function stepUpChannel(channel: KeyRegistrationChannel): MfaChallengeChannel | u
  * name: answered any other way it is a 200 that renews and replaces nothing,
  * leaving the signing key as it was.
  *
+ * Nor is a narrowed registration (`params.narrowing`): it writes a new key,
+ * held to its reach and its stated lifetime, and a key id that already exists
+ * — narrowed or full, the same public key or not — is no such key. Answered as
+ * the same device signing in again it is a 200 for a narrowing never applied,
+ * having renewed the full key it named.
+ *
  * Anything else — another public key under that id, a revoked key of their own
  * (and a key of an ended generation is one, see `keyLiveness`), a pending key
  * presented through a door that cannot step up, somebody else's key, a narrowed
@@ -513,6 +520,11 @@ async function answerForExistingKey(
 ): Promise<RegisterPublicKeyResult>
 {
     if (params.replaces && 'signedBy' in params.replaces)
+    {
+        throw new KeyIdAlreadyRegisteredError();
+    }
+
+    if (params.narrowing)
     {
         throw new KeyIdAlreadyRegisteredError();
     }

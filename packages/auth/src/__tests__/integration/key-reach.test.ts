@@ -24,6 +24,7 @@
  * | B-N1 | a narrowed registration carrying a full key's `replacementProof` | the full key live with its verification; the narrowed key announced, with none | a narrowed key replacing a full one: revoking it and taking its step-up record unannounced |
  * | B-N2 | a narrowed registration claiming to replace the key that signed the request | the claim's refusal; the signing key live, no new key | the same, by a rotation |
  * | B-L | a narrowed registration whose `lifetimeMs` is 0, negative, NaN, Infinity, 2e14 or 91 days | `ValidationError`; no key row, no notice | a key dead at birth announced, a `RangeError` inside the transaction, or a key outliving a full one |
+ * | B-X | a narrowed registration with a live full key's own id and public key | 409; the key row and its verification unchanged | the full key renewed and the caller answered 200 for a narrowing never applied |
  * | B-D | `admitPrincipal` with the narrowed key and `route: null` | `keyOutOfReach` | a door with no route in front of it admitting the key |
  *
  * Every stub, spy, environment value and subscription set here is restored
@@ -49,6 +50,7 @@ import { authDeviceRegisteredEvent } from '@/server/events';
 import { admitPrincipal } from '@/server/services/admission.service';
 import { registerPublicKeyService } from '@/server/services/key.service';
 import { KEY_TTL_DAYS } from '@/server/lib/key-policy';
+import { KeyIdAlreadyRegisteredError } from '@spfn/auth/errors';
 import { ValidationError } from '@spfn/core/errors';
 
 const { mainAuthRouter } = await import('@/server/routes');
@@ -223,9 +225,8 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
     }
 
     /** The account's whole-account key, signed in by password. */
-    async function signIn(proxied = false): Promise<Session>
+    async function signIn(proxied = false, keyPair = generateKeyPair('ES256')): Promise<Session>
     {
-        const keyPair = generateKeyPair('ES256');
         const response = await send('POST', '/_auth/login', undefined, {
             email: EMAIL,
             password: PASSWORD,
@@ -574,6 +575,19 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         expect(failure).toBeInstanceOf(ValidationError);
         expect(notices).toEqual([]);
         expect(await getTestDb().select().from(userPublicKeys).where(eq(userPublicKeys.keyId, next.keyId))).toHaveLength(0);
+    });
+
+    it('B-X: a narrowed registration naming a live full key\'s own id and public key answers 409, the key row and its verification as they were', async () =>
+    {
+        const keyPair = generateKeyPair('ES256');
+        const owner = await signIn(false, keyPair);
+        await getTestDb().insert(mfaVerifications).values({ userId, keyId: owner.keyId, method: 'totp' });
+        const before = await keyRow(owner.keyId);
+
+        await expect(registerNarrowed(keyPair, {})).rejects.toBeInstanceOf(KeyIdAlreadyRegisteredError);
+
+        expect(await keyRow(owner.keyId)).toEqual(before);
+        expect(await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.keyId, owner.keyId))).toHaveLength(1);
     });
 
     // ========================================================================

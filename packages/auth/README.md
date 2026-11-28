@@ -7191,13 +7191,16 @@ tokens](#ops-tokens-spfn-ops):
   again is refused 409 `KeyIdAlreadyRegisteredError`. Nothing moves its expiry. **Nor does it
   replace**: a narrowed registration carrying `replaces` leaves the claimed key as it was — a
   `replacementProof` makes it a new device, announced and carrying no step-up record; a signed
-  request's claim answers its `refusal`.
+  request's claim answers its `refusal`. A narrowed registration naming a key id that already
+  exists — a narrowed key's or a full one's, the same public key or another — is refused 409
+  `KeyIdAlreadyRegisteredError`, and that key stays as it was.
 - **It is listed** — `listKeys` answers `reach` on its entry — and announced:
   `auth.device.registered` carries `reach`.
 
 Keys are narrowed by `registerPublicKeyService({ …, narrowing: { reach, lifetimeMs } })` alone.
 `lifetimeMs` is a finite number above 0 and at most a full key's 90 days (`KEY_TTL_DAYS`);
-anything else is a `ValidationError`, before anything is written or announced.
+anything else is a `ValidationError`, before the account is locked or `signIn.admit` asked,
+and before anything is written or announced.
 No route registers one yet; a device link narrowed by its issuer will (#524).
 
 ### Account status (`setAccountStatus`)
