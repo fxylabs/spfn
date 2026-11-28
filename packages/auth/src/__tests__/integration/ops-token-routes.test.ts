@@ -27,7 +27,7 @@ import { hashPassword } from '@/server/helpers/password';
 import { generateKeyPair, generateClientToken } from '@/server/lib/crypto';
 import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate } from '@/server/middleware/authenticate';
-import { issueOpsTokenService, verifyOpsTokenService } from '@/server/services/ops-token.service';
+import { issueOpsTokenService, revokeOpsTokenService, verifyOpsTokenService } from '@/server/services/ops-token.service';
 import { opsTokenIssuedEvent, opsTokenRevokedEvent } from '@/server/events';
 
 const { mainAuthRouter } = await import('@/server/routes');
@@ -376,9 +376,11 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
             vi.unstubAllEnvs();
         });
 
-        it('E-M issuance: one auth.ops_token.issued after commit, naming the token, the issuer and the key — never the secret', async () =>
+        it('E-M issuance: one auth.ops_token.issued after commit, naming the token, the issuer and the key that signed — never the secret', async () =>
         {
             const admin = await signInWithKey('admin@test.com');
+            // A second device of the same account: `via` must name the key that signed the request, not one the account holds
+            await signInWithKey('admin@test.com');
 
             const answer = await (await issue(admin.authorization, {
                 name: 'deploy', scopes: ['waitlist:read'], expiresInDays: 30,
@@ -484,6 +486,35 @@ describe.skipIf(!dbAvailable)('Ops token routes', () =>
             await vi.waitFor(() => expect(revoked).toHaveLength(2));
 
             expect(revoked.map(({ payload }) => payload.tokenId)).toEqual([first.id, second.id]);
+        });
+
+        it('E-P issuance through an application profile: `via` names the profile and the key its verifier reported', async () =>
+        {
+            const issuer = { userId: Number(await userIdOf('admin@test.com')), credential: { kind: 'appProfile' as const, profile: 'mobile', keyId: 'verifier-key' } };
+
+            await issueOpsTokenService('mobile', ['*'], null, issuer);
+            await vi.waitFor(() => expect(issued).toHaveLength(1));
+
+            expect(issued[0]!.payload.via).toEqual({ keyId: 'verifier-key', profile: 'mobile' });
+        });
+
+        it('E-A revocation by the application itself, no revoker: announced without `userId` or `via`, and no throw', async () =>
+        {
+            const issuer = { userId: Number(await userIdOf('admin@test.com')), credential: { kind: 'deviceKey' as const, keyId: 'cli-key' } };
+            const { record } = await issueOpsTokenService('retired', ['*'], null, issuer);
+
+            const answer = await revokeOpsTokenService(record.id);
+            await vi.waitFor(() => expect(revoked).toHaveLength(1));
+
+            expect(revoked[0]).toEqual({
+                committed: true,
+                payload: {
+                    tokenId: record.id,
+                    name: 'retired',
+                    issuedBy: String(issuer.userId),
+                    revokedAtMillis: answer!.revokedAt!.getTime(),
+                },
+            });
         });
     });
 });
