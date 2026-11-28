@@ -6950,8 +6950,10 @@ the same `keyId` that device's `auth.device.registered` carried — and `profile
 verifier reported for an [application profile](#custom-auth-profiles-registerauthprofile).
 `userId` and `via` are absent on `auth.ops_token.revoked` when the application revoked the token
 itself (`revokeOpsTokenService(id)` with no revoker); `issuedBy` is absent on a token from before
-issuers were recorded. Neither event carries the secret or its hash. `name` and `scopes` are the text the
-issuer sent.
+issuers were recorded. "Absent" is exact only in the JSON that carries an event to another instance
+or a job: a subscriber in the emitting process sees `userId`, `via`, `issuedBy`, `expiresAtMillis`
+and a grant's `via.keyId` as keys holding `undefined`, so test the value, never `in`. Neither event
+carries the secret or its hash. `name` and `scopes` are the text the issuer sent.
 
 Payload types: `AuthLoginPayload`, `AuthRegisterPayload`, `AuthPasswordResetPayload`,
 `AuthPasswordChangedPayload`,
