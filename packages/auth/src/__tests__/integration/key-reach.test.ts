@@ -19,9 +19,11 @@
  * | B-B1 | registration through the proxy on a bound account; a proxied request | unbound, stated expiry, both times | a bound key's 24 hours, which renewal extends, in place of the stated lifetime |
  * | B-B2 | the owner turns binding on | the narrowed web key stays unbound | the same, by the binding switch |
  * | B-RR | password login presenting the expired narrowed key again | 409, expiry unmoved | a sign-in moving a narrowed key's expiry to 90 days |
+ * | B-R7 | once the account must change its password: `device/link/issue` | 403 `PASSWORD_CHANGE_REQUIRED` | the reach asked before the requirements, answering a refusal the session cannot act on |
  * | B-N1 | a narrowed registration carrying a full key's `replacementProof` | the full key live with its verification; the narrowed key announced, with none | a narrowed key replacing a full one: revoking it and taking its step-up record unannounced |
  * | B-N2 | a narrowed registration claiming to replace the key that signed the request | the claim's refusal; the signing key live, no new key | the same, by a rotation |
  * | B-L | a narrowed registration whose `lifetimeMs` is 0, negative, NaN, Infinity, 2e14 or 91 days | `ValidationError`; no key row, no notice | a key dead at birth announced, a `RangeError` inside the transaction, or a key outliving a full one |
+ * | B-D | `admitPrincipal` with the narrowed key and `route: null` | `keyOutOfReach` | a door with no route in front of it admitting the key |
  *
  * Every stub, spy, environment value and subscription set here is restored
  * after the row or the file.
@@ -42,6 +44,7 @@ import { decodeBase32, hotp, totpStep } from '@/server/lib/totp';
 import { authenticate, optionalAuth } from '@/server/middleware/authenticate';
 import { opsOrUser } from '@/server/middleware/ops-or-user';
 import { authDeviceRegisteredEvent } from '@/server/events';
+import { admitPrincipal } from '@/server/services/admission.service';
 import { registerPublicKeyService } from '@/server/services/key.service';
 import { KEY_TTL_DAYS } from '@/server/lib/key-policy';
 import { ValidationError } from '@spfn/core/errors';
@@ -432,6 +435,17 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
         expect(verifications.filter(row => row.keyId === next.keyId)).toHaveLength(0);
     });
 
+    it('B-R7: once the account must change its password, device/link/issue answers the requirement, not the reach', async () =>
+    {
+        const { session } = await narrowedKey();
+        await getTestDb().update(users).set({ passwordChangeRequired: true }).where(eq(users.id, userId));
+
+        const refused = await errorOf(await send('POST', '/_auth/device/link/issue', session, {}));
+
+        expect(refused).toMatchObject({ status: 403, code: 'PasswordChangeRequiredError' });
+        expect(await getTestDb().select().from(deviceLinks)).toHaveLength(0);
+    });
+
     // ========================================================================
     // Never replacing, never outliving a full key
     // ========================================================================
@@ -585,5 +599,27 @@ describe.skipIf(!dbAvailable)('a key held to a reach (#524)', () =>
 
         expect(await errorOf(response)).toMatchObject({ status: 409, code: 'KeyIdAlreadyRegisteredError' });
         expect((await keyRow(keyPair.keyId)).expiresAt).toEqual(expiresAt);
+    });
+
+    // ========================================================================
+    // Below the router
+    // ========================================================================
+
+    // The one row that enters below the router: every door that passes
+    // `route: null` (a one-time token, a grant's, the device flows' approver)
+    // sits behind a route that already refused the narrowed key, so nothing
+    // driven through the router can tell this step admitting it apart.
+    it('B-D: admitPrincipal with the narrowed key\'s credential and route: null answers keyOutOfReach', async () =>
+    {
+        const { session } = await narrowedKey();
+
+        const admission = await admitPrincipal({
+            userId,
+            credential: { kind: 'deviceKey', keyId: session.keyId },
+            route: null,
+            presentedOn: null,
+        });
+
+        expect(admission).toEqual({ refused: { reason: 'keyOutOfReach', reach: 'opsTokens' } });
     });
 });
