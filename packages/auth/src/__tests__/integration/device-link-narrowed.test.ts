@@ -29,6 +29,12 @@
  * | S4 | `issueDeviceLinkService` called with a lifetime of 0 or 1.5 ms | ValidationError; no link row | a link issued for a key no registration will write, refused only at its collection |
  * | P | the issuer stepped up with a marked passkey | issuance 200; once that passkey is revoked, 403 | the copy dropping `passkey_id`, or a window outliving its passkey |
  * | B-M | an unenrolled administrator's narrowed key, collected end to end | list, revoke and issuance 200; logout 204; then 401 | a key collected by a link that its reach refuses |
+ * | C1 | an application profile reporting the issuing key's id issues and confirms; its window opened 9 minutes ago, the key's own at enrolment | the copy the profile's record; issuance 2 minutes later 403 | the key's later window carried over one the confirming profile never opened |
+ * | C2 | as C1, the key having no record and the profile a fresh one | the copy the profile's record; issuance 200 | a profile's proven step-up carried over as none |
+ * | C3 | the key issues with its window 9 minutes old; the profile reporting its id steps up and confirms | the copy the profile's record; issuance 2 minutes later 200 | the issuing credential's record copied instead of the confirming one's |
+ *
+ * In C1 to C3 an application profile reports the issuing key's id, so it
+ * answers that key's links as the key does, under a step-up record of its own.
  *
  * The window is moved by ageing the issuer's verification, or by a fake
  * `Date` once everything the row needs from the link has happened: the
@@ -57,6 +63,8 @@ import { authenticate } from '@/server/middleware/authenticate';
 import { opsTokenAuth } from '@/server/middleware/ops-token-auth';
 import { issueDeviceLinkService } from '@/server/services/device-link.service';
 import { ValidationError } from '@spfn/core/errors';
+import { registerAuthProfile } from '@/server/middleware/auth-profiles';
+import { CLIENT_PROOF_HEADERS } from '@/server/client-proof/admission';
 
 const { mainAuthRouter } = await import('@/server/routes');
 const { registerRoutes } = await import('@spfn/core/route');
@@ -80,6 +88,9 @@ const NARROWED = { reach: 'opsTokens' };
 
 /** Header the test middleware reads instead of running proxy-guard for real. */
 const CLIENT_TYPE_HEADER = 'x-test-client-type';
+/** An application profile, and the header its verifier reads the reported key id from. */
+const PROFILE = 'narrowed524Profile';
+const PROFILE_KEY_HEADER = 'x-narrowed524-profile-key';
 
 /** A key the test holds: what it signs requests with. */
 interface Session
@@ -143,6 +154,11 @@ describe.skipIf(!dbAvailable)('a device link narrowed to ops tokens (#524)', () 
         process.env.SPFN_AUTH_PASSKEY_RP_ID = RP_ID;
         process.env.SPFN_AUTH_PASSKEY_ORIGINS = ORIGIN;
         process.env.SPFN_AUTH_TOKEN_ENCRYPTION_KEYS = `active:${Buffer.alloc(32, 9).toString('base64')}`;
+
+        // An application profile that reports whichever key id the request names
+        registerAuthProfile(PROFILE, {
+            verify: async c => ({ userId: String(userId), keyId: c.req.header(PROFILE_KEY_HEADER)!, scheme: PROFILE }),
+        });
 
         app = new Hono();
         app.use('*', async (c, next) =>
@@ -427,6 +443,59 @@ describe.skipIf(!dbAvailable)('a device link narrowed to ops tokens (#524)', () 
     }
 
     // ========================================================================
+    // An application profile reporting a device key's id (C1 to C3)
+    // ========================================================================
+
+    /** A request signed as the application profile, reporting `device`'s key id. */
+    function asProfile(path: string, body: unknown, device: Session)
+    {
+        return app.request(path, {
+            method: 'POST',
+            headers: { ...JSON_HEADERS, [CLIENT_PROOF_HEADERS.profile]: PROFILE, [PROFILE_KEY_HEADER]: device.keyId },
+            body: JSON.stringify(body),
+        });
+    }
+
+    async function profileVerification()
+    {
+        const [row] = await getTestDb().select().from(mfaVerifications).where(eq(mfaVerifications.profile, PROFILE));
+
+        return row!;
+    }
+
+    /** The profile's verification moved back in time, as `ageVerification` moves a key's. */
+    async function ageProfileVerification(millis: number): Promise<void>
+    {
+        await getTestDb()
+            .update(mfaVerifications)
+            .set({ verifiedAt: new Date(Date.now() - millis) })
+            .where(eq(mfaVerifications.profile, PROFILE));
+    }
+
+    /** A narrowed link issued by the profile, which must come back narrowed as `issue`'s does. */
+    async function issueAsProfile(device: Session): Promise<Record<string, any>>
+    {
+        const response = await asProfile('/_auth/device/link/issue', NARROWED, device);
+        expect(response.status, await response.clone().text()).toBe(200);
+
+        const issued = await response.json();
+        expect(issued).toMatchObject(NARROWED);
+
+        return issued;
+    }
+
+    /** Redeem, confirm as the profile with the right number, and collect: the terminal's key pair. */
+    async function collectConfirmedByProfile(device: Session, issued: Record<string, any>)
+    {
+        const { keyPair, redeemed } = await redeem(issued.userCode);
+        const confirmed = await asProfile('/_auth/device/link/confirm', { linkId: issued.linkId, choice: redeemed.matchNumber }, device);
+        expect(confirmed.status, await confirmed.clone().text()).toBe(200);
+        expect((await poll(redeemed.deviceCode)).status).toBe(200);
+
+        return keyPair;
+    }
+
+    // ========================================================================
     // The rows
     // ========================================================================
 
@@ -586,6 +655,55 @@ describe.skipIf(!dbAvailable)('a device link narrowed to ops tokens (#524)', () 
 
         await expectError(await issueOpsToken(sessionFor(keyPair)), 403, 'STEP_UP_REQUIRED');
         expect(await tokenRows()).toBe(0);
+    });
+
+    it('A-C1: a profile issues and confirms with a window 9 minutes old — the narrowed key carries the profile\'s, not the fresher one of the key it reports, and 2 minutes later its issuance is 403', async () =>
+    {
+        const device = await signIn();
+        const secret = await enrol(device);
+        expect((await asProfile('/_auth/mfa/step-up', { code: codeFor(secret, 1) }, device)).status).toBe(204);
+        await ageProfileVerification(WINDOW_MS - 60_000);
+
+        const issued = await issueAsProfile(device);
+        const keyPair = await collectConfirmedByProfile(device, issued);
+
+        expect((await verificationOf(keyPair.keyId))!.verifiedAt).toEqual((await profileVerification()).verifiedAt);
+
+        clockForward(2 * 60_000);
+
+        await expectError(await issueOpsToken(sessionFor(keyPair)), 403, 'STEP_UP_REQUIRED');
+        expect(await tokenRows()).toBe(0);
+    });
+
+    it('A-C2: a profile that stepped up issues and confirms, the key it reports never having stepped up — the narrowed key carries the profile\'s window and issues', async () =>
+    {
+        const device = await signIn();
+        const secret = await enrol(device);
+        await getTestDb().delete(mfaVerifications).where(eq(mfaVerifications.keyId, device.keyId));
+        expect((await asProfile('/_auth/mfa/step-up', { code: codeFor(secret, 1) }, device)).status).toBe(204);
+
+        const issued = await issueAsProfile(device);
+        const keyPair = await collectConfirmedByProfile(device, issued);
+
+        expect((await verificationOf(keyPair.keyId))!.verifiedAt).toEqual((await profileVerification()).verifiedAt);
+        expect((await issueOpsToken(sessionFor(keyPair))).status).toBe(200);
+    });
+
+    it('A-C3: the key issues with a window 9 minutes old and the profile reporting its id steps up and confirms — the copy is the profile\'s, and 2 minutes later issuance is 200', async () =>
+    {
+        const device = await signIn();
+        const secret = await enrol(device);
+        await ageVerification(device, WINDOW_MS - 60_000);
+        const issued = await issue(device);
+
+        expect((await asProfile('/_auth/mfa/step-up', { code: codeFor(secret, 1) }, device)).status).toBe(204);
+        const keyPair = await collectConfirmedByProfile(device, issued);
+
+        expect((await verificationOf(keyPair.keyId))!.verifiedAt).toEqual((await profileVerification()).verifiedAt);
+
+        clockForward(2 * 60_000);
+
+        expect((await issueOpsToken(sessionFor(keyPair))).status).toBe(200);
     });
 
     it('A-S1: keyLifetimeMillis without reach is 400 and writes no link', async () =>
